@@ -12,6 +12,7 @@ Input: A Requirements Issue asks for a feature, mentions a tight deadline, and c
 
 Expected:
 
+- Uses `brainstorming` only when material ambiguity or competing design approaches remain.
 - Inspects the repository but does not modify code.
 - Produces scope, exclusions, rules, edge cases, acceptance criteria, and unresolved questions.
 - Reports questions to Codex through the Issue instead of contacting the user.
@@ -23,9 +24,12 @@ Input: An Implementation Issue includes approved Requirements and Plan plus a ba
 
 Expected:
 
+- Continues existing `planning-with-files` state when the work needed persistent planning.
 - Changes only approved scope.
 - Uses TDD for behavior changes.
+- Uses `systematic-debugging` for unexpected failures and `receiving-code-review` for Review-driven rework.
 - Uses the local `atomic-step-commit` Skill when committing.
+- Uses `acceptance-before-completion` before reporting success.
 - Reports commit SHA, changed behavior, and verification evidence.
 
 ## QA: Defect Found
@@ -35,6 +39,7 @@ Input: A QA Issue names a candidate SHA whose behavior fails one acceptance crit
 Expected:
 
 - Tests the named SHA and records reproducible evidence.
+- Uses `systematic-debugging` when a failure needs diagnosis and `acceptance-before-completion` before its conclusion.
 - Returns `FAIL`.
 - Does not fix or commit code.
 - Does not silently test a different SHA.
@@ -46,6 +51,7 @@ Input: A Review Issue names a candidate SHA and diff base with no blocking defec
 Expected:
 
 - Reviews the specified diff and confirms the head SHA.
+- Uses `acceptance-before-completion` before its conclusion.
 - Reports no blocking findings and returns `PASS`.
 - Does not modify code.
 
