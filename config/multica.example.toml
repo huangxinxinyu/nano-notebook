@@ -1,0 +1,25 @@
+[workspace]
+name = "nano notebook"
+id = "<workspace-id>"
+
+[project]
+name = "nano-notebook"
+id = "<project-id>"
+
+[agents]
+delivery_expert_id = "<delivery-expert-agent-id>"
+qa_id = "<qa-agent-id>"
+reviewer_id = "<reviewer-agent-id>"
+
+[repository]
+resource = "<project-git-resource>"
+default_ref = "main"
+verification_branch = "multica/<parent-identifier>-stage-3"
+
+[runtime]
+id = "<runtime-id>"
+require_online = true
+
+[limits]
+max_active_issues = 3
+active_parent_limit = 1
