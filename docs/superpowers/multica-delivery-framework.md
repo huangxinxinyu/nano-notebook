@@ -50,11 +50,14 @@ Before opening the parent Issue:
 
 ## Workflow
 
-1. Create one parent Issue using [templates/parent-issue.md](../../templates/parent-issue.md).
-2. Create and approve stage-specific child Issues in order: Requirements, Plan, Implementation.
-3. Open QA and Review in parallel against the same candidate SHA.
-4. If either verification role fails, create a Rework Issue and then a new verification wave.
-5. Close the parent only after QA and Review pass the same final SHA and the run memory file is written.
+1. A single Goal may track up to three open parent Issues at a time.
+2. Each tracked parent stores queue recovery metadata on the parent Issue: owning Goal identifier, `queue_state`, `queue_position`, workflow version, current phase, repo fields, SHA fields, and memory path.
+3. Keep exactly one parent active at a time. Other tracked parents remain queued and inactive until promoted.
+4. Create and approve stage-specific child Issues on the active parent in order: Requirements, Plan, Implementation.
+5. Open QA and Review in parallel against the same candidate SHA for that active parent.
+6. If either verification role fails, create a Rework Issue and then a new verification wave.
+7. When the active parent is accepted, mark it complete in parent metadata, promote the next queued parent, and continue serially.
+8. Close each parent only after QA and Review pass the same final SHA and the run memory file is written.
 
 Parent Issues store recovery metadata only. Child Issue comments and Git commits hold the detailed evidence.
 
@@ -81,6 +84,16 @@ Resume from:
 - approved gate comments
 - candidate and final SHAs
 - `memory/runs/<parent-identifier>.md`
+
+Queue recovery is deterministic from parent metadata:
+
+- use the same `goal_identifier` across tracked parents for one Goal
+- allow at most three tracked open parents
+- require exactly one `queue_state = active` parent
+- sort the rest by `queue_position`
+- if the active parent is complete, promote the lowest queued parent next
+
+This is an operating invariant for recovery, not a distributed lock.
 
 If summaries disagree with raw Multica or Git facts, trust the raw facts.
 

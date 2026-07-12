@@ -12,8 +12,11 @@ Use the parent Issue for recovery metadata and workflow summary only. Detailed a
 
 Set or maintain these parent metadata keys:
 
-- `workflow_version`: `multica-delivery-v1`
-- `current_phase`: `<requirements|plan|implementation|verification|rework|accepted>`
+- `workflow_version`: `multica-delivery/v1`
+- `phase`: `<requirements|plan|implementation|verification|rework|accepted>`
+- `goal_identifier`: `<codex-goal-id-or-stable-local-label>`
+- `queue_state`: `<queued|active|complete>`
+- `queue_position`: `<1|2|3>`
 - `memory_path`: `memory/runs/<parent-identifier>.md`
 - `candidate_sha`: `<sha-or-empty>`
 - `final_sha`: `<sha-or-empty>`
@@ -27,6 +30,13 @@ Set or maintain these parent metadata keys:
 - Approved Requirements comment: `<issue-or-comment-ref>`
 - Approved Plan comment: `<issue-or-comment-ref>`
 - Active verification SHA: `<sha-or-none>`
+
+Queue rules:
+
+- one Goal may track at most three open parent Issues
+- exactly one tracked parent is `queue_state = active`
+- queued parents remain inactive until Codex promotes them
+- when the active parent completes, Codex marks it `queue_state = complete` and promotes the next queued parent by queue position
 
 ## Completion Guard
 

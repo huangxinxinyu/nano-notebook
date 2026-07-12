@@ -42,12 +42,15 @@ If any preflight check fails, stop and resolve it before creating workflow Issue
 
 ## Workflow Contract
 
-1. Create one parent Issue for the requirement and record only recovery metadata there.
-2. Create stage-specific child Issues from the repository templates.
-3. Advance gates in order: Requirements, Plan, Implementation, then QA and Review in parallel.
-4. Give QA and Review the same candidate SHA.
-5. If QA or Review blocks acceptance, create a Rework Issue and then a new verification wave for the new SHA.
-6. Close the parent only after both verification roles pass the same final SHA and the memory record is written.
+1. A single Goal may track up to three open parent Issues at a time.
+2. Record queue recovery metadata on each parent Issue, including the owning Goal identifier, `queue_state` (`queued|active|complete`), and queue position.
+3. Keep exactly one parent Issue active at a time. Other tracked parents stay queued and inactive until promoted.
+4. Create and advance stage-specific child Issues only for the active parent Issue.
+5. Advance gates on the active parent in order: Requirements, Plan, Implementation, then QA and Review in parallel.
+6. Give QA and Review the same candidate SHA on that active parent.
+7. If QA or Review blocks acceptance, create a Rework Issue and then a new verification wave for the new SHA.
+8. When the active parent reaches accepted state, mark it `queue_state = complete`, promote the next queued parent, and continue serially.
+9. Close a parent only after both verification roles pass the same final SHA and the memory record is written.
 
 Multica stores workflow history. Git stores code, commits, and memory files. Do not duplicate full logs across both systems.
 
