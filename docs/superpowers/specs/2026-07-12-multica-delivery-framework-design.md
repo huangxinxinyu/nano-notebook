@@ -23,14 +23,14 @@ V1 delivers:
 
 V1 does not deliver:
 
-- Release, merge, deployment, tagging, or production observation.
+- Release, deployment, tagging, or production observation.
 - A custom CLI, service, database, or workflow engine.
 - Multica Squad integration.
 - A resident headless coordinator outside Codex Goal mode.
 - Multi-Goal locking, leases, heartbeat, or automatic takeover.
 - A polished public distribution package. Public extraction follows local validation.
 
-The delivery endpoint is a Codex-accepted final commit SHA with QA and Review evidence, not a release.
+Codex-owned fast-forward-only acceptance merge and target-branch push are in scope after exact-SHA QA and Review pass. The delivery endpoint is the accepted candidate SHA becoming the target branch SHA with QA and Review evidence, not a release.
 
 ## 3. Design Principles
 
@@ -154,7 +154,7 @@ Reviewer reports defects through its Issue and does not fix them.
 
 Every requirement has one parent Issue. Child Issues carry the actual Agent assignments.
 
-The parent Issue keeps only the workflow metadata needed for deterministic recovery: workflow version, current phase, repository identity, memory path, candidate branch, target branch, recorded target head SHA, candidate SHA, and final SHA. Detailed outputs remain in child Issue comments and Git.
+The parent Issue keeps only the workflow metadata needed for deterministic recovery: workflow version, current phase, `goal_identifier`, `queue_state`, `queue_position`, repository identity, canonical memory path `memory/runs/<parent-identifier>.md`, candidate branch, target branch, recorded target head SHA, candidate SHA, and final SHA. Detailed outputs remain in child Issue comments and Git.
 
 A stage is an execution-wave number on a child Issue. It groups parallel work and makes completion visible; it does not assign an Agent, approve output, or enforce the business workflow.
 
@@ -281,7 +281,7 @@ The user can ask Codex to continue a named Multica parent Issue. Codex reconstru
 - Child Issues grouped by stage.
 - Comments, runs, and run messages.
 - Candidate and final Git SHAs.
-- `memory/runs/<issue-id>.md` when present.
+- `memory/runs/<parent-identifier>.md` when present.
 
 When records conflict, raw Multica history and Git facts take precedence over summaries. Codex pauses only if the conflict changes the safe next action.
 
