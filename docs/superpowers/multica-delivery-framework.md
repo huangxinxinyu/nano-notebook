@@ -43,7 +43,7 @@ Before opening the parent Issue:
 
 1. Confirm the request explicitly opted into Multica delivery.
 2. Confirm the target repository and scope.
-3. Confirm the Workspace is `nano notebook`.
+3. Confirm the Workspace selected by local configuration is the intended target.
 4. Confirm the Project, role Agents, and Runtime exist and are usable.
 5. Inspect the repository for pre-existing changes that must be preserved.
 6. Restate the interpreted scope and wait for one confirmation.

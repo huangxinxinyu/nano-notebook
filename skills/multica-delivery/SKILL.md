@@ -33,7 +33,7 @@ Use the repository templates in `templates/` when creating the parent Issue and 
 Before opening the parent Issue, confirm:
 
 1. The target repository and requested scope are known.
-2. The configured Workspace is `nano notebook`.
+2. The configured Workspace selected by local configuration is the intended target.
 3. The configured Project and the three role Agents exist.
 4. A compatible Runtime is online.
 5. Existing repository changes are identified and must be preserved.

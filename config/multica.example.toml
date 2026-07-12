@@ -1,9 +1,9 @@
 [workspace]
-name = "nano notebook"
+name = "<workspace-name>"
 id = "<workspace-id>"
 
 [project]
-name = "nano-notebook"
+name = "<project-name>"
 id = "<project-id>"
 
 [agents]
