@@ -93,7 +93,7 @@ Evidence:
 - Issue comment history showing the rejected gate.
 - No later-stage Issue created before the correction lands.
 
-## 7. Real Implementation and Commit
+## 7. Candidate Push Success
 
 Input: An Implementation Issue with approved Requirements and Plan.
 
@@ -101,30 +101,110 @@ Expected:
 
 - Delivery Expert changes only approved scope.
 - Focused tests or checks run.
-- The result includes a reachable candidate SHA.
+- Delivery Expert pushes the named candidate branch without force.
+- The result includes a reachable candidate SHA and remote candidate branch.
 
 Evidence:
 
 - Candidate SHA in the Implementation Issue result.
+- Remote branch in the Implementation Issue result.
 - Git history showing the reported commit or commits.
 - Verification commands and results.
 
-## 8. Parallel Verification on One SHA
+## 8. Push Failure or Unreachable Remote
+
+Input: An Implementation or Rework Issue cannot push the candidate branch or cannot prove the reported SHA is reachable on the named remote branch.
+
+Expected:
+
+- The result is `BLOCKED`, not `PASS`.
+- The blocker names the failed push or remote reachability proof.
+- QA and Review are not opened for the unverified SHA.
+
+Evidence:
+
+- Implementation or Rework result comment.
+- No verification-wave Issues for that SHA.
+
+## 9. Remote SHA Verification Before QA and Review
 
 Input: Codex opens verification after accepting Implementation.
 
 Expected:
 
 - QA and Review child Issues are created in the same stage.
-- Both Issues name the same candidate SHA.
+- Codex verifies the remote candidate branch tip before creating them.
+- Both Issues name the same remote candidate branch and candidate SHA.
 - QA and Review validate only that SHA.
 
 Evidence:
 
 - QA and Review Issue descriptions.
+- Codex evidence that the remote branch tip matches the candidate SHA.
 - QA and Review result comments.
 
-## 9. Rework Wave Creation
+## 10. Fast-Forward Acceptance Merge
+
+Input: QA and Review both pass the same remote candidate branch and candidate SHA.
+
+Expected:
+
+- Codex fast-forward merges the accepted candidate SHA into the configured target branch.
+- Codex pushes the target branch.
+- The accepted candidate SHA becomes the target branch SHA.
+- No merge commit is introduced.
+
+Evidence:
+
+- Parent acceptance comment or metadata.
+- Git history showing a fast-forward update with the accepted SHA at the target branch tip.
+
+## 11. Target Branch Drift Blocks Merge
+
+Input: The target branch head changes after candidate creation but before acceptance merge.
+
+Expected:
+
+- Acceptance is blocked.
+- Codex creates an integration or rework path based on the new target head.
+- QA and Review rerun against the replacement candidate SHA.
+
+Evidence:
+
+- Parent metadata showing the recorded `target_head_sha`.
+- Acceptance or rework comments showing the detected drift and new work item.
+
+## 12. Merge or Push Failure Stays Blocked
+
+Input: The acceptance fast-forward merge or target-branch push fails.
+
+Expected:
+
+- The parent remains incomplete.
+- The failure is recorded as a concrete blocker.
+- The workflow does not claim the parent is accepted.
+
+Evidence:
+
+- Acceptance comment or metadata.
+- Parent Issue status and absence of a false completion record.
+
+## 13. Force Push and Self-Merge Are Prohibited
+
+Input: An operator or Agent attempts to force push the candidate branch or asks Delivery Expert to merge its own output.
+
+Expected:
+
+- The framework rejects the force-push path.
+- Delivery Expert does not perform the merge.
+- Codex remains the only role allowed to merge the accepted candidate into the target branch.
+
+Evidence:
+
+- Skill, workflow, and template contract text.
+- No Agent result claiming a merge step.
+
+## 14. Rework Wave Creation
 
 Input: QA or Review returns `FAIL`.
 
@@ -140,7 +220,7 @@ Evidence:
 - Rework Issue result naming the replacement SHA.
 - Verification rerun Issues naming the new SHA.
 
-## 10. Recovery From Queued Parent State
+## 15. Recovery From Queued Parent State
 
 Input: A Codex session is interrupted mid-workflow and later resumes the same parent Issue.
 
@@ -156,7 +236,7 @@ Evidence:
 - Parent metadata showing deterministic queue state.
 - No duplicated completed stages.
 
-## 11. Serial Promotion
+## 16. Serial Promotion
 
 Input: The active parent reaches accepted state while another tracked parent remains queued.
 
@@ -171,7 +251,7 @@ Evidence:
 - Parent metadata before and after promotion.
 - Child Issue activity only on the promoted active parent.
 
-## 12. Final Memory Creation
+## 17. Final Memory Creation
 
 Input: QA and Review both pass the same final SHA.
 

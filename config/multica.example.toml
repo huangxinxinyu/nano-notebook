@@ -14,7 +14,8 @@ reviewer_id = "<reviewer-agent-id>"
 [repository]
 resource = "<project-git-resource>"
 default_ref = "main"
-verification_branch = "multica/<parent-identifier>"
+candidate_branch = "multica/<parent-identifier>"
+target_branch = "main"
 
 [runtime]
 id = "<runtime-id>"

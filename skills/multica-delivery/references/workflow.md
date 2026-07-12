@@ -55,16 +55,24 @@ Stages are execution-wave numbers for audit and recovery. They do not approve ou
 
 - Requirements: parent Issue, normalized user request, repository context, and any relevant design/spec references.
 - Plan: approved Requirements result and any resolved gate clarifications.
-- Implementation: approved Requirements, approved Plan, baseline SHA, and any explicit safety exclusions.
-- QA: approved Requirements, approved Plan, baseline SHA, candidate SHA, and the coverage focus.
-- Review: approved Requirements, approved Plan, baseline SHA, candidate SHA, and the exact diff range.
-- Rework: the specific QA/Review findings to address, the baseline from the failed wave, and the candidate SHA being replaced.
+- Implementation: approved Requirements, approved Plan, baseline SHA, candidate branch, target branch, recorded target head SHA, and any explicit safety exclusions.
+- QA: approved Requirements, approved Plan, baseline SHA, candidate branch, candidate SHA, and the coverage focus.
+- Review: approved Requirements, approved Plan, baseline SHA, candidate branch, candidate SHA, and the exact diff range.
+- Rework: the specific QA/Review findings to address, the baseline from the failed wave, the candidate branch, the target branch, and the candidate SHA being replaced.
 
 ## Role Boundaries
 
 - Codex alone creates Issues, approves gates, and communicates with the user.
 - Delivery Expert is the only code-writing Agent.
 - QA and Reviewer inspect the named SHA only and remain read-only.
+- Codex alone performs the accepted fast-forward merge into the target branch.
+
+## Candidate Transport
+
+- Delivery Expert runs the required checks, commits the approved change, and pushes the candidate branch.
+- Never force push the candidate branch.
+- Codex verifies the remote candidate branch and SHA before opening QA and Review.
+- QA and Review must inspect the same remote candidate branch tip and reported candidate SHA.
 
 ## Final Acceptance
 
@@ -72,8 +80,14 @@ Accept delivery only when:
 
 - Requirements and Plan are approved
 - implementation remains in approved scope
-- the final SHA is verifiable in Git
+- the candidate SHA is reachable on the named remote candidate branch
 - QA and Review both pass the same final SHA
+- the recorded target branch head still matches the current target branch head
+- the accepted candidate can be applied as a fast-forward update to the target branch
 - the memory record exists at the canonical path
 
-Then update the parent metadata to `queue_state = complete` and promote the next queued parent by moving it to `queue_state = active`. Promotion is a deterministic operating step, not a distributed lock.
+Codex verifies the remote candidate branch and SHA before opening QA and Review.
+
+If the target branch head moved after candidate creation, stop acceptance and create an integration or rework path from the new target head before another verification wave.
+
+Then Codex fast-forward merges the accepted candidate SHA into the target branch, updates the parent metadata to `queue_state = complete`, and promotes the next queued parent by moving it to `queue_state = active`. Promotion is a deterministic operating step, not a distributed lock.

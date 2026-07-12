@@ -8,18 +8,19 @@ Verify the exact candidate SHA against the approved acceptance criteria.
 - Approved Requirements result: `<requirements-comment-ref>`
 - Approved Plan result: `<plan-comment-ref>`
 - Baseline SHA: `<baseline-sha>`
+- Candidate branch: `<candidate-branch>`
 - Candidate SHA: `<candidate-sha>`
 - Coverage focus: `<acceptance-and-risk-focus>`
 
 ## Scope
 
-- Verify only the named candidate SHA.
+- Verify only the named candidate branch and candidate SHA.
 - Treat committed source as read-only.
 - Select the smallest credible test set that covers positive, negative, boundary, and regression risk relevant to the change.
 
 ## Deliverables
 
-- Confirm the verified SHA.
+- Confirm the verified branch and SHA.
 - Record the commands, environment, and meaningful results.
 - Return one conclusion: `PASS`, `FAIL`, or `BLOCKED`.
 

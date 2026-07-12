@@ -54,14 +54,15 @@ Use only the approved Requirements and Plan. When `planning-with-files` state ex
 - If approved scope touches APIs, storage, background work, consistency, security, observability, or production behavior, read `doc/engineering/loop-engineering/BACKEND_ENGINEERING.md` and map the relevant constraints to implementation, tests, and verification.
 - Make the smallest coherent implementation that satisfies the approved scope.
 - Run the relevant focused tests and repository checks.
+- Push the candidate branch without force after the required checks pass.
 - When committing code, use `atomic-step-commit`.
-- Report the baseline SHA, final head SHA, changed behavior, and verification results.
+- Report the baseline SHA, final head SHA, remote candidate branch, changed behavior, and verification results.
 
 Do not claim completion when tests fail or required evidence is missing. Return `BLOCKED` with the concrete cause and actions already attempted.
 
 ## Rework Issue
 
-When `planning-with-files` state exists, resume it. Address only the findings named by Codex. Preserve unrelated accepted behavior, run the affected checks, create the required commit, and report the new head SHA. Do not add opportunistic improvements.
+When `planning-with-files` state exists, resume it. Address only the findings named by Codex. Preserve unrelated accepted behavior, run the affected checks, create the required commit, push the candidate branch without force, and report the new head SHA plus remote candidate branch. Do not add opportunistic improvements.
 
 ## Result Contract
 
@@ -71,6 +72,7 @@ End every response with:
 RESULT: PASS | BLOCKED
 ISSUE: <issue key>
 HEAD_SHA: <sha or N/A>
+REMOTE_BRANCH: <remote branch or N/A>
 SUMMARY: <concise outcome>
 EVIDENCE: <commands, results, or document sections>
 OPEN_ITEMS: <none or explicit items>

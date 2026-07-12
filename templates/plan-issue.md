@@ -22,6 +22,7 @@ Produce an implementation-ready execution plan for the approved Requirements.
 - Current behavior and relevant code boundaries.
 - Target behavior and affected components.
 - Ordered implementation steps and dependencies.
+- Candidate branch, target branch, and verification or acceptance handoff strategy when the scope changes code.
 - Risks, compatibility concerns, and rollback thinking.
 - TDD or contract-first verification strategy mapped to acceptance criteria.
 

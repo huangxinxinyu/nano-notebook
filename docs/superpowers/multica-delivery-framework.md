@@ -51,13 +51,17 @@ Before opening the parent Issue:
 ## Workflow
 
 1. A single Goal may track up to three open parent Issues at a time.
-2. Each tracked parent stores queue recovery metadata on the parent Issue: owning Goal identifier, `queue_state`, `queue_position`, workflow version, current phase, repo fields, SHA fields, and memory path.
+2. Each tracked parent stores queue recovery metadata on the parent Issue: owning Goal identifier, `queue_state`, `queue_position`, workflow version, current phase, repo fields, branch fields, SHA fields, and memory path.
 3. Keep exactly one parent active at a time. Other tracked parents remain queued and inactive until promoted.
 4. Create and approve stage-specific child Issues on the active parent in order: Requirements, Plan, Implementation.
-5. Open QA and Review in parallel against the same candidate SHA for that active parent.
-6. If either verification role fails, create a Rework Issue and then a new verification wave.
-7. When the active parent is accepted, mark it complete in parent metadata, promote the next queued parent, and continue serially.
-8. Close each parent only after QA and Review pass the same final SHA and the run memory file is written.
+5. Delivery Expert runs the required checks, commits the approved change, and pushes the named candidate branch without force.
+6. Codex verifies the remote branch tip matches the reported candidate SHA before dispatching QA and Review.
+7. Open QA and Review in parallel against the same candidate branch and candidate SHA for that active parent.
+8. If either verification role fails, create a Rework Issue and then a new verification wave.
+9. If the target branch head changes after candidate creation, stop acceptance, create an integration or rework path from the new target head, and rerun verification on the replacement SHA.
+10. When QA and Review both pass, Codex performs a fast-forward-only merge of the accepted candidate SHA into the target branch and pushes the target branch.
+11. When the active parent is accepted, mark it complete in parent metadata, promote the next queued parent, and continue serially.
+12. Close each parent only after the accepted candidate SHA becomes the target branch SHA and the run memory file is written.
 
 Parent Issues store recovery metadata only. Child Issue comments and Git commits hold the detailed evidence.
 
@@ -70,8 +74,9 @@ consistency, security, observability, or production behavior.
 
 - Requirements: scope, exclusions, rules, edge cases, and acceptance criteria are clear enough to implement.
 - Plan: file boundaries, implementation steps, risks, and verification strategy are executable.
-- Implementation: the candidate SHA exists, the diff stays in scope, and the evidence is credible.
-- Verification: QA and Review both pass the same candidate SHA.
+- Implementation: the candidate SHA is pushed to the named remote candidate branch, the diff stays in scope, and the evidence is credible.
+- Verification: QA and Review both pass the same remote candidate SHA.
+- Acceptance merge: the recorded target head still matches the live target head, the merge is fast-forward only, and Codex performs the push.
 
 Focused correction stays on the same Issue when the output is incomplete but the accepted code state does not need to change. Rework creates a new stage wave when implementation must change or a new SHA is required.
 
@@ -90,6 +95,7 @@ Queue recovery is deterministic from parent metadata:
 - use the same `goal_identifier` across tracked parents for one Goal
 - allow at most three tracked open parents
 - require exactly one `queue_state = active` parent
+- record the candidate branch, target branch, and `target_head_sha`
 - sort the rest by `queue_position`
 - if the active parent is complete, promote the lowest queued parent next
 
@@ -108,7 +114,7 @@ The framework is considered usable only when a real Multica-driven run against t
 - ordinary coding requests bypass the workflow
 - explicit invocation opens the correct Workspace and Project
 - Requirements, Plan, Implementation, QA, Review, and Rework stages behave as designed
-- QA and Review verify the same candidate SHA
+- QA and Review verify the same remote candidate branch and candidate SHA
 - final acceptance writes the memory record
 
 Use [evals/multica-delivery-framework-v1.md](../../evals/multica-delivery-framework-v1.md) as the scenario checklist for that run.

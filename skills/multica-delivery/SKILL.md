@@ -47,10 +47,15 @@ If any preflight check fails, stop and resolve it before creating workflow Issue
 3. Keep exactly one parent Issue active at a time. Other tracked parents stay queued and inactive until promoted.
 4. Create and advance stage-specific child Issues only for the active parent Issue.
 5. Advance gates on the active parent in order: Requirements, Plan, Implementation, then QA and Review in parallel.
-6. Give QA and Review the same candidate SHA on that active parent.
-7. If QA or Review blocks acceptance, create a Rework Issue and then a new verification wave for the new SHA.
-8. When the active parent reaches accepted state, mark it `queue_state = complete`, promote the next queued parent, and continue serially.
-9. Close a parent only after both verification roles pass the same final SHA and the memory record is written.
+6. Delivery Expert pushes the candidate branch after required checks pass.
+7. Never force push the candidate branch.
+8. Codex verifies the remote candidate branch and SHA before opening QA and Review.
+9. Give QA and Review the same remote candidate branch and SHA on that active parent.
+10. If QA or Review blocks acceptance, create a Rework Issue and then a new verification wave for the new SHA.
+11. Only Codex may fast-forward merge the accepted candidate into the target branch.
+12. If the target branch head moved after candidate creation, block acceptance, create an integration or rework path from the new target head, and rerun verification on the replacement SHA.
+13. When the active parent reaches accepted state, mark it `queue_state = complete`, promote the next queued parent, and continue serially.
+14. Close a parent only after both verification roles pass the same final SHA, the accepted candidate SHA becomes the target branch SHA, and the memory record is written.
 
 Multica stores workflow history. Git stores code, commits, and memory files. Do not duplicate full logs across both systems.
 

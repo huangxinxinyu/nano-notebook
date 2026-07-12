@@ -120,7 +120,7 @@ Its behavior depends on the assigned Issue type:
 
 - Requirements: inspect the request and repository; produce goal, in-scope behavior, out-of-scope behavior, business rules, edge cases, acceptance criteria, and unresolved questions; do not write code.
 - Plan: produce current-state analysis, target behavior, impact surface, implementation steps, risks, test strategy, and rollback thinking; do not write code.
-- Implementation: work only within approved Requirements and Plan, use TDD, run relevant checks, commit the result, and report the candidate SHA.
+- Implementation: work only within approved Requirements and Plan, use TDD, run relevant checks, commit the result, push the candidate branch without force, and report the candidate SHA plus remote candidate branch.
 - Rework: address only the findings named by Codex without expanding scope.
 
 When committing code, the Delivery Expert uses the local `atomic-step-commit` Skill.
@@ -154,7 +154,7 @@ Reviewer reports defects through its Issue and does not fix them.
 
 Every requirement has one parent Issue. Child Issues carry the actual Agent assignments.
 
-The parent Issue keeps only the workflow metadata needed for deterministic recovery: workflow version, current phase, repository identity, memory path, candidate SHA, and final SHA. Detailed outputs remain in child Issue comments and Git.
+The parent Issue keeps only the workflow metadata needed for deterministic recovery: workflow version, current phase, repository identity, memory path, candidate branch, target branch, recorded target head SHA, candidate SHA, and final SHA. Detailed outputs remain in child Issue comments and Git.
 
 A stage is an execution-wave number on a child Issue. It groups parallel work and makes completion visible; it does not assign an Agent, approve output, or enforce the business workflow.
 
@@ -238,7 +238,7 @@ Codex checks that the SHA exists, the changes match the approved scope, and the 
 
 ### 10.5 Verification Gate
 
-Codex creates QA and Review Issues in the same stage and assigns them in parallel. Both Issues must name the same candidate SHA.
+Codex creates QA and Review Issues in the same stage and assigns them in parallel. Both Issues must name the same remote candidate branch and candidate SHA.
 
 Multica stage completion means both Agents submitted results. The gate passes only when Codex accepts both results as `PASS` for the same SHA.
 
@@ -252,13 +252,13 @@ Codex accepts delivery only when:
 
 - Requirements and Plan have approved records.
 - The implementation remains within approved scope.
-- The final commit and its repository state are verifiable.
+- The final commit is reachable on the named remote candidate branch.
 - QA and Reviewer passed the same final SHA.
 - No blocking finding or unresolved workflow Issue remains.
 - The parent and effective child Issue states are consistent.
 - The requirement memory record has been written.
 
-Codex then records the final SHA and closes the parent Issue. V1 performs no merge or release action.
+Codex then verifies that the current target branch head still matches the head recorded at candidate creation, fast-forward merges the accepted candidate SHA into the target branch, pushes the target branch, records the final SHA, and closes the parent Issue. If the target branch moved, acceptance is blocked until Codex creates an integration or rework path from the new target head and the replacement candidate passes verification.
 
 ## 11. Automation and Escalation
 
@@ -299,7 +299,7 @@ memory/
 Each requirement has one lightweight file:
 
 ```text
-memory/runs/<parent-issue-id>.md
+memory/runs/<parent-identifier>.md
 ```
 
 Codex is the only writer. The file contains approved requirement and plan summaries, key decisions, final SHA, QA and Review evidence references, outcome, and reusable lessons. It does not copy full comments, run transcripts, or test logs from Multica.
@@ -355,7 +355,7 @@ After implementation, a Codex Goal uses the framework to deliver a real, small c
 4. Codex assigns each child Issue to the correct Agent without user micromanagement.
 5. An incomplete Requirements or Plan output is blocked from advancing.
 6. Delivery Expert implements and commits a real change.
-7. QA and Reviewer run in parallel against the same candidate SHA.
+7. QA and Reviewer run in parallel against the same remote candidate branch and candidate SHA.
 8. One deliberately failed verification produces a Rework wave and a new verification wave.
 9. Codex can reconstruct the workflow from the parent Issue.
 10. Final acceptance creates the lightweight memory record.

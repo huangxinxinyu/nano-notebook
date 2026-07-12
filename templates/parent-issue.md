@@ -18,7 +18,10 @@ Set or maintain these parent metadata keys:
 - `queue_state`: `<queued|active|complete>`
 - `queue_position`: `<1|2|3>`
 - `memory_path`: `memory/runs/<parent-identifier>.md`
+- `candidate_branch`: `<remote-candidate-branch>`
 - `candidate_sha`: `<sha-or-empty>`
+- `target_branch`: `<target-branch>`
+- `target_head_sha`: `<sha-recorded-at-candidate-creation>`
 - `final_sha`: `<sha-or-empty>`
 - `repo_resource`: `<project-git-resource>`
 - `repo_default_ref`: `<default-ref>`
@@ -26,6 +29,9 @@ Set or maintain these parent metadata keys:
 ## Recovery Notes
 
 - Baseline SHA: `<baseline-sha>`
+- Candidate branch: `<remote-candidate-branch>`
+- Target branch: `<target-branch>`
+- Recorded target head at candidate creation: `<target-head-sha>`
 - Current stage wave: `<stage-number>`
 - Approved Requirements comment: `<issue-or-comment-ref>`
 - Approved Plan comment: `<issue-or-comment-ref>`
@@ -40,4 +46,4 @@ Queue rules:
 
 ## Completion Guard
 
-Close the parent only after Requirements and Plan are approved, QA and Review pass the same final SHA, and the memory record exists at `memory/runs/<parent-identifier>.md`.
+Close the parent only after Requirements and Plan are approved, QA and Review pass the same final SHA, the accepted candidate SHA becomes the target branch SHA through a Codex-owned fast-forward merge, and the memory record exists at `memory/runs/<parent-identifier>.md`.
