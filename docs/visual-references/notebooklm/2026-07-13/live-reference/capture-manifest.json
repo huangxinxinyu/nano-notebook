@@ -1,0 +1,95 @@
+{
+  "captured_at": "2026-07-13T09:43:05.236Z",
+  "captures": [
+    {
+      "slug": "product",
+      "url": "https://notebooklm.google.com/",
+      "viewport": {
+        "slug": "1440x900",
+        "width": 1440,
+        "height": 900
+      },
+      "file": "product-1440x900.png",
+      "captured_at": "2026-07-13T09:43:05.236Z",
+      "status": 200,
+      "final_url": "https://accounts.google.com/v3/signin/identifier?continue=https%3A%2F%2Fnotebooklm.google.com%2Flogin%3Fcontinue%3Dhttps%3A%2F%2Fnotebooklm.google.com%2F&dsh=S-449638124%3A1783935787767921&followup=https%3A%2F%2Fnotebooklm.google.com%2Flogin%3Fcontinue%3Dhttps%3A%2F%2Fnotebooklm.google.com%2F&osid=1&passive=1209600&flowName=WebLiteSignIn&flowEntry=ServiceLogin&ifkv=Ac50bxu6mh6BxksMOwsJNKcebOzvJE-EZr6rIeFvl6au_sXrGpyqqncCbVU58Bymbm8AfLwWZHbX",
+      "title": "Sign in - Google Accounts",
+      "body_excerpt": "Sign in Use your Google Account Email or phone Forgot email? Not your computer? Use a private browsing window to sign in. Learn more about using Guest mode Next Create account Afrikaans azərbaycan bosanski català Čeština Cymraeg Dansk Deutsch eesti English (United Kingdom) English (United States) Español (España) Español (Latinoamérica) euskara Filipino Français (Canada) Français (France) Gaeilge galego Hrvatski Indonesia isiZulu íslenska Italiano Kiswahili latviešu lietuvių magyar Melayu Nederl"
+    },
+    {
+      "slug": "product",
+      "url": "https://notebooklm.google.com/",
+      "viewport": {
+        "slug": "390x844",
+        "width": 390,
+        "height": 844
+      },
+      "file": "product-390x844.png",
+      "captured_at": "2026-07-13T09:43:05.236Z",
+      "status": 200,
+      "final_url": "https://accounts.google.com/v3/signin/identifier?continue=https%3A%2F%2Fnotebooklm.google.com%2Flogin%3Fcontinue%3Dhttps%3A%2F%2Fnotebooklm.google.com%2F&dsh=S-754141167%3A1783935792523126&followup=https%3A%2F%2Fnotebooklm.google.com%2Flogin%3Fcontinue%3Dhttps%3A%2F%2Fnotebooklm.google.com%2F&osid=1&passive=1209600&flowName=WebLiteSignIn&flowEntry=ServiceLogin&ifkv=Ac50bxuX-FouhC8E7FZlIMNWxVM2vYydQOBu27yFeoL5Rk3w6cimr9cOOw0bhQ7OFtO5Ol8uqM0-Jg",
+      "title": "Sign in - Google Accounts",
+      "body_excerpt": "Sign in Use your Google Account Email or phone Forgot email? Not your computer? Use a private browsing window to sign in. Learn more about using Guest mode Next Create account Afrikaans azərbaycan bosanski català Čeština Cymraeg Dansk Deutsch eesti English (United Kingdom) English (United States) Español (España) Español (Latinoamérica) euskara Filipino Français (Canada) Français (France) Gaeilge galego Hrvatski Indonesia isiZulu íslenska Italiano Kiswahili latviešu lietuvių magyar Melayu Nederl"
+    },
+    {
+      "slug": "help-create-use",
+      "url": "https://support.google.com/notebooklm/answer/16206563?hl=en",
+      "viewport": {
+        "slug": "1440x900",
+        "width": 1440,
+        "height": 900
+      },
+      "file": "help-create-use-1440x900.png",
+      "captured_at": "2026-07-13T09:43:05.236Z",
+      "status": 200,
+      "final_url": "https://support.google.com/notebooklm/answer/16206563?hl=en",
+      "title": "Create a notebook in NotebookLM - NotebookLM Help",
+      "body_excerpt": "Skip to main content NotebookLM Help Sign in NotebookLM Create a notebook in NotebookLM Important: At this time, the NotebookLM mobile app may have limitations to this feature. Learn more about the supported features in the NotebookLM mobile app. In NotebookLM, you can create individual notebooks. A notebook is a collection of sources for a specific project. Tip: Each notebook is independent. NotebookLM can’t access information across multiple notebooks at the same time. Get started with your fi"
+    },
+    {
+      "slug": "help-create-use",
+      "url": "https://support.google.com/notebooklm/answer/16206563?hl=en",
+      "viewport": {
+        "slug": "390x844",
+        "width": 390,
+        "height": 844
+      },
+      "file": "help-create-use-390x844.png",
+      "captured_at": "2026-07-13T09:43:05.236Z",
+      "status": 200,
+      "final_url": "https://support.google.com/notebooklm/answer/16206563?hl=en",
+      "title": "Create a notebook in NotebookLM - NotebookLM Help",
+      "body_excerpt": "Skip to main content NotebookLM Help Sign in Create a notebook in NotebookLM Important: At this time, the NotebookLM mobile app may have limitations to this feature. Learn more about the supported features in the NotebookLM mobile app. In NotebookLM, you can create individual notebooks. A notebook is a collection of sources for a specific project. Tip: Each notebook is independent. NotebookLM can’t access information across multiple notebooks at the same time. Get started with your first noteboo"
+    },
+    {
+      "slug": "help-chat",
+      "url": "https://support.google.com/notebooklm/answer/16179559?hl=en",
+      "viewport": {
+        "slug": "1440x900",
+        "width": 1440,
+        "height": 900
+      },
+      "file": "help-chat-1440x900.png",
+      "captured_at": "2026-07-13T09:43:05.236Z",
+      "status": 200,
+      "final_url": "https://support.google.com/notebooklm/answer/16179559?hl=en",
+      "title": "Use chat in NotebookLM - NotebookLM Help",
+      "body_excerpt": "Skip to main content NotebookLM Help Sign in NotebookLM Use chat in NotebookLM Important: At this time, the NotebookLM mobile app may have limitations to this feature. Learn more about the supported features in the NotebookLM mobile app. After uploading your sources, you can: Ask the model questions about your source material. Give the model instructions to perform actions. NotebookLM uses direct quotes, text, and images straight from your sources as citations to answer your questions and perfor"
+    },
+    {
+      "slug": "help-chat",
+      "url": "https://support.google.com/notebooklm/answer/16179559?hl=en",
+      "viewport": {
+        "slug": "390x844",
+        "width": 390,
+        "height": 844
+      },
+      "file": "help-chat-390x844.png",
+      "captured_at": "2026-07-13T09:43:05.236Z",
+      "status": 200,
+      "final_url": "https://support.google.com/notebooklm/answer/16179559?hl=en",
+      "title": "Use chat in NotebookLM - NotebookLM Help",
+      "body_excerpt": "Skip to main content NotebookLM Help Sign in Use chat in NotebookLM Important: At this time, the NotebookLM mobile app may have limitations to this feature. Learn more about the supported features in the NotebookLM mobile app. After uploading your sources, you can: Ask the model questions about your source material. Give the model instructions to perform actions. NotebookLM uses direct quotes, text, and images straight from your sources as citations to answer your questions and perform actions. "
+    }
+  ]
+}
