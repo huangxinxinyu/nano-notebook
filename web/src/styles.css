@@ -127,6 +127,23 @@ h2 {
   padding: 0 12px;
 }
 
+.field-error,
+.form-error {
+  margin: 0;
+  color: #9f1239;
+}
+
+.field-error {
+  font-size: 0.9rem;
+}
+
+.form-error {
+  border: 1px solid #fecdd3;
+  border-radius: 8px;
+  background: #fff1f2;
+  padding: 10px 12px;
+}
+
 .segmented {
   display: grid;
   grid-template-columns: 1fr 1fr;

@@ -1,17 +1,18 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import * as Label from "@radix-ui/react-label";
 import * as Tabs from "@radix-ui/react-tabs";
-import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { ArrowLeft, BookOpen, Languages, Library, LogOut, Plus, Search, ShieldCheck } from "lucide-react";
-import { FormEvent, useState } from "react";
+import { useState } from "react";
+import { useForm } from "react-hook-form";
 import { Toaster, toast } from "sonner";
 import { z } from "zod";
+import { Button } from "../components/ui/Button";
+import { Field } from "../components/ui/Field";
+import { queryClient } from "./queryClient";
 
 type Locale = "en" | "zh";
 type User = { id: string; email: string };
 type Notebook = { id: string; title: string; recent_at?: string };
-
-const queryClient = new QueryClient();
 
 const strings = {
   en: {
@@ -43,7 +44,15 @@ const strings = {
     outputsEmpty: "Outputs are reserved without generation controls in this sprint.",
     unreachable: "Control Plane is unreachable. Retry after starting the local system.",
     validation: "Use a valid email, a 15+ character password, and a notebook title.",
-    safeNotFound: "Notebook not found or unavailable."
+    safeNotFound: "Notebook not found or unavailable.",
+    credentialsValidation: "Use a valid email and a 15+ character password.",
+    titleValidation: "Enter a notebook title.",
+    duplicateEmail: "Email is already registered for this local workspace.",
+    invalidCredentials: "Email or password is incorrect.",
+    rateLimited: "Too many attempts. Retry shortly.",
+    notebookQuota: "Notebook limit reached.",
+    notebookCreateFailed: "Notebook could not be created. Retry after checking the local system.",
+    submitting: "Working..."
   },
   zh: {
     languageSwitch: "切换到 English",
@@ -74,7 +83,15 @@ const strings = {
     outputsEmpty: "本迭代仅保留输出区域，不提供生成控件。",
     unreachable: "无法连接 Control Plane。请先启动本地系统后重试。",
     validation: "请输入有效邮箱、至少 15 个字符的密码，以及笔记本标题。",
-    safeNotFound: "笔记本不存在或不可访问。"
+    safeNotFound: "笔记本不存在或不可访问。",
+    credentialsValidation: "请输入有效邮箱和至少 15 个字符的密码。",
+    titleValidation: "请输入笔记本标题。",
+    duplicateEmail: "该邮箱已在本地工作区注册。",
+    invalidCredentials: "邮箱或密码不正确。",
+    rateLimited: "尝试次数过多，请稍后重试。",
+    notebookQuota: "笔记本数量已达上限。",
+    notebookCreateFailed: "无法创建笔记本。请检查本地系统后重试。",
+    submitting: "处理中..."
   }
 } satisfies Record<Locale, Record<string, string>>;
 
@@ -86,6 +103,9 @@ const credentialsSchema = z.object({
 const notebookSchema = z.object({
   title: z.string().trim().min(1).max(160)
 });
+
+type CredentialsForm = z.infer<typeof credentialsSchema>;
+type NotebookForm = z.infer<typeof notebookSchema>;
 
 export function App() {
   return (
@@ -143,31 +163,42 @@ function AppShell() {
 
 function AuthScreen({ t, locale, onLocale, onAuthed }: { t: typeof strings.en; locale: Locale; onLocale: () => void; onAuthed: (user: User) => void }) {
   const [mode, setMode] = useState<"register" | "sign-in">("register");
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const { register, handleSubmit, reset, formState } = useForm<CredentialsForm>({
+    defaultValues: { email: "", password: "" }
+  });
+  const busy = formState.isSubmitting;
 
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    const parsed = credentialsSchema.safeParse({ email, password });
+  async function submit(values: CredentialsForm) {
+    const parsed = credentialsSchema.safeParse(values);
     if (!parsed.success) {
-      toast.error(t.validation);
+      setFormError(t.credentialsValidation);
       return;
     }
-    setBusy(true);
+    setFormError(null);
     try {
       const response = await api(`/api/v1/auth/${mode === "register" ? "register" : "sign-in"}`, {
         method: "POST",
         body: JSON.stringify(parsed.data)
       });
-      if (!response.ok) throw new Error(t.validation);
+      if (!response.ok) {
+        const message = authErrorMessage(t, mode, await responseErrorCode(response));
+        setFormError(message);
+        toast.error(message);
+        return;
+      }
       const payload = (await response.json()) as { user: User };
       onAuthed(payload.user);
     } catch {
+      setFormError(t.unreachable);
       toast.error(t.unreachable);
-    } finally {
-      setBusy(false);
     }
+  }
+
+  function changeMode(value: string) {
+    setMode(value as "register" | "sign-in");
+    setFormError(null);
+    reset(undefined, { keepValues: true });
   }
 
   return (
@@ -179,16 +210,17 @@ function AuthScreen({ t, locale, onLocale, onAuthed }: { t: typeof strings.en; l
           <h1 id="auth-title">{t.app}</h1>
         </div>
         <p>{t.subtitle}</p>
-        <Tabs.Root value={mode} onValueChange={(value) => setMode(value as "register" | "sign-in")}>
+        <Tabs.Root value={mode} onValueChange={changeMode}>
           <Tabs.List className="segmented" aria-label="Authentication mode">
             <Tabs.Trigger value="register">{t.createAccount}</Tabs.Trigger>
             <Tabs.Trigger value="sign-in">{t.signIn}</Tabs.Trigger>
           </Tabs.List>
         </Tabs.Root>
-        <form className="stack" onSubmit={submit}>
-          <Field id="email" label={t.email} value={email} onChange={setEmail} autoComplete="email" />
-          <Field id="password" label={t.password} value={password} onChange={setPassword} type="password" autoComplete={mode === "register" ? "new-password" : "current-password"} />
-          <button className="primary" disabled={busy}>{mode === "register" ? t.createAccount : t.signIn}</button>
+        <form className="stack" onSubmit={handleSubmit(submit)} noValidate>
+          {formError ? <p role="alert" className="form-error">{formError}</p> : null}
+          <Field id="email" label={t.email} registration={register("email")} autoComplete="email" />
+          <Field id="password" label={t.password} registration={register("password")} type="password" autoComplete={mode === "register" ? "new-password" : "current-password"} />
+          <Button disabled={busy}>{busy ? t.submitting : mode === "register" ? t.createAccount : t.signIn}</Button>
         </form>
         <p className="notice"><ShieldCheck aria-hidden="true" /> {locale === "en" ? t.localOnly : t.localOnly}</p>
       </section>
@@ -219,7 +251,7 @@ function LibraryScreen({ t, user, onLocale, onOpen, onSignedOut }: { t: typeof s
         <div className="brand-small"><Library aria-hidden="true" /><span>{t.app}</span></div>
         <div className="topbar-actions">
           <LanguageButton label={t.languageSwitch} onClick={onLocale} />
-          <button className="icon-text" onClick={signOut}><LogOut aria-hidden="true" />{t.signOut}</button>
+          <Button variant="icon-text" onClick={signOut}><LogOut aria-hidden="true" />{t.signOut}</Button>
         </div>
       </header>
       <section className="library-heading">
@@ -229,7 +261,7 @@ function LibraryScreen({ t, user, onLocale, onOpen, onSignedOut }: { t: typeof s
         </div>
         <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>
           <Dialog.Trigger asChild>
-            <button className="primary"><Plus aria-hidden="true" />{t.newNotebook}</button>
+            <Button><Plus aria-hidden="true" />{t.newNotebook}</Button>
           </Dialog.Trigger>
           <CreateNotebookDialog t={t} onOpen={onOpen} onClose={() => setDialogOpen(false)} />
         </Dialog.Root>
@@ -245,10 +277,10 @@ function LibraryScreen({ t, user, onLocale, onOpen, onSignedOut }: { t: typeof s
         {notebooks.data?.length === 0 && query ? <p className="empty-line">{t.noResults}</p> : null}
         {notebooks.data?.length === 0 && !query ? <EmptyLibrary t={t} /> : null}
         {notebooks.data?.map((notebook) => (
-          <button className="notebook-card" key={notebook.id} onClick={() => onOpen(notebook.id)}>
+          <Button variant="notebook-card" key={notebook.id} onClick={() => onOpen(notebook.id)}>
             <BookOpen aria-hidden="true" />
             <span>{notebook.title}</span>
-          </button>
+          </Button>
         ))}
       </section>
     </main>
@@ -256,31 +288,37 @@ function LibraryScreen({ t, user, onLocale, onOpen, onSignedOut }: { t: typeof s
 }
 
 function CreateNotebookDialog({ t, onOpen, onClose }: { t: typeof strings.en; onOpen: (id: string) => void; onClose: () => void }) {
-  const [title, setTitle] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const { register, handleSubmit, formState } = useForm<NotebookForm>({
+    defaultValues: { title: "" }
+  });
+  const busy = formState.isSubmitting;
 
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    const parsed = notebookSchema.safeParse({ title });
+  async function submit(values: NotebookForm) {
+    const parsed = notebookSchema.safeParse(values);
     if (!parsed.success) {
-      toast.error(t.validation);
+      setFormError(t.titleValidation);
       return;
     }
-    setBusy(true);
+    setFormError(null);
     try {
       const response = await api("/api/v1/notebooks", {
         method: "POST",
         headers: { "Idempotency-Key": crypto.randomUUID(), "X-CSRF-Token": csrfToken() },
         body: JSON.stringify(parsed.data)
       });
-      if (!response.ok) throw new Error(t.unreachable);
+      if (!response.ok) {
+        const message = notebookErrorMessage(t, await responseErrorCode(response));
+        setFormError(message);
+        toast.error(message);
+        return;
+      }
       const payload = (await response.json()) as { notebook: Notebook };
       onClose();
       onOpen(payload.notebook.id);
     } catch {
+      setFormError(t.unreachable);
       toast.error(t.unreachable);
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -289,11 +327,12 @@ function CreateNotebookDialog({ t, onOpen, onClose }: { t: typeof strings.en; on
       <Dialog.Overlay className="overlay" />
       <Dialog.Content className="dialog">
         <Dialog.Title>{t.newNotebook}</Dialog.Title>
-        <form className="stack" onSubmit={submit}>
-          <Field id="notebook-title" label={t.titleLabel} value={title} onChange={setTitle} autoFocus />
+        <form className="stack" onSubmit={handleSubmit(submit)} noValidate>
+          {formError ? <p role="alert" className="form-error">{formError}</p> : null}
+          <Field id="notebook-title" label={t.titleLabel} registration={register("title")} autoFocus />
           <div className="dialog-actions">
-            <Dialog.Close asChild><button type="button" className="secondary">{t.cancel}</button></Dialog.Close>
-            <button className="primary" disabled={busy}>{t.createNotebook}</button>
+            <Dialog.Close asChild><Button type="button" variant="secondary">{t.cancel}</Button></Dialog.Close>
+            <Button disabled={busy}>{busy ? t.submitting : t.createNotebook}</Button>
           </div>
         </form>
       </Dialog.Content>
@@ -315,7 +354,7 @@ function Workspace({ t, notebookID, onLocale, onLibrary }: { t: typeof strings.e
   return (
     <main className="workspace-layout">
       <header className="topbar">
-        <button className="icon-text" onClick={onLibrary}><ArrowLeft aria-hidden="true" />{t.back}</button>
+        <Button variant="icon-text" onClick={onLibrary}><ArrowLeft aria-hidden="true" />{t.back}</Button>
         <LanguageButton label={t.languageSwitch} onClick={onLocale} />
       </header>
       {notebook.isLoading ? <p>{t.loading}</p> : null}
@@ -359,22 +398,36 @@ function EmptyLibrary({ t }: { t: typeof strings.en }) {
 }
 
 function LanguageButton({ label, onClick }: { label: string; onClick: () => void }) {
-  return <button className="icon-text" onClick={onClick} aria-label={label}><Languages aria-hidden="true" />{label}</button>;
-}
-
-function Field({ id, label, value, onChange, type = "text", autoComplete, autoFocus }: { id: string; label: string; value: string; onChange: (value: string) => void; type?: string; autoComplete?: string; autoFocus?: boolean }) {
-  return (
-    <div className="field">
-      <Label.Root htmlFor={id}>{label}</Label.Root>
-      <input id={id} value={value} type={type} autoComplete={autoComplete} autoFocus={autoFocus} onChange={(event) => onChange(event.target.value)} />
-    </div>
-  );
+  return <Button variant="icon-text" onClick={onClick} aria-label={label}><Languages aria-hidden="true" />{label}</Button>;
 }
 
 async function api(path: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
   if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   return fetch(path, { credentials: "include", ...init, headers });
+}
+
+async function responseErrorCode(response: Response) {
+  try {
+    const payload = (await response.json()) as { error?: { code?: string } };
+    return payload.error?.code ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function authErrorMessage(t: typeof strings.en, mode: "register" | "sign-in", code: string) {
+  if (mode === "register" && code === "duplicate_email") return t.duplicateEmail;
+  if (mode === "sign-in" && (code === "invalid_credentials" || code === "unauthorized")) return t.invalidCredentials;
+  if (code === "rate_limited") return t.rateLimited;
+  if (code === "validation_failed") return t.credentialsValidation;
+  return t.unreachable;
+}
+
+function notebookErrorMessage(t: typeof strings.en, code: string) {
+  if (code === "quota_reached") return t.notebookQuota;
+  if (code === "validation_failed") return t.titleValidation;
+  return t.notebookCreateFailed;
 }
 
 function csrfToken() {
