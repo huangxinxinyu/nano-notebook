@@ -77,13 +77,18 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
 		return
 	}
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil || cookie.Value == "" {
+		writeError(w, r, http.StatusUnauthorized, "session_missing", "error.session_missing")
+		return
+	}
 	user, ok := s.currentUser(r)
 	if !ok {
-		writeError(w, r, http.StatusUnauthorized, "unauthorized", "error.session_expired")
+		writeError(w, r, http.StatusUnauthorized, "session_expired", "error.session_expired")
 		return
 	}
 	var scopedUser identity.User
-	err := s.withRequestPrincipal(r.Context(), user.ID, func(identityStore *identity.Store, _ *notebook.Store) error {
+	err = s.withRequestPrincipal(r.Context(), user.ID, func(identityStore *identity.Store, _ *notebook.Store) error {
 		var ok bool
 		scopedUser, ok = identityStore.UserByID(r.Context(), user.ID)
 		if !ok {
@@ -92,7 +97,7 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
-		writeError(w, r, http.StatusUnauthorized, "unauthorized", "error.session_expired")
+		writeError(w, r, http.StatusUnauthorized, "session_expired", "error.session_expired")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"user": scopedUser})

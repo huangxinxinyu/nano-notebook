@@ -177,6 +177,28 @@ func TestCookieMutationsRequireMatchingCSRFCookieAndHeader(t *testing.T) {
 	}
 }
 
+func TestSessionUnauthorizedDistinguishesMissingAndExpired(t *testing.T) {
+	api := newTestAPI(t)
+
+	missing := api.getWithCookie(t, "/api/v1/session", nil)
+	if missing.Code != http.StatusUnauthorized {
+		t.Fatalf("missing session status = %d, body = %s", missing.Code, missing.Body.String())
+	}
+	missingErr := decodeError(t, missing)
+	if missingErr.Code != "session_missing" || missingErr.MessageKey != "error.session_missing" {
+		t.Fatalf("missing session error = %+v", missingErr)
+	}
+
+	expired := api.getWithCookie(t, "/api/v1/session", &http.Cookie{Name: "nn_session", Value: "stale-token"})
+	if expired.Code != http.StatusUnauthorized {
+		t.Fatalf("expired session status = %d, body = %s", expired.Code, expired.Body.String())
+	}
+	expiredErr := decodeError(t, expired)
+	if expiredErr.Code != "session_expired" || expiredErr.MessageKey != "error.session_expired" {
+		t.Fatalf("expired session error = %+v", expiredErr)
+	}
+}
+
 func TestSessionCookiesCarryRequiredAttributesAndClearOnSignOut(t *testing.T) {
 	api := newTestAPI(t)
 	sessionCookie, csrfCookie := api.registerWithCSRF(t, "cookies@example.com")

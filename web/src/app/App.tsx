@@ -17,6 +17,7 @@ import { queryClient } from "./queryClient";
 type Locale = "en" | "zh";
 type User = { id: string; email: string };
 type Notebook = { id: string; title: string; recent_at?: string };
+type SessionState = { status: "anonymous" | "expired" } | { status: "authenticated"; user: User };
 
 const strings = {
   en: {
@@ -59,7 +60,10 @@ const strings = {
     retry: "Retry",
     signOutFailed: "Sign out failed. Retry to revoke the server session.",
     signingOut: "Signing out...",
-    submitting: "Working..."
+    submitting: "Working...",
+    sessionExpired: "Your session expired or was revoked. Sign in again to continue.",
+    authModeLabel: "Authentication mode",
+    notebookPanelsLabel: "Notebook panels"
   },
   zh: {
     languageSwitch: "切换到 English",
@@ -101,7 +105,10 @@ const strings = {
     retry: "重试",
     signOutFailed: "退出登录失败。请重试以撤销服务器会话。",
     signingOut: "正在退出...",
-    submitting: "处理中..."
+    submitting: "处理中...",
+    sessionExpired: "会话已过期或被撤销。请重新登录以继续。",
+    authModeLabel: "认证方式",
+    notebookPanelsLabel: "笔记本面板"
   }
 } satisfies Record<Locale, Record<string, string>>;
 
@@ -141,14 +148,19 @@ function AppShell() {
     queryKey: ["session"],
     queryFn: async () => {
       const response = await api("/api/v1/session");
-      if (response.status === 401) return null;
+      if (response.status === 401) {
+        const code = await responseErrorCode(response);
+        return { status: code === "session_expired" ? "expired" : "anonymous" } satisfies SessionState;
+      }
       if (!response.ok) throw new Error(t.unreachable);
-      return ((await response.json()) as { user: User }).user;
+      const payload = (await response.json()) as { user: User };
+      return { status: "authenticated", user: payload.user } satisfies SessionState;
     },
     retry: false
   });
 
-  const activeUser = user ?? session.data ?? null;
+  const activeUser = user ?? (session.data?.status === "authenticated" ? session.data.user : null);
+  const sessionNotice = !user && session.data?.status === "expired" ? t.sessionExpired : null;
 
   function switchLocale() {
     const next = locale === "en" ? "zh" : "en";
@@ -168,18 +180,18 @@ function AppShell() {
     return <SystemState t={t} onLocale={switchLocale} message={t.unreachable} alert onRetry={() => void session.refetch()} />;
   }
   if (!activeUser) {
-    return <AuthScreen t={t} locale={locale} onLocale={switchLocale} onAuthed={setUser} />;
+    return <AuthScreen t={t} locale={locale} sessionNotice={sessionNotice} onLocale={switchLocale} onAuthed={setUser} />;
   }
   if (notebookID) {
     return <Workspace t={t} onLocale={switchLocale} user={activeUser} notebookID={notebookID} onLibrary={() => navigate("/")} />;
   }
   return <LibraryScreen t={t} onLocale={switchLocale} user={activeUser} onOpen={(id) => navigate(`/notebooks/${id}`)} onSignedOut={() => {
-    queryClient.setQueryData(["session"], null);
+    queryClient.setQueryData(["session"], { status: "anonymous" } satisfies SessionState);
     setUser(null);
   }} />;
 }
 
-function AuthScreen({ t, locale, onLocale, onAuthed }: { t: typeof strings.en; locale: Locale; onLocale: () => void; onAuthed: (user: User) => void }) {
+function AuthScreen({ t, locale, sessionNotice, onLocale, onAuthed }: { t: typeof strings.en; locale: Locale; sessionNotice: string | null; onLocale: () => void; onAuthed: (user: User) => void }) {
   const [mode, setMode] = useState<"register" | "sign-in">("register");
   const [formError, setFormError] = useState<string | null>(null);
   const { register, handleSubmit, reset, formState } = useForm<CredentialsForm>({
@@ -229,12 +241,13 @@ function AuthScreen({ t, locale, onLocale, onAuthed }: { t: typeof strings.en; l
         </div>
         <p>{t.subtitle}</p>
         <Tabs value={mode} onValueChange={changeMode}>
-          <TabsList className="segmented" aria-label="Authentication mode">
+          <TabsList className="segmented" aria-label={t.authModeLabel}>
             <TabsTrigger value="register">{t.createAccount}</TabsTrigger>
             <TabsTrigger value="sign-in">{t.signIn}</TabsTrigger>
           </TabsList>
         </Tabs>
         <form className="stack" onSubmit={handleSubmit(submit)} noValidate>
+          {sessionNotice ? <Alert variant="destructive"><AlertDescription>{sessionNotice}</AlertDescription></Alert> : null}
           {formError ? <Alert variant="destructive"><AlertDescription>{formError}</AlertDescription></Alert> : null}
           <div className="field">
             <Label htmlFor="email">{t.email}</Label>
@@ -400,7 +413,7 @@ function Workspace({ t, notebookID, onLocale, onLibrary }: { t: typeof strings.e
         <>
           <h1>{notebook.data.title}</h1>
           <Tabs defaultValue="sources" className="workspace-grid">
-            <TabsList className="workspace-tabs" aria-label="Notebook panels">
+            <TabsList className="workspace-tabs" aria-label={t.notebookPanelsLabel}>
               <TabsTrigger value="sources">{t.sources}</TabsTrigger>
               <TabsTrigger value="chat">{t.chat}</TabsTrigger>
               <TabsTrigger value="outputs">{t.outputs}</TabsTrigger>

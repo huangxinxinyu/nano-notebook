@@ -24,7 +24,7 @@ The implementation ports the compatible shadcn `new-york` primitives needed for 
 | --- | --- | --- |
 | `frontend/components.json` | `web/components.json` | Kept `new-york`, `tsx`, CSS variables, neutral base color, and Lucide; changed `rsc` to `false`, CSS path to `src/styles.css`, and retained Vite-compatible aliases as evidence rather than a Next runtime contract. |
 | `frontend/src/lib/utils.ts` | `web/src/lib/utils.ts` | Copied `clsx` + `tailwind-merge` `cn` utility; import formatting adapted to repository semicolon style. |
-| `frontend/src/components/ui/button.tsx` | `web/src/components/ui/button.tsx` | Ported `Slot`, `class-variance-authority`, `buttonVariants`, `asChild`, size, and upstream variant names. Tailwind utility strings are mapped to centralized `nn-button*` classes because this Vite app preserves its plain CSS runtime. |
+| `frontend/src/components/ui/button.tsx` | `web/src/components/ui/button.tsx` | Ported `Slot`, `class-variance-authority`, `buttonVariants`, `asChild`, size, and upstream variant names. Tailwind utility strings are mapped to centralized `nn-button*` component-layer classes so the Vite/Tailwind v4 build processes the adopted variant path while preserving Nano Notebook tokens. |
 | `frontend/src/components/ui/input.tsx` | `web/src/components/ui/input.tsx` | Ported data-slot input primitive and `cn` composition; style tokens moved to `web/src/styles.css`. |
 | `frontend/src/components/ui/label.tsx` | `web/src/components/ui/label.tsx` | Ported Radix Label primitive and data-slot shape; removed Next `"use client"` directive. |
 | `frontend/src/components/ui/alert.tsx` | `web/src/components/ui/alert.tsx` | Ported `cva` alert variants and title/description composition; style tokens moved to `web/src/styles.css`. |
@@ -44,4 +44,4 @@ The product screens now compose the adopted primitives directly:
 - Retryable and validation failures use the ported `Alert` composition.
 - Buttons use the ported shadcn `buttonVariants`; screen-specific layout is supplied as composition classes such as `icon-action`, `create-notebook-action`, and `library-item-action`.
 
-No additional base primitive was introduced in this correction. `web/src/styles.css` contains the centralized token layer and component layer classes used by the ported primitives.
+No additional base primitive was introduced in this correction. `web/src/styles.css` imports Tailwind v4 and `tw-animate-css`, then defines the centralized token layer and component-layer classes used by the ported primitives. The Vite production build uses `web/postcss.config.mjs` with `@tailwindcss/postcss`, so adopted shadcn primitives run through the configured Tailwind pipeline rather than a dependency-only/plain-CSS runtime.

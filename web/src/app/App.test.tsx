@@ -16,7 +16,7 @@ beforeEach(() => {
     const url = String(input);
     const method = init?.method ?? "GET";
     if (url.endsWith("/api/v1/session")) {
-      return json({ error: { code: "unauthorized" } }, 401);
+      return json({ error: { code: "session_missing", message_key: "error.session_missing" } }, 401);
     }
     if (url.endsWith("/api/v1/auth/register")) {
       return json({ user: { id: "usr_test", email: "learner@example.com" } }, 201);
@@ -65,8 +65,48 @@ test("defaults to Simplified Chinese for zh browser locales and can switch langu
 
   await screen.findByLabelText("邮箱");
   expect(screen.getByRole("button", { name: "切换到 English" })).toBeInTheDocument();
+  expect(screen.getByRole("tablist", { name: "认证方式" })).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "切换到 English" }));
   expect(await screen.findByRole("button", { name: "Switch to 简体中文" })).toBeInTheDocument();
+  expect(screen.getByRole("tablist", { name: "Authentication mode" })).toBeInTheDocument();
+});
+
+test("keeps first anonymous visit free of expired session feedback", async () => {
+  render(<App />);
+
+  await screen.findByRole("button", { name: "Create account" });
+  expect(screen.queryByText("Your session expired or was revoked. Sign in again to continue.")).not.toBeInTheDocument();
+});
+
+test("shows stale expired session feedback on the auth screen", async () => {
+  fetchHandler = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/session")) {
+      return json({ error: { code: "session_expired", message_key: "error.session_expired" } }, 401);
+    }
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("Your session expired or was revoked. Sign in again to continue.");
+  expect(screen.getByRole("button", { name: "Create account" })).toBeInTheDocument();
+});
+
+test("shows localized stale session feedback for Simplified Chinese", async () => {
+  Object.defineProperty(window.navigator, "language", { value: "zh-CN", configurable: true });
+  fetchHandler = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/session")) {
+      return json({ error: { code: "session_expired", message_key: "error.session_expired" } }, 401);
+    }
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("会话已过期或被撤销。请重新登录以继续。");
+  expect(screen.getByRole("button", { name: "创建账号" })).toBeInTheDocument();
 });
 
 test("surfaces duplicate registration as a distinct localized error", async () => {

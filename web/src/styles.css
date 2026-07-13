@@ -1,3 +1,6 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
 @layer theme, base, components;
 
 @layer theme {
@@ -413,7 +416,14 @@ h2 {
 }
 
 .workspace-tabs {
-  display: none;
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  margin-bottom: 2px;
+  padding: 4px;
+  border-radius: 8px;
+  background: #e7ebe1;
 }
 
 .workspace-panel {
@@ -477,12 +487,7 @@ h2 {
 
   .workspace-tabs {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 4px;
     margin-bottom: 10px;
-    padding: 4px;
-    border-radius: 8px;
-    background: #e7ebe1;
   }
 
   .workspace-panel {
