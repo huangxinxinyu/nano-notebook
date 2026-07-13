@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+
+cat >"$tmpdir/docker" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+state_dir="${NANO_FAKE_DOCKER_STATE:?}"
+log="$state_dir/docker.log"
+printf '%s\n' "$*" >>"$log"
+
+if [[ "$*" == "compose -f infra/compose/compose.yaml up -d postgres" ]]; then
+  exit 0
+fi
+
+if [[ "$*" == *" exec -T postgres pg_isready "* ]]; then
+  if [[ "$*" == *" -h 127.0.0.1 "* && "$*" == *" -p 5432 "* ]]; then
+    attempts_file="$state_dir/tcp-ready-attempts"
+    attempts=0
+    if [[ -f "$attempts_file" ]]; then
+      attempts="$(cat "$attempts_file")"
+    fi
+    attempts=$((attempts + 1))
+    printf '%s' "$attempts" >"$attempts_file"
+    if (( attempts < 2 )); then
+      exit 1
+    fi
+    touch "$state_dir/final-postgres-ready"
+    exit 0
+  fi
+
+  # The official image's temporary init server accepts Unix-socket readiness
+  # before the final TCP listener exists.
+  exit 0
+fi
+
+if [[ "$*" == *" exec -T postgres psql "* ]]; then
+  [[ -f "$state_dir/final-postgres-ready" ]] || exit 1
+  exit 0
+fi
+
+if [[ "$*" == *" exec -T postgres createdb "* ]]; then
+  [[ -f "$state_dir/final-postgres-ready" ]] || exit 1
+  touch "$state_dir/nano_test-created"
+  exit 0
+fi
+
+echo "unexpected docker invocation: $*" >&2
+exit 99
+SH
+
+cat >"$tmpdir/go" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+
+case "$1" in
+  list)
+    printf 'github.com/huangxinxinyu/nano-notebook/internal/app\n'
+    ;;
+  test|vet|build)
+    ;;
+  *)
+    echo "unexpected go invocation: $*" >&2
+    exit 99
+    ;;
+esac
+SH
+
+cat >"$tmpdir/gofmt" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+SH
+
+chmod +x "$tmpdir/docker" "$tmpdir/go" "$tmpdir/gofmt"
+
+export NANO_FAKE_DOCKER_STATE="$tmpdir"
+if ! PATH="$tmpdir:$PATH" "$ROOT/scripts/test-go"; then
+  echo "test-go failed before final PostgreSQL TCP readiness was observed" >&2
+  echo "fake docker calls:" >&2
+  sed 's/^/  /' "$tmpdir/docker.log" >&2
+  exit 1
+fi
+
+if [[ ! -f "$tmpdir/final-postgres-ready" ]]; then
+  echo "test-go did not wait for final PostgreSQL TCP readiness" >&2
+  exit 1
+fi
+if [[ ! -f "$tmpdir/nano_test-created" ]]; then
+  echo "test-go did not create nano_test after final PostgreSQL readiness" >&2
+  exit 1
+fi
