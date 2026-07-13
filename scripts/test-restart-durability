@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+export NANO_DATABASE_URL="${NANO_DATABASE_URL:-postgres://nano:nano@localhost:55432/nano?sslmode=disable}"
+export NANO_CONTROL_PLANE_ADDR="${NANO_CONTROL_PLANE_ADDR:-:8080}"
+export NANO_WORKER_ADDR="${NANO_WORKER_ADDR:-:8081}"
+
+control_pid=""
+worker_pid=""
+cookie_jar="$(mktemp)"
+control_log="$(mktemp)"
+worker_log="$(mktemp)"
+
+cleanup() {
+  if [[ -n "$control_pid" ]]; then kill "$control_pid" 2>/dev/null || true; fi
+  if [[ -n "$worker_pid" ]]; then kill "$worker_pid" 2>/dev/null || true; fi
+  rm -f "$cookie_jar" "$control_log" "$worker_log"
+}
+trap cleanup EXIT INT TERM
+
+start_services() {
+  go run ./cmd/control-plane >"$control_log" 2>&1 &
+  control_pid="$!"
+  go run ./cmd/worker >"$worker_log" 2>&1 &
+  worker_pid="$!"
+}
+
+stop_services() {
+  kill "$control_pid" "$worker_pid" 2>/dev/null || true
+  wait "$control_pid" 2>/dev/null || true
+  wait "$worker_pid" 2>/dev/null || true
+  control_pid=""
+  worker_pid=""
+}
+
+wait_ready() {
+  for _ in $(seq 1 60); do
+    if curl -fsS http://localhost:8080/health/ready >/dev/null 2>&1 && curl -fsS http://localhost:8081/health/ready >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "services did not become ready" >&2
+  echo "control-plane log:" >&2
+  cat "$control_log" >&2 || true
+  echo "worker log:" >&2
+  cat "$worker_log" >&2 || true
+  return 1
+}
+
+csrf_token() {
+  awk '$6 == "nn_csrf" { print $7 }' "$cookie_jar" | tail -n 1
+}
+
+docker compose -f infra/compose/compose.yaml up -d postgres
+for _ in $(seq 1 60); do
+  if docker compose -f infra/compose/compose.yaml exec -T postgres pg_isready -U nano -d nano >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+go run ./cmd/migrate
+start_services
+wait_ready
+
+email="restart-$(date +%s)-$$@example.com"
+password="unique local sprint phrase 2026"
+
+curl -fsS -c "$cookie_jar" -b "$cookie_jar" \
+  -H "Content-Type: application/json" \
+  -d "{\"email\":\"$email\",\"password\":\"$password\"}" \
+  http://localhost:8080/api/v1/auth/register >/dev/null
+
+csrf="$(csrf_token)"
+curl -fsS -c "$cookie_jar" -b "$cookie_jar" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: restart-durability" \
+  -H "X-CSRF-Token: $csrf" \
+  -d '{"title":"Restart Durable Notes"}' \
+  http://localhost:8080/api/v1/notebooks >/dev/null
+
+stop_services
+start_services
+wait_ready
+
+session_body="$(curl -fsS -b "$cookie_jar" http://localhost:8080/api/v1/session)"
+notebooks_body="$(curl -fsS -b "$cookie_jar" 'http://localhost:8080/api/v1/notebooks?query=Restart')"
+
+if [[ "$session_body" != *"$email"* ]]; then
+  echo "session did not survive restart: $session_body" >&2
+  exit 1
+fi
+if [[ "$notebooks_body" != *"Restart Durable Notes"* ]]; then
+  echo "notebook did not survive restart: $notebooks_body" >&2
+  exit 1
+fi
+
+printf '{"status":"pass","check":"restart_durability","email":"%s","notebook_title":"Restart Durable Notes"}\n' "$email"

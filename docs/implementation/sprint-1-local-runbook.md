@@ -37,11 +37,12 @@ Use browser registration from an empty state. There is no required seed account.
 NANO_TEST_DATABASE_URL='postgres://nano:nano@localhost:55432/nano_test?sslmode=disable' scripts/test-go
 scripts/test-web
 npm --prefix web run test:e2e
+scripts/test-restart-durability
 scripts/health
 scripts/stop
 ```
 
-The health command verifies PostgreSQL, MinIO, Qdrant, Bifrost, Jaeger, Control Plane, Worker, and Web readiness. The primary browser journey covers registration, session restore by server cookie, Notebook creation, search, workspace open, return to Library, sign-out, sign-in, and recovery. Playwright defines both acceptance viewports: `1440x900` and `390x844`.
+The health command verifies PostgreSQL, MinIO, Qdrant, Bifrost, Jaeger, Control Plane, Worker, and Web readiness. The primary browser journeys cover registration, reload/session restore by server cookie, Notebook creation, search, workspace open, inaccessible Notebook recovery, return to Library, sign-out, sign-in, keyboard-only completion, logical focus, and horizontal overflow checks. Playwright defines both acceptance viewports: `1440x900` and `390x844`. `scripts/test-restart-durability` creates a Notebook through the public API, restarts Control Plane and Worker processes it owns, then verifies the original cookie can still read the session and Notebook.
 
 ## Reset
 
@@ -63,4 +64,4 @@ Application logs are structured through Go `slog` and include request IDs, metho
 
 ## Visual Evidence
 
-Candidate comparison screenshots are stored under `docs/visual-references/notebooklm/2026-07-13/candidate/` for Library and workspace views at `1440x900` and `390x844`. The adjacent README records the date, reference sources, viewport targets, and notes for QA recapture without storing Google proprietary assets.
+Candidate comparison screenshots are stored under `docs/visual-references/notebooklm/2026-07-13/candidate/` for Library and workspace views at `1440x900` and `390x844`. Live reference artifacts and official NotebookLM help captures are stored under `docs/visual-references/notebooklm/2026-07-13/live-reference/`; the adjacent README records the capture date, source URL, final URL, viewport targets, and the unauthenticated live-product sign-in redirect.
