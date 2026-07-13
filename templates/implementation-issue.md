@@ -19,7 +19,7 @@ Implement the approved change and deliver a reachable candidate commit SHA for v
 - Work only within the approved Requirements and Plan.
 - Preserve pre-existing changes and unrelated files.
 - Use TDD for behavior changes and `writing-skills` when creating or changing reusable skills.
-- If approved scope touches APIs, storage, background work, consistency, security, observability, or production behavior, read `doc/engineering/BACKEND_ENGINEERING.md` and map the relevant constraints to implementation, tests, and verification.
+- If approved scope touches APIs, storage, background work, consistency, security, observability, or production behavior, read `docs/engineering/BACKEND_ENGINEERING.md` and map the relevant constraints to implementation, tests, and verification.
 - Use `systematic-debugging` only for unexpected failures.
 - Never use `git add .`; stage explicit approved paths only.
 - Push HEAD without force to the named candidate branch.

@@ -51,7 +51,7 @@ Return `BLOCKED` if the approved Requirements cannot support a safe implementati
 Use only the approved Requirements and Plan. When `planning-with-files` state exists, resume it and keep it current as implementation advances.
 
 - Follow TDD for behavior changes.
-- If approved scope touches APIs, storage, background work, consistency, security, observability, or production behavior, read `doc/engineering/BACKEND_ENGINEERING.md` and map the relevant constraints to implementation, tests, and verification.
+- If approved scope touches APIs, storage, background work, consistency, security, observability, or production behavior, read `docs/engineering/BACKEND_ENGINEERING.md` and map the relevant constraints to implementation, tests, and verification.
 - Make the smallest coherent implementation that satisfies the approved scope.
 - Run the relevant focused tests and repository checks.
 - Push the candidate branch without force after the required checks pass.
