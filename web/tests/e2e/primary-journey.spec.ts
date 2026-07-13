@@ -74,6 +74,25 @@ test("language switch exposes Simplified Chinese labels", async ({ page }) => {
   await expect(page.getByRole("tablist", { name: "认证方式" })).toBeVisible();
 });
 
+test.describe("document language and live-region localization", () => {
+  test.use({ locale: "zh-CN" });
+
+  test("tracks initial Chinese locale and explicit switching", async ({ page }) => {
+    await page.goto("/");
+    await expect(page.getByLabel("邮箱")).toBeVisible();
+    await expect.poll(() => page.evaluate(() => document.documentElement.lang)).toBe("zh-CN");
+    await expect(page.getByLabel(/通知 alt\+T/)).toBeAttached();
+
+    await page.getByRole("button", { name: "切换到 English" }).click();
+    await expect.poll(() => page.evaluate(() => document.documentElement.lang)).toBe("en");
+    await expect(page.getByLabel(/Notifications alt\+T/)).toBeAttached();
+
+    await page.getByRole("button", { name: "Switch to 简体中文" }).click();
+    await expect.poll(() => page.evaluate(() => document.documentElement.lang)).toBe("zh-CN");
+    await expect(page.getByLabel(/通知 alt\+T/)).toBeAttached();
+  });
+});
+
 test("Simplified Chinese journey exposes localized product states and a11y names", async ({ page }, testInfo) => {
   const projectSlug = testInfo.project.name.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
   const email = `zh-${projectSlug}-${Date.now()}@example.com`;

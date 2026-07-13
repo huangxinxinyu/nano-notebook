@@ -1,6 +1,6 @@
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { ArrowLeft, BookOpen, Languages, Library, LogOut, Plus, Search, ShieldCheck } from "lucide-react";
-import { useState } from "react";
+import { useLayoutEffect, useState, type ReactNode } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
@@ -63,7 +63,8 @@ const strings = {
     submitting: "Working...",
     sessionExpired: "Your session expired or was revoked. Sign in again to continue.",
     authModeLabel: "Authentication mode",
-    notebookPanelsLabel: "Notebook panels"
+    notebookPanelsLabel: "Notebook panels",
+    notificationsLabel: "Notifications"
   },
   zh: {
     languageSwitch: "切换到 English",
@@ -108,7 +109,8 @@ const strings = {
     submitting: "处理中...",
     sessionExpired: "会话已过期或被撤销。请重新登录以继续。",
     authModeLabel: "认证方式",
-    notebookPanelsLabel: "笔记本面板"
+    notebookPanelsLabel: "笔记本面板",
+    notificationsLabel: "通知"
   }
 } satisfies Record<Locale, Record<string, string>>;
 
@@ -128,9 +130,12 @@ export function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <AppShell />
-      <Toaster richColors />
     </QueryClientProvider>
   );
+}
+
+function documentLanguage(locale: Locale) {
+  return locale === "zh" ? "zh-CN" : "en";
 }
 
 function AppShell() {
@@ -143,6 +148,10 @@ function AppShell() {
   const [user, setUser] = useState<User | null>(null);
   const [route, setRoute] = useState(() => window.location.pathname);
   const notebookID = route.startsWith("/notebooks/") ? route.replace("/notebooks/", "") : "";
+
+  useLayoutEffect(() => {
+    document.documentElement.lang = documentLanguage(locale);
+  }, [locale]);
 
   const session = useQuery({
     queryKey: ["session"],
@@ -165,6 +174,7 @@ function AppShell() {
   function switchLocale() {
     const next = locale === "en" ? "zh" : "en";
     localStorage.setItem("nano-locale", next);
+    document.documentElement.lang = documentLanguage(next);
     setLocale(next);
   }
 
@@ -173,22 +183,28 @@ function AppShell() {
     setRoute(path);
   }
 
+  let shell: ReactNode;
   if (!activeUser && session.isPending) {
-    return <SystemState t={t} onLocale={switchLocale} message={t.loading} />;
+    shell = <SystemState t={t} onLocale={switchLocale} message={t.loading} />;
+  } else if (!activeUser && session.isError) {
+    shell = <SystemState t={t} onLocale={switchLocale} message={t.unreachable} alert onRetry={() => void session.refetch()} />;
+  } else if (!activeUser) {
+    shell = <AuthScreen t={t} locale={locale} sessionNotice={sessionNotice} onLocale={switchLocale} onAuthed={setUser} />;
+  } else if (notebookID) {
+    shell = <Workspace t={t} onLocale={switchLocale} user={activeUser} notebookID={notebookID} onLibrary={() => navigate("/")} />;
+  } else {
+    shell = <LibraryScreen t={t} onLocale={switchLocale} user={activeUser} onOpen={(id) => navigate(`/notebooks/${id}`)} onSignedOut={() => {
+      queryClient.setQueryData(["session"], { status: "anonymous" } satisfies SessionState);
+      setUser(null);
+    }} />;
   }
-  if (!activeUser && session.isError) {
-    return <SystemState t={t} onLocale={switchLocale} message={t.unreachable} alert onRetry={() => void session.refetch()} />;
-  }
-  if (!activeUser) {
-    return <AuthScreen t={t} locale={locale} sessionNotice={sessionNotice} onLocale={switchLocale} onAuthed={setUser} />;
-  }
-  if (notebookID) {
-    return <Workspace t={t} onLocale={switchLocale} user={activeUser} notebookID={notebookID} onLibrary={() => navigate("/")} />;
-  }
-  return <LibraryScreen t={t} onLocale={switchLocale} user={activeUser} onOpen={(id) => navigate(`/notebooks/${id}`)} onSignedOut={() => {
-    queryClient.setQueryData(["session"], { status: "anonymous" } satisfies SessionState);
-    setUser(null);
-  }} />;
+
+  return (
+    <>
+      {shell}
+      <Toaster richColors containerAriaLabel={t.notificationsLabel} />
+    </>
+  );
 }
 
 function AuthScreen({ t, locale, sessionNotice, onLocale, onAuthed }: { t: typeof strings.en; locale: Locale; sessionNotice: string | null; onLocale: () => void; onAuthed: (user: User) => void }) {

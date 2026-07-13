@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "./App";
@@ -9,6 +9,7 @@ let fetchHandler: (input: RequestInfo | URL, init?: RequestInit) => Promise<Resp
 beforeEach(() => {
   localStorage.clear();
   window.history.pushState(null, "", "/");
+  document.documentElement.lang = "en";
   queryClient.clear();
   document.cookie = "nn_csrf=test-token";
   Object.defineProperty(window.navigator, "language", { value: "en-US", configurable: true });
@@ -69,6 +70,30 @@ test("defaults to Simplified Chinese for zh browser locales and can switch langu
   await user.click(screen.getByRole("button", { name: "切换到 English" }));
   expect(await screen.findByRole("button", { name: "Switch to 简体中文" })).toBeInTheDocument();
   expect(screen.getByRole("tablist", { name: "Authentication mode" })).toBeInTheDocument();
+});
+
+test("syncs document language with initial locale and visible switching", async () => {
+  Object.defineProperty(window.navigator, "language", { value: "zh-CN", configurable: true });
+  render(<App />);
+  const user = userEvent.setup();
+
+  await screen.findByLabelText("邮箱");
+  await waitFor(() => expect(document.documentElement.lang).toBe("zh-CN"));
+  await user.click(screen.getByRole("button", { name: "切换到 English" }));
+  await waitFor(() => expect(document.documentElement.lang).toBe("en"));
+  await user.click(screen.getByRole("button", { name: "Switch to 简体中文" }));
+  await waitFor(() => expect(document.documentElement.lang).toBe("zh-CN"));
+});
+
+test("localizes the toast live-region accessible name with locale changes", async () => {
+  render(<App />);
+  const user = userEvent.setup();
+
+  await screen.findByLabelText("Email");
+  expect(screen.getByLabelText(/Notifications alt\+T/)).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Switch to 简体中文" }));
+  expect(await screen.findByLabelText(/通知 alt\+T/)).toBeInTheDocument();
+  expect(screen.queryByLabelText(/Notifications alt\+T/)).not.toBeInTheDocument();
 });
 
 test("keeps first anonymous visit free of expired session feedback", async () => {
