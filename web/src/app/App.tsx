@@ -3,7 +3,7 @@ import * as Label from "@radix-ui/react-label";
 import * as Tabs from "@radix-ui/react-tabs";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { ArrowLeft, BookOpen, Languages, Library, LogOut, Plus, Search, ShieldCheck } from "lucide-react";
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useState } from "react";
 import { Toaster, toast } from "sonner";
 import { z } from "zod";
 
@@ -116,9 +116,7 @@ function AppShell() {
     }
   });
 
-  useMemo(() => {
-    if (session.data && !user) setUser(session.data);
-  }, [session.data, user]);
+  const activeUser = user ?? session.data ?? null;
 
   function switchLocale() {
     const next = locale === "en" ? "zh" : "en";
@@ -131,13 +129,16 @@ function AppShell() {
     setRoute(path);
   }
 
-  if (!user) {
+  if (!activeUser) {
     return <AuthScreen t={t} locale={locale} onLocale={switchLocale} onAuthed={setUser} />;
   }
   if (notebookID) {
-    return <Workspace t={t} onLocale={switchLocale} user={user} notebookID={notebookID} onLibrary={() => navigate("/")} />;
+    return <Workspace t={t} onLocale={switchLocale} user={activeUser} notebookID={notebookID} onLibrary={() => navigate("/")} />;
   }
-  return <LibraryScreen t={t} onLocale={switchLocale} user={user} onOpen={(id) => navigate(`/notebooks/${id}`)} onSignedOut={() => setUser(null)} />;
+  return <LibraryScreen t={t} onLocale={switchLocale} user={activeUser} onOpen={(id) => navigate(`/notebooks/${id}`)} onSignedOut={() => {
+    queryClient.setQueryData(["session"], null);
+    setUser(null);
+  }} />;
 }
 
 function AuthScreen({ t, locale, onLocale, onAuthed }: { t: typeof strings.en; locale: Locale; onLocale: () => void; onAuthed: (user: User) => void }) {
@@ -208,7 +209,7 @@ function LibraryScreen({ t, user, onLocale, onOpen, onSignedOut }: { t: typeof s
   });
 
   async function signOut() {
-    await api("/api/v1/auth/sign-out", { method: "POST", headers: { "X-CSRF-Token": "browser" } });
+    await api("/api/v1/auth/sign-out", { method: "POST", headers: { "X-CSRF-Token": csrfToken() } });
     onSignedOut();
   }
 
@@ -269,7 +270,7 @@ function CreateNotebookDialog({ t, onOpen, onClose }: { t: typeof strings.en; on
     try {
       const response = await api("/api/v1/notebooks", {
         method: "POST",
-        headers: { "Idempotency-Key": crypto.randomUUID(), "X-CSRF-Token": "browser" },
+        headers: { "Idempotency-Key": crypto.randomUUID(), "X-CSRF-Token": csrfToken() },
         body: JSON.stringify(parsed.data)
       });
       if (!response.ok) throw new Error(t.unreachable);
@@ -376,3 +377,10 @@ async function api(path: string, init: RequestInit = {}) {
   return fetch(path, { credentials: "include", ...init, headers });
 }
 
+function csrfToken() {
+  return document.cookie
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith("nn_csrf="))
+    ?.slice("nn_csrf=".length) ?? "";
+}

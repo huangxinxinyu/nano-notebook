@@ -12,16 +12,27 @@ test("registers, creates, finds, opens, signs out, and signs back in", async ({ 
   await page.getByRole("button", { name: "Create account" }).click();
 
   await expect(page.getByRole("heading", { name: "Library" })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Library" })).toBeVisible();
   await page.getByRole("button", { name: "New notebook" }).click();
   await page.getByLabel("Notebook title").fill("Field Notes");
   await page.getByRole("button", { name: "Create notebook" }).click();
 
   await expect(page.getByRole("heading", { name: "Field Notes" })).toBeVisible();
   await expect(page.getByText("Sources are not available in Sprint 1.")).toBeVisible();
+  await expect(async () => {
+    const overflows = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
+    expect(overflows).toBe(false);
+  }).toPass();
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Field Notes" })).toBeVisible();
 
   await page.getByRole("button", { name: "Back to Library" }).click();
   await page.getByPlaceholder("Search notebooks").fill("Field");
   await expect(page.getByRole("button", { name: /Field Notes/ })).toBeVisible();
+  await page.goto("/notebooks/nb_missing");
+  await expect(page.getByText("Notebook not found or unavailable.")).toBeVisible();
+  await page.getByRole("button", { name: "Back to Library" }).click();
 
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page.getByRole("button", { name: "Create account" })).toBeVisible();

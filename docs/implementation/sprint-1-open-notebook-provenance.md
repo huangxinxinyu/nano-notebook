@@ -12,7 +12,7 @@ Sprint 1 adopts the approved Open Notebook frontend stack shape:
 - shadcn/ui `new-york` style direction and CSS-variable-friendly primitives
 - Radix UI primitives for dialog, tabs, labels, dropdowns, and accessible interaction behavior
 - Lucide React icons
-- React Hook Form and Zod as approved form/validation dependencies
+- Zod for validation and React Hook Form as an approved dependency reserved for richer form composition
 - TanStack Query for server state
 - Sonner for transient toasts
 
@@ -24,5 +24,4 @@ If future work copies or materially adapts upstream files, add each source path,
 
 ## No-New-Primitive Note
 
-The product screens use Radix primitives for dialog, tabs, and labels. Product-specific components in `web/src/app/App.tsx` compose those primitives and do not introduce a separate reusable primitive library. Styling is centralized in `web/src/styles.css`.
-
+The product screens use Radix primitives for dialog, tabs, and labels, plus Lucide icons and Sonner toasts. Product-specific components in `web/src/app/App.tsx` compose those primitives and do not introduce a separate reusable primitive library. Styling is centralized in `web/src/styles.css`.

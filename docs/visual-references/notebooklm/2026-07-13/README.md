@@ -17,10 +17,14 @@
 
 ## Candidate Comparison
 
+- Candidate artifacts captured from the local implementation on 2026-07-13:
+  - `candidate/library-1440x900.png`
+  - `candidate/workspace-1440x900.png`
+  - `candidate/library-390x844.png`
+  - `candidate/workspace-390x844.png`
 - Library: quiet, dense card grid with clear creation path and search.
 - Workspace desktop: three-column Sources, Chat, Outputs hierarchy.
 - Workspace compact: tabbed single-panel navigation using adopted Radix Tabs.
 - Empty future regions explain unavailability without upload, ask, share, model, source-selection, or generation controls.
 
-Direct live screenshots require a signed-in Google account and must be independently recaptured by QA if available. This repository records the date, viewport targets, official help references, and candidate artifacts without storing Google proprietary assets.
-
+Direct live NotebookLM screenshots require a signed-in Google account and must be independently recaptured by QA if available. This repository records the date, viewport targets, official help references, and candidate artifacts without storing Google proprietary assets.
