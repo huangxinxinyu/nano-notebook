@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
+	"github.com/huangxinxinyu/nano-notebook/internal/platform/telemetry"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 func main() {
@@ -24,6 +26,17 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+	shutdownTelemetry, err := telemetry.Start(ctx, "nano-worker")
+	if err != nil {
+		slog.Error("worker telemetry unavailable", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTelemetry(shutdownCtx)
+	}()
+	telemetry.StartupSpan(ctx, "nano-worker")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", func(w http.ResponseWriter, r *http.Request) {
@@ -39,7 +52,7 @@ func main() {
 		writeWorkerJSON(w, http.StatusOK, `{"status":"ready","service":"worker","mode":"noop"}`)
 	})
 
-	httpServer := &http.Server{Addr: env("NANO_WORKER_ADDR", ":8081"), Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	httpServer := &http.Server{Addr: env("NANO_WORKER_ADDR", ":8081"), Handler: otelhttp.NewHandler(mux, "worker"), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		slog.Info("worker listening", "addr", httpServer.Addr, "mode", "noop", "provider_credentials_required", false)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
+	"github.com/huangxinxinyu/nano-notebook/internal/platform/telemetry"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 func main() {
@@ -28,11 +30,22 @@ func main() {
 		slog.Error("migrations failed", "error", err)
 		os.Exit(1)
 	}
+	shutdownTelemetry, err := telemetry.Start(ctx, "nano-control-plane")
+	if err != nil {
+		slog.Error("telemetry unavailable", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTelemetry(shutdownCtx)
+	}()
+	telemetry.StartupSpan(ctx, "nano-control-plane")
 
 	server := app.NewServer(app.Config{CookieSecure: os.Getenv("NANO_COOKIE_SECURE") == "true", Version: env("NANO_VERSION", "dev")}, db)
 	httpServer := &http.Server{
 		Addr:              env("NANO_CONTROL_PLANE_ADDR", ":8080"),
-		Handler:           server.Handler(),
+		Handler:           otelhttp.NewHandler(server.Handler(), "control-plane"),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

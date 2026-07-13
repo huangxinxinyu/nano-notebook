@@ -1,0 +1,10 @@
+{
+  "$schema": "https://www.getbifrost.ai/schema",
+  "providers": {},
+  "config_store": {
+    "enabled": false
+  },
+  "logs_store": {
+    "enabled": false
+  }
+}

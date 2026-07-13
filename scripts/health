@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+docker compose -f infra/compose/compose.yaml exec -T postgres pg_isready -U nano -d nano >/dev/null
+echo '{"status":"ready","service":"postgres"}'
+curl -fsS http://localhost:59000/minio/health/live >/dev/null
+echo '{"status":"ready","service":"minio"}'
+curl -fsS http://localhost:56333/readyz >/dev/null
+echo '{"status":"ready","service":"qdrant"}'
+curl -fsS http://localhost:56666 >/dev/null
+echo '{"status":"ready","service":"bifrost"}'
+curl -fsS http://localhost:51686 >/dev/null
+echo '{"status":"ready","service":"jaeger"}'
 curl -fsS http://localhost:8080/health/live
 echo
 curl -fsS http://localhost:8080/health/ready
@@ -11,6 +24,3 @@ curl -fsS http://localhost:8081/health/ready
 echo
 curl -fsS http://localhost:5173 >/dev/null
 echo '{"status":"ready","service":"web"}'
-curl -fsS http://localhost:51686 >/dev/null
-echo '{"status":"ready","service":"jaeger"}'
-

@@ -23,6 +23,10 @@ Open:
 - Control Plane ready: http://localhost:8080/health/ready
 - Worker live: http://localhost:8081/health/live
 - Worker ready: http://localhost:8081/health/ready
+- PostgreSQL: localhost:55432
+- MinIO API: http://localhost:59000/minio/health/live
+- Qdrant ready: http://localhost:56333/readyz
+- Bifrost gateway: http://localhost:56666
 - Jaeger UI: http://localhost:51686
 
 Use browser registration from an empty state. There is no required seed account.
@@ -37,7 +41,7 @@ scripts/health
 scripts/stop
 ```
 
-The primary browser journey covers registration, session restore by server cookie, Notebook creation, search, workspace open, return to Library, sign-out, sign-in, and recovery. Playwright defines both acceptance viewports: `1440x900` and `390x844`.
+The health command verifies PostgreSQL, MinIO, Qdrant, Bifrost, Jaeger, Control Plane, Worker, and Web readiness. The primary browser journey covers registration, session restore by server cookie, Notebook creation, search, workspace open, return to Library, sign-out, sign-in, and recovery. Playwright defines both acceptance viewports: `1440x900` and `390x844`.
 
 ## Reset
 
@@ -55,5 +59,8 @@ This stops local application processes and removes Compose volumes.
 
 ## Observability
 
-Application logs are structured through Go `slog` and include request IDs, method, and path. Passwords, cookies, session tokens, and authorization headers are never logged. Jaeger all-in-one is present with OTLP ports enabled for the local trace backend.
+Application logs are structured through Go `slog` and include request IDs, method, and path. Passwords, cookies, session tokens, and authorization headers are never logged. Control Plane and Worker export OpenTelemetry spans to Jaeger through OTLP HTTP at `http://localhost:54318/v1/traces` by default. A smoke check can call `scripts/health` and then query `http://localhost:51686/api/services`; the expected service names are `nano-control-plane` and `nano-worker`.
 
+## Visual Evidence
+
+Candidate comparison screenshots are stored under `docs/visual-references/notebooklm/2026-07-13/candidate/` for Library and workspace views at `1440x900` and `390x844`. The adjacent README records the date, reference sources, viewport targets, and notes for QA recapture without storing Google proprietary assets.
