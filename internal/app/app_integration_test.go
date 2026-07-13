@@ -177,6 +177,134 @@ func TestCookieMutationsRequireMatchingCSRFCookieAndHeader(t *testing.T) {
 	}
 }
 
+func TestSessionCookiesCarryRequiredAttributesAndClearOnSignOut(t *testing.T) {
+	api := newTestAPI(t)
+	sessionCookie, csrfCookie := api.registerWithCSRF(t, "cookies@example.com")
+	assertCookieAttrs(t, sessionCookie, true, false, 0)
+	assertCookieAttrs(t, csrfCookie, false, false, 0)
+
+	signOut := api.postJSONWithCookieAndCSRF(t, "/api/v1/auth/sign-out", map[string]any{}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if signOut.Code != http.StatusNoContent {
+		t.Fatalf("sign-out status = %d, body = %s", signOut.Code, signOut.Body.String())
+	}
+	expiredSession := cookieNamed(t, signOut, "nn_session")
+	expiredCSRF := cookieNamed(t, signOut, "nn_csrf")
+	assertCookieAttrs(t, expiredSession, true, false, -1)
+	assertCookieAttrs(t, expiredCSRF, false, false, -1)
+}
+
+func TestAnonymousNotebookReadAndMutationAreRejected(t *testing.T) {
+	api := newTestAPI(t)
+
+	list := api.getWithCookie(t, "/api/v1/notebooks", nil)
+	if list.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous list status = %d, body = %s", list.Code, list.Body.String())
+	}
+	read := api.getWithCookie(t, "/api/v1/notebooks/nb_missing", nil)
+	if read.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous read status = %d, body = %s", read.Code, read.Body.String())
+	}
+	create := api.postJSONWithCookieAndCSRF(t, "/api/v1/notebooks", map[string]any{"title": "Anonymous"}, nil, nil, "", "anon-create")
+	if create.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous create status = %d, body = %s", create.Code, create.Body.String())
+	}
+}
+
+func TestRecentOrderingAndSearchClearThroughApplicationPath(t *testing.T) {
+	api := newTestAPI(t)
+	ctx := context.Background()
+	sessionCookie, csrfCookie := api.registerWithCSRF(t, "recent@example.com")
+
+	first := api.postJSONWithCookieAndCSRF(t, "/api/v1/notebooks", map[string]any{"title": "Alpha Research"}, sessionCookie, csrfCookie, csrfCookie.Value, "recent-alpha")
+	second := api.postJSONWithCookieAndCSRF(t, "/api/v1/notebooks", map[string]any{"title": "Beta Notes"}, sessionCookie, csrfCookie, csrfCookie.Value, "recent-beta")
+	if first.Code != http.StatusCreated || second.Code != http.StatusCreated {
+		t.Fatalf("create statuses = %d/%d bodies = %s/%s", first.Code, second.Code, first.Body.String(), second.Body.String())
+	}
+	var firstBody, secondBody struct {
+		Notebook struct {
+			ID string `json:"id"`
+		} `json:"notebook"`
+	}
+	decodeBody(t, first, &firstBody)
+	decodeBody(t, second, &secondBody)
+	if _, err := api.db.Pool().Exec(ctx, `
+		update notebook_notebooks
+		set recent_at = case id
+			when $1 then now() - interval '1 hour'
+			when $2 then now()
+			else recent_at
+		end
+		where id in ($1, $2)`, firstBody.Notebook.ID, secondBody.Notebook.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	search := api.getWithCookie(t, "/api/v1/notebooks?query=alpha", sessionCookie)
+	var searched struct {
+		Notebooks []struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+		} `json:"notebooks"`
+	}
+	decodeBody(t, search, &searched)
+	if len(searched.Notebooks) != 1 || searched.Notebooks[0].Title != "Alpha Research" {
+		t.Fatalf("filtered search results = %+v", searched.Notebooks)
+	}
+
+	cleared := api.getWithCookie(t, "/api/v1/notebooks?query=", sessionCookie)
+	var listed struct {
+		Notebooks []struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+		} `json:"notebooks"`
+	}
+	decodeBody(t, cleared, &listed)
+	if len(listed.Notebooks) != 2 || listed.Notebooks[0].Title != "Beta Notes" || listed.Notebooks[1].Title != "Alpha Research" {
+		t.Fatalf("cleared search ordering = %+v", listed.Notebooks)
+	}
+}
+
+func TestRegistrationAndSignInRetryPathsRemainPreAuthPrivileged(t *testing.T) {
+	api := newTestAPI(t)
+
+	weak := api.postJSON(t, "/api/v1/auth/register", map[string]any{
+		"email":    "retry@example.com",
+		"password": "short",
+	}, "")
+	if weak.Code != http.StatusBadRequest || len(weak.Result().Cookies()) != 0 {
+		t.Fatalf("weak register status/cookies = %d/%+v", weak.Code, weak.Result().Cookies())
+	}
+	created := api.postJSON(t, "/api/v1/auth/register", map[string]any{
+		"email":    "retry@example.com",
+		"password": validTestPassword,
+	}, "")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("retry register status = %d, body = %s", created.Code, created.Body.String())
+	}
+	sessionCookie := cookieNamed(t, created, "nn_session")
+	csrfCookie := cookieNamed(t, created, "nn_csrf")
+	signOut := api.postJSONWithCookieAndCSRF(t, "/api/v1/auth/sign-out", map[string]any{}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if signOut.Code != http.StatusNoContent {
+		t.Fatalf("sign-out before sign-in retry status = %d, body = %s", signOut.Code, signOut.Body.String())
+	}
+
+	badSignIn := api.postJSON(t, "/api/v1/auth/sign-in", map[string]any{
+		"email":    "retry@example.com",
+		"password": "wrong wrong wrong",
+	}, "")
+	if badSignIn.Code != http.StatusUnauthorized || len(badSignIn.Result().Cookies()) != 0 {
+		t.Fatalf("bad sign-in status/cookies = %d/%+v", badSignIn.Code, badSignIn.Result().Cookies())
+	}
+	goodSignIn := api.postJSON(t, "/api/v1/auth/sign-in", map[string]any{
+		"email":    "retry@example.com",
+		"password": validTestPassword,
+	}, "")
+	if goodSignIn.Code != http.StatusOK {
+		t.Fatalf("retry sign-in status = %d, body = %s", goodSignIn.Code, goodSignIn.Body.String())
+	}
+	assertCookieAttrs(t, cookieNamed(t, goodSignIn, "nn_session"), true, false, 0)
+	assertCookieAttrs(t, cookieNamed(t, goodSignIn, "nn_csrf"), false, false, 0)
+}
+
 func TestConcurrentNotebookQuotaDoesNotExceedOneHundred(t *testing.T) {
 	api := newTestAPI(t)
 	sessionCookie, csrfCookie := api.registerWithCSRF(t, "quota@example.com")
@@ -322,6 +450,41 @@ func TestMigrationsReapplyAndInstallRLSBoundary(t *testing.T) {
 	}
 }
 
+func TestApplicationRequestsAreConstrainedByRequestRoleRLS(t *testing.T) {
+	api := newTestAPI(t)
+	ctx := context.Background()
+	sessionCookie, csrfCookie := api.registerWithCSRF(t, "request-rls@example.com")
+	create := api.postJSONWithCookieAndCSRF(t, "/api/v1/notebooks", map[string]any{"title": "Request RLS Notebook"}, sessionCookie, csrfCookie, csrfCookie.Value, "request-rls-create")
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", create.Code, create.Body.String())
+	}
+
+	_, err := api.db.Pool().Exec(ctx, `
+		drop policy notebook_memberships_owner on notebook_memberships;
+		create policy notebook_memberships_owner on notebook_memberships
+			for all to nano_app
+			using (false)
+			with check (false);
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	list := api.getWithCookie(t, "/api/v1/notebooks", sessionCookie)
+	if list.Code != http.StatusOK {
+		t.Fatalf("list status = %d, body = %s", list.Code, list.Body.String())
+	}
+	var listed struct {
+		Notebooks []struct {
+			ID string `json:"id"`
+		} `json:"notebooks"`
+	}
+	decodeBody(t, list, &listed)
+	if len(listed.Notebooks) != 0 {
+		t.Fatalf("request bypassed nano_app RLS and returned notebooks: %+v", listed.Notebooks)
+	}
+}
+
 type testAPI struct {
 	handler       http.Handler
 	db            *app.DB
@@ -442,6 +605,19 @@ func cookieNamed(t *testing.T, rec *httptest.ResponseRecorder, name string) *htt
 	}
 	t.Fatalf("missing cookie %q in %+v", name, rec.Result().Cookies())
 	return nil
+}
+
+func assertCookieAttrs(t *testing.T, cookie *http.Cookie, httpOnly bool, secure bool, maxAge int) {
+	t.Helper()
+	if cookie.Path != "/" || cookie.HttpOnly != httpOnly || cookie.Secure != secure || cookie.SameSite != http.SameSiteLaxMode {
+		t.Fatalf("cookie %s attrs path=%q httpOnly=%v secure=%v sameSite=%v", cookie.Name, cookie.Path, cookie.HttpOnly, cookie.Secure, cookie.SameSite)
+	}
+	if maxAge != 0 && cookie.MaxAge != maxAge {
+		t.Fatalf("cookie %s max age = %d, want %d", cookie.Name, cookie.MaxAge, maxAge)
+	}
+	if maxAge == 0 && cookie.Expires.IsZero() {
+		t.Fatalf("cookie %s missing expiry", cookie.Name)
+	}
 }
 
 func (api *testAPI) ownedNotebookCount(t *testing.T, cookie *http.Cookie) int {

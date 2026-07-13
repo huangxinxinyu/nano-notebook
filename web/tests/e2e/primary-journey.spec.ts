@@ -98,7 +98,8 @@ test("inaccessible notebook route stays localized and recoverable", async ({ pag
   await expect(page.getByRole("heading", { name: "Library" })).toBeVisible();
 
   await page.goto("/notebooks/nb_missing");
-  await expect(page.getByRole("alert")).toHaveText("Notebook not found or unavailable.");
+  await expect(page.getByRole("alert")).toContainText("Notebook not found or unavailable.");
+  await expect(page.getByRole("button", { name: "Retry" })).toBeVisible();
   await page.getByRole("button", { name: "Back to Library" }).click();
   await expect(page.getByRole("heading", { name: "Library" })).toBeVisible();
 });

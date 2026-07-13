@@ -1,13 +1,17 @@
-import * as Dialog from "@radix-ui/react-dialog";
-import * as Tabs from "@radix-ui/react-tabs";
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { ArrowLeft, BookOpen, Languages, Library, LogOut, Plus, Search, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
-import { Toaster, toast } from "sonner";
+import { toast } from "sonner";
 import { z } from "zod";
-import { Button } from "../components/ui/Button";
-import { Field } from "../components/ui/Field";
+import { Alert, AlertDescription } from "../components/ui/alert";
+import { Button } from "../components/ui/button";
+import { Card, CardContent } from "../components/ui/card";
+import { Dialog, DialogClose, DialogContent, DialogTitle, DialogTrigger } from "../components/ui/dialog";
+import { Input } from "../components/ui/input";
+import { Label } from "../components/ui/label";
+import { Toaster } from "../components/ui/sonner";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { queryClient } from "./queryClient";
 
 type Locale = "en" | "zh";
@@ -52,6 +56,9 @@ const strings = {
     rateLimited: "Too many attempts. Retry shortly.",
     notebookQuota: "Notebook limit reached.",
     notebookCreateFailed: "Notebook could not be created. Retry after checking the local system.",
+    retry: "Retry",
+    signOutFailed: "Sign out failed. Retry to revoke the server session.",
+    signingOut: "Signing out...",
     submitting: "Working..."
   },
   zh: {
@@ -91,6 +98,9 @@ const strings = {
     rateLimited: "尝试次数过多，请稍后重试。",
     notebookQuota: "笔记本数量已达上限。",
     notebookCreateFailed: "无法创建笔记本。请检查本地系统后重试。",
+    retry: "重试",
+    signOutFailed: "退出登录失败。请重试以撤销服务器会话。",
+    signingOut: "正在退出...",
     submitting: "处理中..."
   }
 } satisfies Record<Locale, Record<string, string>>;
@@ -131,9 +141,11 @@ function AppShell() {
     queryKey: ["session"],
     queryFn: async () => {
       const response = await api("/api/v1/session");
-      if (!response.ok) return null;
+      if (response.status === 401) return null;
+      if (!response.ok) throw new Error(t.unreachable);
       return ((await response.json()) as { user: User }).user;
-    }
+    },
+    retry: false
   });
 
   const activeUser = user ?? session.data ?? null;
@@ -149,6 +161,12 @@ function AppShell() {
     setRoute(path);
   }
 
+  if (!activeUser && session.isPending) {
+    return <SystemState t={t} onLocale={switchLocale} message={t.loading} />;
+  }
+  if (!activeUser && session.isError) {
+    return <SystemState t={t} onLocale={switchLocale} message={t.unreachable} alert onRetry={() => void session.refetch()} />;
+  }
   if (!activeUser) {
     return <AuthScreen t={t} locale={locale} onLocale={switchLocale} onAuthed={setUser} />;
   }
@@ -210,16 +228,22 @@ function AuthScreen({ t, locale, onLocale, onAuthed }: { t: typeof strings.en; l
           <h1 id="auth-title">{t.app}</h1>
         </div>
         <p>{t.subtitle}</p>
-        <Tabs.Root value={mode} onValueChange={changeMode}>
-          <Tabs.List className="segmented" aria-label="Authentication mode">
-            <Tabs.Trigger value="register">{t.createAccount}</Tabs.Trigger>
-            <Tabs.Trigger value="sign-in">{t.signIn}</Tabs.Trigger>
-          </Tabs.List>
-        </Tabs.Root>
+        <Tabs value={mode} onValueChange={changeMode}>
+          <TabsList className="segmented" aria-label="Authentication mode">
+            <TabsTrigger value="register">{t.createAccount}</TabsTrigger>
+            <TabsTrigger value="sign-in">{t.signIn}</TabsTrigger>
+          </TabsList>
+        </Tabs>
         <form className="stack" onSubmit={handleSubmit(submit)} noValidate>
-          {formError ? <p role="alert" className="form-error">{formError}</p> : null}
-          <Field id="email" label={t.email} registration={register("email")} autoComplete="email" />
-          <Field id="password" label={t.password} registration={register("password")} type="password" autoComplete={mode === "register" ? "new-password" : "current-password"} />
+          {formError ? <Alert variant="destructive"><AlertDescription>{formError}</AlertDescription></Alert> : null}
+          <div className="field">
+            <Label htmlFor="email">{t.email}</Label>
+            <Input id="email" autoComplete="email" {...register("email")} />
+          </div>
+          <div className="field">
+            <Label htmlFor="password">{t.password}</Label>
+            <Input id="password" type="password" autoComplete={mode === "register" ? "new-password" : "current-password"} {...register("password")} />
+          </div>
           <Button disabled={busy}>{busy ? t.submitting : mode === "register" ? t.createAccount : t.signIn}</Button>
         </form>
         <p className="notice"><ShieldCheck aria-hidden="true" /> {locale === "en" ? t.localOnly : t.localOnly}</p>
@@ -231,6 +255,8 @@ function AuthScreen({ t, locale, onLocale, onAuthed }: { t: typeof strings.en; l
 function LibraryScreen({ t, user, onLocale, onOpen, onSignedOut }: { t: typeof strings.en; user: User; onLocale: () => void; onOpen: (id: string) => void; onSignedOut: () => void }) {
   const [query, setQuery] = useState("");
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
   const notebooks = useQuery({
     queryKey: ["notebooks", query],
     queryFn: async () => {
@@ -241,8 +267,18 @@ function LibraryScreen({ t, user, onLocale, onOpen, onSignedOut }: { t: typeof s
   });
 
   async function signOut() {
-    await api("/api/v1/auth/sign-out", { method: "POST", headers: { "X-CSRF-Token": csrfToken() } });
-    onSignedOut();
+    setSigningOut(true);
+    setSignOutError(null);
+    try {
+      const response = await api("/api/v1/auth/sign-out", { method: "POST", headers: { "X-CSRF-Token": csrfToken() } });
+      if (!response.ok) throw new Error(t.signOutFailed);
+      onSignedOut();
+    } catch {
+      setSignOutError(t.signOutFailed);
+      toast.error(t.signOutFailed);
+    } finally {
+      setSigningOut(false);
+    }
   }
 
   return (
@@ -251,20 +287,21 @@ function LibraryScreen({ t, user, onLocale, onOpen, onSignedOut }: { t: typeof s
         <div className="brand-small"><Library aria-hidden="true" /><span>{t.app}</span></div>
         <div className="topbar-actions">
           <LanguageButton label={t.languageSwitch} onClick={onLocale} />
-          <Button variant="icon-text" onClick={signOut}><LogOut aria-hidden="true" />{t.signOut}</Button>
+          <Button variant="secondary" className="icon-action" onClick={signOut} disabled={signingOut}><LogOut aria-hidden="true" />{signingOut ? t.signingOut : t.signOut}</Button>
         </div>
       </header>
+      {signOutError ? <Alert variant="destructive"><AlertDescription>{signOutError}</AlertDescription></Alert> : null}
       <section className="library-heading">
         <div>
           <h1>{t.library}</h1>
           <p>{user.email}</p>
         </div>
-        <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>
-          <Dialog.Trigger asChild>
-            <Button><Plus aria-hidden="true" />{t.newNotebook}</Button>
-          </Dialog.Trigger>
+        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+          <DialogTrigger asChild>
+            <Button className="create-notebook-action"><Plus aria-hidden="true" />{t.newNotebook}</Button>
+          </DialogTrigger>
           <CreateNotebookDialog t={t} onOpen={onOpen} onClose={() => setDialogOpen(false)} />
-        </Dialog.Root>
+        </Dialog>
       </section>
       <label className="search-box">
         <Search aria-hidden="true" />
@@ -273,11 +310,11 @@ function LibraryScreen({ t, user, onLocale, onOpen, onSignedOut }: { t: typeof s
       </label>
       <section className="notebook-grid" aria-live="polite">
         {notebooks.isLoading ? <p>{t.loading}</p> : null}
-        {notebooks.isError ? <p role="alert">{t.unreachable}</p> : null}
+        {notebooks.isError ? <RetryableAlert message={t.unreachable} retryLabel={t.retry} onRetry={() => void notebooks.refetch()} /> : null}
         {notebooks.data?.length === 0 && query ? <p className="empty-line">{t.noResults}</p> : null}
         {notebooks.data?.length === 0 && !query ? <EmptyLibrary t={t} /> : null}
         {notebooks.data?.map((notebook) => (
-          <Button variant="notebook-card" key={notebook.id} onClick={() => onOpen(notebook.id)}>
+          <Button variant="ghost" className="library-item-action" key={notebook.id} onClick={() => onOpen(notebook.id)}>
             <BookOpen aria-hidden="true" />
             <span>{notebook.title}</span>
           </Button>
@@ -323,20 +360,20 @@ function CreateNotebookDialog({ t, onOpen, onClose }: { t: typeof strings.en; on
   }
 
   return (
-    <Dialog.Portal>
-      <Dialog.Overlay className="overlay" />
-      <Dialog.Content className="dialog">
-        <Dialog.Title>{t.newNotebook}</Dialog.Title>
+    <DialogContent className="dialog" closeLabel={t.cancel}>
+      <DialogTitle>{t.newNotebook}</DialogTitle>
         <form className="stack" onSubmit={handleSubmit(submit)} noValidate>
-          {formError ? <p role="alert" className="form-error">{formError}</p> : null}
-          <Field id="notebook-title" label={t.titleLabel} registration={register("title")} autoFocus />
+          {formError ? <Alert variant="destructive"><AlertDescription>{formError}</AlertDescription></Alert> : null}
+          <div className="field">
+            <Label htmlFor="notebook-title">{t.titleLabel}</Label>
+            <Input id="notebook-title" autoFocus {...register("title")} />
+          </div>
           <div className="dialog-actions">
-            <Dialog.Close asChild><Button type="button" variant="secondary">{t.cancel}</Button></Dialog.Close>
+            <DialogClose asChild><Button type="button" variant="secondary">{t.cancel}</Button></DialogClose>
             <Button disabled={busy}>{busy ? t.submitting : t.createNotebook}</Button>
           </div>
         </form>
-      </Dialog.Content>
-    </Dialog.Portal>
+    </DialogContent>
   );
 }
 
@@ -354,24 +391,24 @@ function Workspace({ t, notebookID, onLocale, onLibrary }: { t: typeof strings.e
   return (
     <main className="workspace-layout">
       <header className="topbar">
-        <Button variant="icon-text" onClick={onLibrary}><ArrowLeft aria-hidden="true" />{t.back}</Button>
+        <Button variant="secondary" className="icon-action" onClick={onLibrary}><ArrowLeft aria-hidden="true" />{t.back}</Button>
         <LanguageButton label={t.languageSwitch} onClick={onLocale} />
       </header>
       {notebook.isLoading ? <p>{t.loading}</p> : null}
-      {notebook.isError ? <p role="alert">{notebook.error.message}</p> : null}
+      {notebook.isError ? <RetryableAlert message={notebook.error.message} retryLabel={t.retry} onRetry={() => void notebook.refetch()} /> : null}
       {notebook.data ? (
         <>
           <h1>{notebook.data.title}</h1>
-          <Tabs.Root defaultValue="sources" className="workspace-grid">
-            <Tabs.List className="workspace-tabs" aria-label="Notebook panels">
-              <Tabs.Trigger value="sources">{t.sources}</Tabs.Trigger>
-              <Tabs.Trigger value="chat">{t.chat}</Tabs.Trigger>
-              <Tabs.Trigger value="outputs">{t.outputs}</Tabs.Trigger>
-            </Tabs.List>
+          <Tabs defaultValue="sources" className="workspace-grid">
+            <TabsList className="workspace-tabs" aria-label="Notebook panels">
+              <TabsTrigger value="sources">{t.sources}</TabsTrigger>
+              <TabsTrigger value="chat">{t.chat}</TabsTrigger>
+              <TabsTrigger value="outputs">{t.outputs}</TabsTrigger>
+            </TabsList>
             <Panel value="sources" title={t.sources} body={t.sourcesEmpty} />
             <Panel value="chat" title={t.chat} body={t.chatEmpty} />
             <Panel value="outputs" title={t.outputs} body={t.outputsEmpty} />
-          </Tabs.Root>
+          </Tabs>
         </>
       ) : null}
     </main>
@@ -380,25 +417,52 @@ function Workspace({ t, notebookID, onLocale, onLibrary }: { t: typeof strings.e
 
 function Panel({ value, title, body }: { value: string; title: string; body: string }) {
   return (
-    <Tabs.Content className="workspace-panel" value={value}>
+    <TabsContent className="workspace-panel" value={value}>
       <h2>{title}</h2>
       <p>{body}</p>
-    </Tabs.Content>
+    </TabsContent>
   );
 }
 
 function EmptyLibrary({ t }: { t: typeof strings.en }) {
   return (
-    <div className="empty-state">
+    <Card className="empty-state">
       <BookOpen aria-hidden="true" />
-      <h2>{t.emptyTitle}</h2>
-      <p>{t.emptyBody}</p>
-    </div>
+      <CardContent>
+        <h2>{t.emptyTitle}</h2>
+        <p>{t.emptyBody}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function SystemState({ t, onLocale, message, alert = false, onRetry }: { t: typeof strings.en; onLocale: () => void; message: string; alert?: boolean; onRetry?: () => void }) {
+  return (
+    <main className="auth-layout">
+      <LanguageButton label={t.languageSwitch} onClick={onLocale} />
+      <section className="auth-panel" aria-labelledby="system-title">
+        <div className="brand-lockup">
+          <BookOpen aria-hidden="true" />
+          <h1 id="system-title">{t.app}</h1>
+        </div>
+        {alert ? <Alert variant="destructive"><AlertDescription>{message}</AlertDescription></Alert> : <p>{message}</p>}
+        {onRetry ? <Button variant="secondary" onClick={onRetry}>{t.retry}</Button> : null}
+      </section>
+    </main>
+  );
+}
+
+function RetryableAlert({ message, retryLabel, onRetry }: { message: string; retryLabel: string; onRetry: () => void }) {
+  return (
+    <Alert variant="destructive" className="retryable-alert">
+      <AlertDescription>{message}</AlertDescription>
+      <Button variant="secondary" onClick={onRetry}>{retryLabel}</Button>
+    </Alert>
   );
 }
 
 function LanguageButton({ label, onClick }: { label: string; onClick: () => void }) {
-  return <Button variant="icon-text" onClick={onClick} aria-label={label}><Languages aria-hidden="true" />{label}</Button>;
+  return <Button variant="secondary" className="icon-action" onClick={onClick} aria-label={label}><Languages aria-hidden="true" />{label}</Button>;
 }
 
 async function api(path: string, init: RequestInit = {}) {

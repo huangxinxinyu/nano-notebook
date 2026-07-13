@@ -13,6 +13,7 @@ import (
 
 	"github.com/huangxinxinyu/nano-notebook/internal/identity"
 	"github.com/huangxinxinyu/nano-notebook/internal/notebook"
+	"github.com/jackc/pgx/v5"
 )
 
 type Config struct {
@@ -81,7 +82,20 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, "unauthorized", "error.session_expired")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"user": user})
+	var scopedUser identity.User
+	err := s.withRequestPrincipal(r.Context(), user.ID, func(identityStore *identity.Store, _ *notebook.Store) error {
+		var ok bool
+		scopedUser, ok = identityStore.UserByID(r.Context(), user.ID)
+		if !ok {
+			return identity.ErrMissingUser
+		}
+		return nil
+	})
+	if err != nil {
+		writeError(w, r, http.StatusUnauthorized, "unauthorized", "error.session_expired")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user": scopedUser})
 }
 
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {
@@ -175,11 +189,17 @@ func (s *Server) signOut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cookie, err := r.Cookie(sessionCookieName)
-	if err == nil && cookie.Value != "" {
-		_ = s.identity.RevokeSession(r.Context(), hashToken(cookie.Value))
+	user, ok := s.currentUser(r)
+	if err == nil && cookie.Value != "" && ok {
+		if err := s.withRequestPrincipal(r.Context(), user.ID, func(identityStore *identity.Store, _ *notebook.Store) error {
+			return identityStore.RevokeSession(r.Context(), hashToken(cookie.Value))
+		}); err != nil {
+			writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+			return
+		}
 	}
-	http.SetCookie(w, expiredCookie(sessionCookieName))
-	http.SetCookie(w, expiredCookie(csrfCookieName))
+	http.SetCookie(w, expiredCookie(sessionCookieName, true, s.cfg.CookieSecure))
+	http.SetCookie(w, expiredCookie(csrfCookieName, false, s.cfg.CookieSecure))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -205,7 +225,12 @@ func (s *Server) notebooks(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listNotebooks(w http.ResponseWriter, r *http.Request, userID string) {
 	query := strings.TrimSpace(r.URL.Query().Get("query"))
-	notebooks, err := s.notebookStore.ListOwned(r.Context(), userID, query)
+	var notebooks []notebook.Notebook
+	err := s.withRequestPrincipal(r.Context(), userID, func(_ *identity.Store, notebookStore *notebook.Store) error {
+		var err error
+		notebooks, err = notebookStore.ListOwned(r.Context(), userID, query)
+		return err
+	})
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
 		return
@@ -242,7 +267,13 @@ func (s *Server) createNotebook(w http.ResponseWriter, r *http.Request, userID s
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
 		return
 	}
-	created, reused, err := s.notebookStore.CreateOwned(r.Context(), userID, key, hash, notebookID, title)
+	var created notebook.Notebook
+	var reused bool
+	err = s.withRequestPrincipal(r.Context(), userID, func(_ *identity.Store, notebookStore *notebook.Store) error {
+		var err error
+		created, reused, err = notebookStore.CreateOwned(r.Context(), userID, key, hash, notebookID, title)
+		return err
+	})
 	if errors.Is(err, notebook.ErrIdempotencyMismatch) {
 		writeError(w, r, http.StatusConflict, "idempotency_mismatch", "error.idempotency_mismatch")
 		return
@@ -273,12 +304,17 @@ func (s *Server) notebookByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/v1/notebooks/")
-	notebook, err := s.notebookStore.GetOwned(r.Context(), user.ID, id)
+	var notebookResult notebook.Notebook
+	err := s.withRequestPrincipal(r.Context(), user.ID, func(_ *identity.Store, notebookStore *notebook.Store) error {
+		var err error
+		notebookResult, err = notebookStore.GetOwned(r.Context(), user.ID, id)
+		return err
+	})
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "not_found", "error.notebook_not_found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"notebook": notebook})
+	writeJSON(w, http.StatusOK, map[string]any{"notebook": notebookResult})
 }
 
 func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, userID string) bool {
@@ -331,6 +367,14 @@ func (s *Server) currentUser(r *http.Request) (identity.User, bool) {
 	return s.identity.CurrentUser(r.Context(), hashToken(cookie.Value))
 }
 
+func (s *Server) withRequestPrincipal(ctx context.Context, userID string, fn func(*identity.Store, *notebook.Store) error) error {
+	return s.db.WithRequestPrincipal(ctx, userID, func(tx pgx.Tx) error {
+		identityStore := identity.NewStore(tx)
+		notebookStore := notebook.NewStore(tx)
+		return fn(identityStore, notebookStore)
+	})
+}
+
 func (s *Server) rateLimited(ctx context.Context, email string) (bool, error) {
 	return s.identity.RateLimited(ctx, email)
 }
@@ -351,8 +395,8 @@ func validCSRF(r *http.Request) bool {
 	return header != "" && subtleConstantEqual(header, cookie.Value)
 }
 
-func expiredCookie(name string) *http.Cookie {
-	return &http.Cookie{Name: name, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode}
+func expiredCookie(name string, httpOnly bool, secure bool) *http.Cookie {
+	return &http.Cookie{Name: name, Value: "", Path: "/", MaxAge: -1, HttpOnly: httpOnly, SameSite: http.SameSiteLaxMode, Secure: secure}
 }
 
 func readJSON(w http.ResponseWriter, r *http.Request, target any) bool {

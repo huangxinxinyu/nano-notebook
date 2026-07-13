@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 var (
@@ -18,7 +18,17 @@ var (
 )
 
 type Store struct {
-	pool *pgxpool.Pool
+	db DBTX
+}
+
+type DBTX interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+type beginner interface {
+	Begin(context.Context) (pgx.Tx, error)
 }
 
 type Notebook struct {
@@ -27,12 +37,12 @@ type Notebook struct {
 	RecentAt time.Time `json:"recent_at,omitempty"`
 }
 
-func NewStore(pool *pgxpool.Pool) *Store {
-	return &Store{pool: pool}
+func NewStore(db DBTX) *Store {
+	return &Store{db: db}
 }
 
 func (s *Store) ListOwned(ctx context.Context, userID string, query string) ([]Notebook, error) {
-	rows, err := s.pool.Query(ctx, `
+	rows, err := s.db.Query(ctx, `
 		select n.id, n.title, n.recent_at
 		from notebook_notebooks n
 		join notebook_memberships m on m.notebook_id = n.id
@@ -57,17 +67,35 @@ func (s *Store) ListOwned(ctx context.Context, userID string, query string) ([]N
 }
 
 func (s *Store) CreateOwned(ctx context.Context, userID, key, requestHash, notebookID, title string) (Notebook, bool, error) {
-	tx, err := s.pool.Begin(ctx)
+	if tx, ok := s.db.(pgx.Tx); ok {
+		return createOwnedInTx(ctx, tx, userID, key, requestHash, notebookID, title)
+	}
+	starter, ok := s.db.(beginner)
+	if !ok {
+		return Notebook{}, false, errors.New("notebook create requires transaction starter")
+	}
+	tx, err := starter.Begin(ctx)
 	if err != nil {
 		return Notebook{}, false, err
 	}
 	defer tx.Rollback(ctx)
+	created, reused, err := createOwnedInTx(ctx, tx, userID, key, requestHash, notebookID, title)
+	if err != nil {
+		return Notebook{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Notebook{}, false, err
+	}
+	return created, reused, nil
+}
+
+func createOwnedInTx(ctx context.Context, tx pgx.Tx, userID, key, requestHash, notebookID, title string) (Notebook, bool, error) {
 	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, "create_notebook:"+userID); err != nil {
 		return Notebook{}, false, err
 	}
 	var existingHash, existingJSON string
 	var existingStatus int
-	err = tx.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		select request_hash, status_code, response_json::text
 		from platform_idempotency_keys
 		where principal_id = $1 and action = 'create_notebook' and key = $2`, userID, key).Scan(&existingHash, &existingStatus, &existingJSON)
@@ -112,15 +140,12 @@ func (s *Store) CreateOwned(ctx context.Context, userID, key, requestHash, noteb
 	if err != nil {
 		return Notebook{}, false, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return Notebook{}, false, err
-	}
 	return created, false, nil
 }
 
 func (s *Store) GetOwned(ctx context.Context, userID, notebookID string) (Notebook, error) {
 	var notebook Notebook
-	err := s.pool.QueryRow(ctx, `
+	err := s.db.QueryRow(ctx, `
 		select n.id, n.title, n.recent_at
 		from notebook_notebooks n
 		join notebook_memberships m on m.notebook_id = n.id

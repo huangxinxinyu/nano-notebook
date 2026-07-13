@@ -43,7 +43,7 @@ test("completes the first notebook journey in English", async () => {
   const user = userEvent.setup();
 
   await screen.findByRole("heading", { name: "Nano Notebook" });
-  await user.type(screen.getByLabelText("Email"), "learner@example.com");
+  await user.type(await screen.findByLabelText("Email"), "learner@example.com");
   await user.type(screen.getByLabelText("Password"), "unique local sprint phrase 2026");
   await user.click(screen.getByRole("button", { name: "Create account" }));
 
@@ -61,10 +61,12 @@ test("completes the first notebook journey in English", async () => {
 test("defaults to Simplified Chinese for zh browser locales and can switch languages", async () => {
   Object.defineProperty(window.navigator, "language", { value: "zh-CN", configurable: true });
   render(<App />);
-  await screen.findByRole("heading", { name: "Nano Notebook" });
+  const user = userEvent.setup();
+
+  await screen.findByLabelText("邮箱");
   expect(screen.getByRole("button", { name: "切换到 English" })).toBeInTheDocument();
-  await userEvent.click(screen.getByRole("button", { name: "切换到 English" }));
-  expect(screen.getByRole("button", { name: "Switch to 简体中文" })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "切换到 English" }));
+  expect(await screen.findByRole("button", { name: "Switch to 简体中文" })).toBeInTheDocument();
 });
 
 test("surfaces duplicate registration as a distinct localized error", async () => {
@@ -129,6 +131,53 @@ test("surfaces notebook quota as a distinct localized create error", async () =>
   await user.click(screen.getByRole("button", { name: "Create notebook" }));
 
   expect(await screen.findByRole("alert")).toHaveTextContent("Notebook limit reached.");
+});
+
+test("shows session loading before rendering authentication choices", () => {
+  fetchHandler = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/session")) return new Promise<Response>(() => {});
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+
+  expect(screen.getByText("Loading")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Create account" })).not.toBeInTheDocument();
+});
+
+test("shows retryable session unreachable state instead of signed-out auth", async () => {
+  fetchHandler = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/session")) return json({ error: { code: "unavailable" } }, 503);
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("Control Plane is unreachable. Retry after starting the local system.");
+  expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Create account" })).not.toBeInTheDocument();
+});
+
+test("keeps the library visible when sign-out revocation fails", async () => {
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks") && method === "GET") return json({ notebooks: [] });
+    if (url.endsWith("/api/v1/auth/sign-out")) return json({ error: { code: "internal" } }, 500);
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  await screen.findByRole("heading", { name: "Library" });
+  await user.click(screen.getByRole("button", { name: "Sign out" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("Sign out failed. Retry to revoke the server session.");
+  expect(screen.getByRole("heading", { name: "Library" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Create account" })).not.toBeInTheDocument();
 });
 
 function json(payload: unknown, status = 200) {

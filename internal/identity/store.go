@@ -6,13 +6,26 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
-var ErrDuplicateEmail = errors.New("duplicate email")
+var (
+	ErrDuplicateEmail = errors.New("duplicate email")
+	ErrMissingUser    = errors.New("missing user")
+)
+
+type DBTX interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+type beginner interface {
+	Begin(context.Context) (pgx.Tx, error)
+}
 
 type Store struct {
-	pool *pgxpool.Pool
+	db DBTX
 }
 
 type User struct {
@@ -20,12 +33,16 @@ type User struct {
 	Email string `json:"email"`
 }
 
-func NewStore(pool *pgxpool.Pool) *Store {
-	return &Store{pool: pool}
+func NewStore(db DBTX) *Store {
+	return &Store{db: db}
 }
 
 func (s *Store) RegisterLocalUser(ctx context.Context, userID, canonicalEmail, displayEmail, passwordHash string) error {
-	tx, err := s.pool.Begin(ctx)
+	starter, ok := s.db.(beginner)
+	if !ok {
+		return errors.New("identity registration requires privileged transaction starter")
+	}
+	tx, err := starter.Begin(ctx)
 	if err != nil {
 		return err
 	}
@@ -42,7 +59,7 @@ func (s *Store) RegisterLocalUser(ctx context.Context, userID, canonicalEmail, d
 }
 
 func (s *Store) LocalCredential(ctx context.Context, canonicalEmail string) (userID string, passwordHash string, err error) {
-	err = s.pool.QueryRow(ctx, `
+	err = s.db.QueryRow(ctx, `
 		select u.id, c.password_hash
 		from identity_users u
 		join identity_local_credentials c on c.user_id = u.id
@@ -51,7 +68,7 @@ func (s *Store) LocalCredential(ctx context.Context, canonicalEmail string) (use
 }
 
 func (s *Store) CreateSession(ctx context.Context, sessionID, userID, tokenHash string, expiresAt time.Time) error {
-	_, err := s.pool.Exec(ctx, `
+	_, err := s.db.Exec(ctx, `
 		insert into identity_sessions(id, user_id, token_hash, expires_at)
 		values($1, $2, $3, $4)`, sessionID, userID, tokenHash, expiresAt)
 	return err
@@ -59,7 +76,7 @@ func (s *Store) CreateSession(ctx context.Context, sessionID, userID, tokenHash 
 
 func (s *Store) CurrentUser(ctx context.Context, tokenHash string) (User, bool) {
 	var user User
-	err := s.pool.QueryRow(ctx, `
+	err := s.db.QueryRow(ctx, `
 		select u.id, u.canonical_email
 		from identity_sessions s
 		join identity_users u on u.id = s.user_id
@@ -72,14 +89,23 @@ func (s *Store) CurrentUser(ctx context.Context, tokenHash string) (User, bool) 
 	return user, true
 }
 
+func (s *Store) UserByID(ctx context.Context, userID string) (User, bool) {
+	var user User
+	err := s.db.QueryRow(ctx, `select id, canonical_email from identity_users where id = $1`, userID).Scan(&user.ID, &user.Email)
+	if err != nil {
+		return User{}, false
+	}
+	return user, true
+}
+
 func (s *Store) RevokeSession(ctx context.Context, tokenHash string) error {
-	_, err := s.pool.Exec(ctx, `update identity_sessions set revoked_at = now() where token_hash = $1 and revoked_at is null`, tokenHash)
+	_, err := s.db.Exec(ctx, `update identity_sessions set revoked_at = now() where token_hash = $1 and revoked_at is null`, tokenHash)
 	return err
 }
 
 func (s *Store) RateLimited(ctx context.Context, canonicalEmail string) (bool, error) {
 	var failed int
-	err := s.pool.QueryRow(ctx, `
+	err := s.db.QueryRow(ctx, `
 		select count(*)
 		from identity_auth_attempts
 		where canonical_email = $1
@@ -89,7 +115,7 @@ func (s *Store) RateLimited(ctx context.Context, canonicalEmail string) (bool, e
 }
 
 func (s *Store) RecordAttempt(ctx context.Context, canonicalEmail string, succeeded bool) error {
-	_, err := s.pool.Exec(ctx, `insert into identity_auth_attempts(canonical_email, succeeded) values($1, $2)`, canonicalEmail, succeeded)
+	_, err := s.db.Exec(ctx, `insert into identity_auth_attempts(canonical_email, succeeded) values($1, $2)`, canonicalEmail, succeeded)
 	return err
 }
 

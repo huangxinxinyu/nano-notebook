@@ -1,6 +1,33 @@
+@layer theme, base, components;
+
+@layer theme {
+  :root {
+    --radius: 8px;
+    --background: #f6f7f3;
+    --foreground: #17201b;
+    --card: #fffdf8;
+    --card-foreground: #17201b;
+    --popover: #fffdf8;
+    --popover-foreground: #17201b;
+    --primary: #1d7f5f;
+    --primary-foreground: #ffffff;
+    --secondary: #edf1e8;
+    --secondary-foreground: #1f3028;
+    --muted: #e7ebe1;
+    --muted-foreground: #546259;
+    --accent: #e8f2ee;
+    --accent-foreground: #11231c;
+    --destructive: #9f1239;
+    --destructive-surface: #fff1f2;
+    --border: #cbd4c3;
+    --input: #b8c2b1;
+    --ring: #2454a6;
+  }
+}
+
 :root {
-  color: #17201b;
-  background: #f6f7f3;
+  color: var(--foreground);
+  background: var(--background);
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   line-height: 1.5;
 }
@@ -47,7 +74,7 @@ input:focus-visible {
   background-size: cover;
 }
 
-.auth-layout > .icon-text {
+.auth-layout > .icon-action {
   position: fixed;
   top: 20px;
   right: 20px;
@@ -68,9 +95,7 @@ input:focus-visible {
 .topbar,
 .topbar-actions,
 .library-heading,
-.icon-text,
-.primary,
-.secondary,
+.nn-button,
 .notice,
 .search-box,
 .workspace-tabs {
@@ -113,35 +138,51 @@ h2 {
   gap: 6px;
 }
 
-.field label {
+.nn-label {
   font-weight: 650;
 }
 
-.field input,
+.nn-input,
 .search-box input {
   min-height: 44px;
-  border: 1px solid #b8c2b1;
+  border: 1px solid var(--input);
   border-radius: 6px;
   background: #ffffff;
-  color: #17201b;
+  color: var(--foreground);
   padding: 0 12px;
 }
 
 .field-error,
-.form-error {
+.nn-alert--destructive {
   margin: 0;
-  color: #9f1239;
+  color: var(--destructive);
 }
 
 .field-error {
   font-size: 0.9rem;
 }
 
-.form-error {
-  border: 1px solid #fecdd3;
-  border-radius: 8px;
-  background: #fff1f2;
+.nn-alert {
+  width: 100%;
+  border-radius: var(--radius);
   padding: 10px 12px;
+}
+
+.nn-alert--destructive {
+  border: 1px solid #fecdd3;
+  background: var(--destructive-surface);
+}
+
+.nn-alert-description {
+  display: block;
+}
+
+.retryable-alert {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .segmented {
@@ -169,26 +210,57 @@ h2 {
   box-shadow: 0 1px 4px rgba(20, 30, 24, 0.12);
 }
 
-.primary,
-.secondary,
-.icon-text {
+.nn-button {
   gap: 8px;
   min-height: 40px;
   border-radius: 6px;
   padding: 0 14px;
   font-weight: 650;
+  transition: background 150ms ease, color 150ms ease, box-shadow 150ms ease;
 }
 
-.primary {
+.nn-button--default {
   justify-content: center;
-  background: #1d7f5f;
-  color: #ffffff;
+  background: var(--primary);
+  color: var(--primary-foreground);
 }
 
-.secondary,
-.icon-text {
-  background: #edf1e8;
-  color: #1f3028;
+.nn-button--default:hover {
+  background: #176d52;
+}
+
+.nn-button--secondary {
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+}
+
+.nn-button--secondary:hover,
+.nn-button--ghost:hover {
+  background: #dfe7da;
+}
+
+.nn-button--ghost {
+  background: transparent;
+  color: var(--foreground);
+}
+
+.nn-button--outline {
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--foreground);
+}
+
+.nn-button--link {
+  min-height: auto;
+  padding: 0;
+  background: transparent;
+  color: var(--primary);
+  text-decoration: underline;
+}
+
+.nn-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .notice {
@@ -247,7 +319,7 @@ h2 {
   margin: 0 auto;
 }
 
-.notebook-card,
+.library-item-action,
 .empty-state,
 .workspace-panel {
   border: 1px solid #cad4c2;
@@ -256,17 +328,17 @@ h2 {
   box-shadow: 0 1px 3px rgba(20, 30, 24, 0.08);
 }
 
-.notebook-card {
+.library-item-action {
   display: grid;
   justify-items: start;
   gap: 16px;
   min-height: 150px;
   padding: 18px;
-  color: #17201b;
+  color: var(--foreground);
   text-align: left;
 }
 
-.notebook-card svg {
+.library-item-action svg {
   color: #1d7f5f;
 }
 
@@ -283,17 +355,38 @@ h2 {
   grid-column: 1 / -1;
 }
 
-.overlay {
+.nn-dialog-overlay {
   position: fixed;
   inset: 0;
+  z-index: 40;
   background: rgba(13, 18, 16, 0.42);
 }
 
-.dialog {
+.nn-dialog-content {
   position: fixed;
+  z-index: 50;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
+}
+
+.nn-dialog-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  background: transparent;
+  color: #53625a;
+}
+
+.nn-dialog-close svg {
+  width: 16px;
+  height: 16px;
 }
 
 .dialog-actions {
@@ -370,13 +463,11 @@ h2 {
     flex-wrap: wrap;
   }
 
-  .primary,
-  .secondary,
-  .icon-text {
+  .nn-button {
     min-height: 44px;
   }
 
-  .library-heading .primary {
+  .library-heading .create-notebook-action {
     width: 100%;
   }
 

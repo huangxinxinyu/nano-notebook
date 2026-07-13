@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -41,6 +42,27 @@ func (db *DB) Pool() *pgxpool.Pool {
 	return db.pool
 }
 
+func (db *DB) WithRequestPrincipal(ctx context.Context, principalID string, fn func(pgx.Tx) error) error {
+	if db == nil || db.pool == nil {
+		return errors.New("nil database")
+	}
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `set local role nano_app`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `select set_config('app.principal_id', $1, true)`, principalID); err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func ResetForTests(ctx context.Context, db *DB) error {
 	if db == nil || db.pool == nil {
 		return errors.New("nil database")
@@ -66,6 +88,8 @@ begin
 	if not exists (select 1 from pg_roles where rolname = 'nano_worker') then
 		create role nano_worker;
 	end if;
+	execute format('grant nano_app to %I', current_user);
+	execute format('grant nano_worker to %I', current_user);
 end $$;
 
 create table if not exists identity_users (

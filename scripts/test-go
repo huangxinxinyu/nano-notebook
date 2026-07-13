@@ -5,6 +5,20 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 export NANO_TEST_DATABASE_URL="${NANO_TEST_DATABASE_URL:-postgres://nano:nano@localhost:55432/nano_test?sslmode=disable}"
+docker compose -f infra/compose/compose.yaml up -d postgres >/dev/null
+for _ in $(seq 1 60); do
+  if docker compose -f infra/compose/compose.yaml exec -T postgres pg_isready -U nano -d nano >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+if ! docker compose -f infra/compose/compose.yaml exec -T postgres pg_isready -U nano -d nano >/dev/null 2>&1; then
+  echo "postgres did not become ready" >&2
+  exit 1
+fi
+if ! docker compose -f infra/compose/compose.yaml exec -T postgres psql -U nano -d nano -tc "select 1 from pg_database where datname='nano_test'" | grep -q 1; then
+  docker compose -f infra/compose/compose.yaml exec -T postgres createdb -U nano nano_test
+fi
 unformatted="$(gofmt -l cmd internal)"
 if [ -n "$unformatted" ]; then
   echo "$unformatted"
