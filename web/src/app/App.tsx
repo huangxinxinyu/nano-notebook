@@ -428,15 +428,20 @@ function Workspace({ t, notebookID, onLocale, onLibrary }: { t: typeof strings.e
       {notebook.data ? (
         <>
           <h1>{notebook.data.title}</h1>
-          <Tabs defaultValue="sources" className="workspace-grid">
+          <div className="workspace-panels" aria-label={t.notebookPanelsLabel}>
+            <PanelRegion value="sources" title={t.sources} body={t.sourcesEmpty} />
+            <PanelRegion value="chat" title={t.chat} body={t.chatEmpty} />
+            <PanelRegion value="outputs" title={t.outputs} body={t.outputsEmpty} />
+          </div>
+          <Tabs defaultValue="sources" className="workspace-compact-tabs">
             <TabsList className="workspace-tabs" aria-label={t.notebookPanelsLabel}>
               <TabsTrigger value="sources">{t.sources}</TabsTrigger>
               <TabsTrigger value="chat">{t.chat}</TabsTrigger>
               <TabsTrigger value="outputs">{t.outputs}</TabsTrigger>
             </TabsList>
-            <Panel value="sources" title={t.sources} body={t.sourcesEmpty} />
-            <Panel value="chat" title={t.chat} body={t.chatEmpty} />
-            <Panel value="outputs" title={t.outputs} body={t.outputsEmpty} />
+            <PanelTab value="sources" title={t.sources} body={t.sourcesEmpty} />
+            <PanelTab value="chat" title={t.chat} body={t.chatEmpty} />
+            <PanelTab value="outputs" title={t.outputs} body={t.outputsEmpty} />
           </Tabs>
         </>
       ) : null}
@@ -444,7 +449,18 @@ function Workspace({ t, notebookID, onLocale, onLibrary }: { t: typeof strings.e
   );
 }
 
-function Panel({ value, title, body }: { value: string; title: string; body: string }) {
+function PanelRegion({ value, title, body }: { value: string; title: string; body: string }) {
+  const titleID = `workspace-${value}-title`;
+
+  return (
+    <section className="workspace-panel" role="region" aria-labelledby={titleID}>
+      <h2 id={titleID}>{title}</h2>
+      <p>{body}</p>
+    </section>
+  );
+}
+
+function PanelTab({ value, title, body }: { value: string; title: string; body: string }) {
   return (
     <TabsContent className="workspace-panel" value={value}>
       <h2>{title}</h2>
