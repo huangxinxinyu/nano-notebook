@@ -27,4 +27,3 @@ go run ./cmd/worker &
 npm --prefix web run dev -- --host 127.0.0.1 &
 
 wait
-

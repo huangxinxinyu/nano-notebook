@@ -9,4 +9,3 @@ if [ -d web ]; then
   npm --prefix web install
 fi
 docker compose -f infra/compose/compose.yaml pull postgres minio qdrant bifrost jaeger
-

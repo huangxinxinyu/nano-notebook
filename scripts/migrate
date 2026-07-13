@@ -6,4 +6,3 @@ cd "$ROOT"
 
 export NANO_DATABASE_URL="${NANO_DATABASE_URL:-postgres://nano:nano@localhost:55432/nano?sslmode=disable}"
 go run ./cmd/migrate
-

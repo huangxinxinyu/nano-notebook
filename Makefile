@@ -26,4 +26,3 @@ test-go:
 
 test-web:
 	scripts/test-web
-
