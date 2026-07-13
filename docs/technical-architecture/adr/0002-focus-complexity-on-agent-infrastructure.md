@@ -1,0 +1,3 @@
+# Focus technical depth on Agent infrastructure
+
+Nano Notebook will deliberately invest its complexity budget in durable Agent orchestration, evidence and retrieval infrastructure, observability and evaluation, followed by scheduling and reliability. It will not use microservice count, Kubernetes, multi-region deployment, or GPU fleet infrastructure as portfolio theater. This aligns the product's actual failure modes with recurring requirements in current North American Agent Infrastructure roles and keeps advanced sandboxing as an evolutionary execution backend rather than an initial dependency.

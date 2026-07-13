@@ -1,0 +1,3 @@
+# Bound the Durable Runtime to product Jobs
+
+The PostgreSQL Job Runtime will implement leases, heartbeats, at-least-once attempts, retry/backoff, cancellation, checkpoints, concurrency control, and crash recovery only for registered Nano Notebook Job kinds, initially Source ingestion, Agent ticks, retrieval-index projection/rebuild, and deletion purge. A separate Agent Controller owns the fixed outer Run state machine and bounded read-only research actions; the system explicitly excludes a general Workflow SDK, arbitrary DAGs, deterministic code replay, multi-Agent execution, and exactly-once claims.

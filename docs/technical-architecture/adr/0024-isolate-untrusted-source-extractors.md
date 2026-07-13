@@ -1,0 +1,3 @@
+# Isolate untrusted Source extractors
+
+Complex document and media parsing will run behind least-privileged Extractor Adapters outside the authoritative Go Source Worker process. An Extractor receives only job-scoped, expiring access to its input and output, uses bounded temporary storage and compute time, and has no PostgreSQL, Qdrant, long-lived Blob Store, or general model credentials; the Source Worker alone validates and publishes returned Normalized Source Artifacts. Local development may use dedicated restricted containers, while production launch adds explicit egress policy and isolation acceptance tests. This narrow untrusted-input boundary is not an Agent Sandbox: it exposes no shell, browser, persistent workspace, or model-selected executable tools.

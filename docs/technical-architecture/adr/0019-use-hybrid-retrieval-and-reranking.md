@@ -1,0 +1,3 @@
+# Use hybrid retrieval, rank fusion, and reranking
+
+The first product release will treat dense-only retrieval as an intermediate implementation milestone, not the final RAG architecture. For every query, the Retrieval Module will run dense semantic and sparse lexical candidate retrieval under the same Retrieval Scope, combine their rankings without directly comparing incompatible raw scores, fetch authoritative normalized evidence, and rerank the bounded candidate set before returning it to the Agent Controller. RRF is the initial safe fusion method; embedding and sparse models, candidate limits, fusion weights, reranker choice, chunking, and stopping thresholds will be selected through offline evaluation during detailed RAG design.

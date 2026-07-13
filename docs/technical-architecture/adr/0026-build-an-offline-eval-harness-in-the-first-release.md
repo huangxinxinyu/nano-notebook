@@ -1,0 +1,3 @@
+# Build an offline Eval Harness in the first release
+
+The first release will include an offline Eval Harness that executes versioned Eval Cases through the same Source, Retrieval, Models, and Agent interfaces used by the product. Eval Runs will identify every relevant evidence, index, model, prompt, and Agent configuration and measure retrieval ranking and recall, Citation correctness and coverage, grounded answer quality, latency, tokens, and cost. Results will support promotion decisions for Retrieval Index Versions and Agent configurations without prescribing thresholds at the overall-architecture stage. Execution may use CLI and Workers; an Eval management UI, online A/B platform, automatic tuning system, and separate test-only RAG implementation are excluded.

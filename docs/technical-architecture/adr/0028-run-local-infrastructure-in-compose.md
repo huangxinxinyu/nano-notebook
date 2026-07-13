@@ -1,0 +1,3 @@
+# Run local infrastructure in Compose and application processes natively
+
+The default local development topology will run PostgreSQL, MinIO, Qdrant, Bifrost, and local observability dependencies in Docker Compose while running the Go Control Plane, Go Workers, and React/Vite Web Client natively for fast debugging and reload. Least-privileged Extractors remain containerized because their process boundary is architectural rather than packaging convenience. Repository-owned bootstrap, migration, seed, and start commands will make the topology reproducible, and an optional CI/integration profile may containerize application processes. Kubernetes and the final AWS compute topology remain outside local completion and belong to the production-launch Sprint.

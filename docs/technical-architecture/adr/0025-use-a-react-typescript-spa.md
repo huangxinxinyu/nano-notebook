@@ -1,0 +1,3 @@
+# Use a React and TypeScript single-page application
+
+The authenticated Web Client will be a React and TypeScript single-page application built with Vite and will consume the Go Control Plane's REST and SSE interfaces directly. It requires no SEO or server-rendered application path; local development uses the Vite server and production emits static assets compatible with the intended S3 and CloudFront launch direction. Go remains the only business backend, so no Node BFF, duplicated authorization decisions, or frontend-owned workflow state is introduced. Exact UI, routing, server-state, and component libraries remain frontend detailed-design choices.

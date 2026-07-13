@@ -1,0 +1,3 @@
+# Separate stable Citation identity from retrieval chunks
+
+The Source Module will assign stable Evidence Unit addresses in each Normalized Source Artifact before retrieval indexing. The Retrieval Module may build overlapping Retrieval Chunks across those units and may replace their boundaries, identifiers, vectors, or index representation as retrieval policy evolves. Qdrant points will retain the Evidence Unit coverage needed to recover authoritative content, but final Citations will resolve only through the immutable Source and its Evidence Units, never through a Qdrant point or Retrieval Chunk identifier. This preserves historical Citation resolution across re-chunking, re-embedding, and complete index rebuilds.
