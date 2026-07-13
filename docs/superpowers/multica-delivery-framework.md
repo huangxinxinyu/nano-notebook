@@ -18,7 +18,7 @@ The framework lives in:
 skills/multica-delivery/
 templates/
 config/multica.example.toml
-doc/engineering/loop-engineering/BACKEND_ENGINEERING.md
+doc/engineering/BACKEND_ENGINEERING.md
 memory/
 docs/superpowers/multica-delivery-framework.md
 evals/multica-delivery-framework-v1.md
@@ -67,7 +67,7 @@ Before opening the parent Issue:
 Parent Issues store recovery metadata only. Child Issue comments and Git commits hold the detailed evidence.
 
 For backend-scoped Implementation work, use
-[doc/engineering/loop-engineering/BACKEND_ENGINEERING.md](../../doc/engineering/loop-engineering/BACKEND_ENGINEERING.md)
+[doc/engineering/BACKEND_ENGINEERING.md](../../doc/engineering/BACKEND_ENGINEERING.md)
 only when the approved scope touches APIs, storage, background work,
 consistency, security, observability, or production behavior.
 
