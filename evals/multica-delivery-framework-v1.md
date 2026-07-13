@@ -151,7 +151,7 @@ Expected:
 
 - Codex fast-forward merges the accepted candidate SHA into the configured target branch.
 - Codex pushes the target branch.
-- The accepted candidate SHA becomes the target branch SHA.
+- The accepted candidate SHA becomes the target branch SHA before memory finalization.
 - No merge commit is introduced.
 
 Evidence:
@@ -257,11 +257,43 @@ Input: QA and Review both pass the same final SHA.
 
 Expected:
 
+- Codex records the verified delivery as `final_sha` and first pushes the target branch to that exact SHA.
 - Codex writes `memory/runs/<parent-identifier>.md`.
-- The file records approved summaries, final SHA, evidence references, outcome, and reusable lessons.
-- The parent Issue is not closed before the memory file exists.
+- The file records approved summaries, `final_sha`, evidence references, outcome, and reusable lessons.
+- The parent Issue is not closed before the memory-only commit is pushed and recorded.
 
 Evidence:
 
 - Memory file content.
 - Parent Issue final metadata and closure state.
+
+## 18. Memory-Only Completion Commit
+
+Input: The remote target branch equals `final_sha` after the accepted fast-forward merge.
+
+Expected:
+
+- Codex commits only `memory/runs/<parent-identifier>.md` and pushes normally.
+- Parent metadata records the resulting commit as `memory_commit_sha` without changing `final_sha`.
+- The remote target tip equals `memory_commit_sha` and contains `final_sha` as an ancestor.
+- No second QA and Review wave is created for the path-only memory commit.
+
+Evidence:
+
+- Git diff for `final_sha..memory_commit_sha` contains exactly the canonical memory file.
+- Remote target ref, parent metadata, and ancestry checks.
+
+## 19. Invalid Memory Commit Stays Blocked
+
+Input: The proposed memory commit changes another path, omits required evidence, cannot be pushed, or does not contain `final_sha`.
+
+Expected:
+
+- The parent remains incomplete and `queue_state` stays active.
+- `memory_commit_sha` is not recorded as accepted.
+- The concrete path, content, push, or ancestry failure is recorded for recovery.
+
+Evidence:
+
+- Git diff and remote ref checks.
+- Parent Issue metadata and blocker comment.

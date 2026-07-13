@@ -14,6 +14,12 @@ Use the parent Issue identifier form, for example `memory/runs/NAN-1.md`.
 
 Codex is the only writer. Delivery Expert, QA, and Reviewer do not write or edit repository memory files.
 
+## Commit Contract
+
+Write run memory only after QA and Review pass the same `final_sha` and Codex has fast-forwarded and pushed the target branch to that exact SHA. Commit only `memory/runs/<parent-identifier>.md`, push normally, and record the resulting commit as `memory_commit_sha`.
+
+The target branch must equal `final_sha` before this commit and contain `final_sha` as an ancestor afterward. The memory-only commit does not require another QA and Review wave. Codex must verify the path-only diff, required content, remote tip, and ancestry. Any additional changed path or failed commit, push, or verification blocks parent completion.
+
 ## Required Content
 
 Each run memory file should capture only:
@@ -21,8 +27,8 @@ Each run memory file should capture only:
 - approved requirement summary
 - approved plan summary
 - key decisions and constraints
-- final accepted SHA
-- QA and Review evidence references
+- `final_sha`
+- accepted QA and Review evidence references
 - outcome and reusable lessons
 
 ## Exclusions

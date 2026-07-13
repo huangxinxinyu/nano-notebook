@@ -24,16 +24,22 @@ check_absent() {
 
 check_contains "skills/multica-delivery/SKILL.md" "Delivery Expert pushes the candidate branch after required checks pass."
 check_contains "skills/multica-delivery/SKILL.md" "Only Codex may fast-forward merge the accepted candidate into the target branch."
+check_contains "skills/multica-delivery/SKILL.md" 'Record the verified delivery as `final_sha` and the later memory-only commit as `memory_commit_sha`.'
 check_contains "skills/multica-delivery/references/workflow.md" "Codex verifies the remote candidate branch and SHA before opening QA and Review."
 check_contains "skills/multica-delivery/references/workflow.md" "Never force push the candidate branch."
 check_contains "skills/multica-delivery/references/gates.md" "Do not open verification against a candidate SHA that is not reachable on the named remote branch."
 check_contains "skills/multica-delivery/references/gates.md" "If the target branch head moved after candidate creation, block acceptance and create an integration or rework path from the new target head."
+check_contains "skills/multica-delivery/references/gates.md" 'The memory-only commit may change only `memory/runs/<parent-identifier>.md`.'
 check_contains "skills/multica-delivery/references/recovery.md" "- \`candidate_branch\`"
 check_contains "skills/multica-delivery/references/recovery.md" "- \`target_branch\`"
 check_contains "skills/multica-delivery/references/recovery.md" "- \`target_head_sha\`"
+check_contains "skills/multica-delivery/references/recovery.md" '- `memory_commit_sha`'
+check_contains "skills/multica-delivery/references/memory-policy.md" 'The target branch must equal `final_sha` before this commit and contain `final_sha` as an ancestor afterward.'
 check_contains "docs/superpowers/multica-delivery-framework.md" "Codex verifies the remote branch tip matches the reported candidate SHA before dispatching QA and Review."
 check_contains "docs/superpowers/multica-delivery-framework.md" "If the target branch head changes after candidate creation, stop acceptance, create an integration or rework path from the new target head, and rerun verification on the replacement SHA."
+check_contains "docs/superpowers/multica-delivery-framework.md" 'records the resulting `memory_commit_sha`'
 check_contains "docs/superpowers/specs/2026-07-12-multica-delivery-framework-design.md" "Codex-owned fast-forward-only acceptance merge and target-branch push are in scope after exact-SHA QA and Review pass."
+check_contains "docs/superpowers/specs/2026-07-12-multica-delivery-framework-design.md" 'Its commit is recorded separately as `memory_commit_sha` and may change no other path.'
 check_contains "docs/superpowers/specs/2026-07-12-multica-delivery-framework-design.md" "goal_identifier"
 check_contains "docs/superpowers/specs/2026-07-12-multica-delivery-framework-design.md" "queue_state"
 check_contains "docs/superpowers/specs/2026-07-12-multica-delivery-framework-design.md" "queue_position"
@@ -48,6 +54,7 @@ check_contains "templates/review-issue.md" "- Candidate branch: \`<candidate-bra
 check_contains "templates/parent-issue.md" "- \`candidate_branch\`: \`<remote-candidate-branch>\`"
 check_contains "templates/parent-issue.md" "- \`target_branch\`: \`<target-branch>\`"
 check_contains "templates/parent-issue.md" "- \`target_head_sha\`: \`<sha-recorded-at-candidate-creation>\`"
+check_contains "templates/parent-issue.md" '- `memory_commit_sha`: `<sha-or-empty>`'
 check_contains "config/multica.example.toml" "candidate_branch = \"multica/<parent-identifier>\""
 check_contains "config/multica.example.toml" "target_branch = \"main\""
 check_absent "config/multica.example.toml" "verification_branch = "
@@ -58,5 +65,7 @@ check_contains "evals/multica-delivery-framework-v1.md" "## 10. Fast-Forward Acc
 check_contains "evals/multica-delivery-framework-v1.md" "## 11. Target Branch Drift Blocks Merge"
 check_contains "evals/multica-delivery-framework-v1.md" "## 12. Merge or Push Failure Stays Blocked"
 check_contains "evals/multica-delivery-framework-v1.md" "## 13. Force Push and Self-Merge Are Prohibited"
+check_contains "evals/multica-delivery-framework-v1.md" "## 18. Memory-Only Completion Commit"
+check_contains "evals/multica-delivery-framework-v1.md" "## 19. Invalid Memory Commit Stays Blocked"
 
 echo "multica-delivery-v1 contract checks passed"

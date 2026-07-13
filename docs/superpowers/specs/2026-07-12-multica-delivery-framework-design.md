@@ -106,9 +106,9 @@ Codex:
 - Assigns, starts, monitors, and reruns Agent tasks through `multica`.
 - Consolidates Agent clarification questions and communicates with the user.
 - Approves or rejects Requirements, Plan, Implementation, QA, and Review outputs.
-- Locks candidate and final commit SHAs.
+- Locks candidate, final delivery, and memory-only commit SHAs.
 - Creates rework waves without overwriting prior history.
-- Writes the lightweight memory record and final acceptance result.
+- Writes and commits the lightweight memory record after the verified delivery reaches the target branch.
 
 Codex is not a Multica Agent and is not represented as a Squad leader.
 
@@ -154,7 +154,7 @@ Reviewer reports defects through its Issue and does not fix them.
 
 Every requirement has one parent Issue. Child Issues carry the actual Agent assignments.
 
-The parent Issue keeps only the workflow metadata needed for deterministic recovery: workflow version, current phase, `goal_identifier`, `queue_state`, `queue_position`, repository identity, canonical memory path `memory/runs/<parent-identifier>.md`, candidate branch, target branch, recorded target head SHA, candidate SHA, and final SHA. Detailed outputs remain in child Issue comments and Git.
+The parent Issue keeps only the workflow metadata needed for deterministic recovery: workflow version, current phase, `goal_identifier`, `queue_state`, `queue_position`, repository identity, canonical memory path `memory/runs/<parent-identifier>.md`, candidate branch, target branch, recorded target head SHA, candidate SHA, `final_sha`, and `memory_commit_sha`. Detailed outputs remain in child Issue comments and Git.
 
 A stage is an execution-wave number on a child Issue. It groups parallel work and makes completion visible; it does not assign an Agent, approve output, or enforce the business workflow.
 
@@ -256,9 +256,11 @@ Codex accepts delivery only when:
 - QA and Reviewer passed the same final SHA.
 - No blocking finding or unresolved workflow Issue remains.
 - The parent and effective child Issue states are consistent.
-- The requirement memory record has been written.
+- The target branch can reach the verified candidate by fast-forward.
 
-Codex then verifies that the current target branch head still matches the head recorded at candidate creation, fast-forward merges the accepted candidate SHA into the target branch, pushes the target branch, records the final SHA, and closes the parent Issue. If the target branch moved, acceptance is blocked until Codex creates an integration or rework path from the new target head and the replacement candidate passes verification.
+Codex records the accepted candidate as `final_sha`, verifies that the current target branch head still matches the head recorded at candidate creation, fast-forward merges and pushes `final_sha`, then confirms the remote target tip equals it. If the target branch moved, acceptance is blocked until Codex creates an integration or rework path from the new target head and the replacement candidate passes verification.
+
+Codex then writes `memory/runs/<parent-identifier>.md`, commits only that path, pushes normally, and records the resulting commit as `memory_commit_sha`. This memory-only commit does not require another QA and Review wave. Codex verifies its path-only diff, required content, remote tip, and `final_sha` ancestry before closing the parent Issue. Any extra path or failed commit, push, or verification keeps the parent incomplete.
 
 ## 11. Automation and Escalation
 
@@ -302,7 +304,7 @@ Each requirement has one lightweight file:
 memory/runs/<parent-identifier>.md
 ```
 
-Codex is the only writer. The file contains approved requirement and plan summaries, key decisions, final SHA, QA and Review evidence references, outcome, and reusable lessons. It does not copy full comments, run transcripts, or test logs from Multica.
+Codex is the only writer. The file contains approved requirement and plan summaries, key decisions, `final_sha`, QA and Review evidence references, outcome, and reusable lessons. It does not copy full comments, run transcripts, or test logs from Multica. Its commit is recorded separately as `memory_commit_sha` and may change no other path.
 
 `knowledge/` contains only reviewed stable knowledge. `improvements/` contains proposed changes to Skills or Agent instructions. Process output never promotes itself directly into long-term knowledge.
 
@@ -358,7 +360,7 @@ After implementation, a Codex Goal uses the framework to deliver a real, small c
 7. QA and Reviewer run in parallel against the same remote candidate branch and candidate SHA.
 8. One deliberately failed verification produces a Rework wave and a new verification wave.
 9. Codex can reconstruct the workflow from the parent Issue.
-10. Final acceptance creates the lightweight memory record.
+10. Final acceptance records `final_sha`, then creates and verifies a separate memory-only `memory_commit_sha`.
 
 The `evals/` directory stores scenarios and expected behavior. V1 does not build an eval engine; real Multica and Git records are the primary evidence.
 

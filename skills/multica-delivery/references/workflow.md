@@ -66,6 +66,7 @@ Stages are execution-wave numbers for audit and recovery. They do not approve ou
 - Delivery Expert is the only code-writing Agent.
 - QA and Reviewer inspect the named SHA only and remain read-only.
 - Codex alone performs the accepted fast-forward merge into the target branch.
+- Codex alone writes and commits the post-merge run memory file.
 
 ## Candidate Transport
 
@@ -76,7 +77,7 @@ Stages are execution-wave numbers for audit and recovery. They do not approve ou
 
 ## Final Acceptance
 
-Accept delivery only when:
+Accept the implementation only when:
 
 - Requirements and Plan are approved
 - implementation remains in approved scope
@@ -84,10 +85,13 @@ Accept delivery only when:
 - QA and Review both pass the same final SHA
 - the recorded target branch head still matches the current target branch head
 - the accepted candidate can be applied as a fast-forward update to the target branch
-- the memory record exists at the canonical path
 
 Codex verifies the remote candidate branch and SHA before opening QA and Review.
 
 If the target branch head moved after candidate creation, stop acceptance and create an integration or rework path from the new target head before another verification wave.
 
-Then Codex fast-forward merges the accepted candidate SHA into the target branch, updates the parent metadata to `queue_state = complete`, and promotes the next queued parent by moving it to `queue_state = active`. Promotion is a deterministic operating step, not a distributed lock.
+Record the accepted candidate as `final_sha`. Codex then fast-forward merges it into the target branch, pushes normally, and verifies that the remote target tip equals `final_sha`.
+
+Codex next writes `memory/runs/<parent-identifier>.md`, commits only that path, pushes the target branch normally, and records the resulting commit as `memory_commit_sha`. No second QA and Review wave is required for this memory-only commit. Codex must verify that its diff changes exactly the canonical memory file, the file records `final_sha` and the accepted QA/Review evidence, the remote target tip equals `memory_commit_sha`, and `final_sha` is an ancestor.
+
+Only then update the parent metadata to `queue_state = complete` and promote the next queued parent by moving it to `queue_state = active`. Promotion is a deterministic operating step, not a distributed lock.

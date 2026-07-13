@@ -57,6 +57,19 @@ If the target branch head moved after candidate creation, block acceptance and c
 
 Merge or push failure keeps the parent incomplete and must be recorded as a concrete blocker.
 
+## Memory Finalization Gate
+
+After the acceptance merge, pass only when:
+
+- the remote target branch tip equals the verified `final_sha` before the memory commit
+- Codex creates the commit and no Agent writes repository memory
+- The memory-only commit may change only `memory/runs/<parent-identifier>.md`.
+- the memory file records `final_sha` and the accepted QA and Review evidence
+- the memory commit is pushed normally and recorded as `memory_commit_sha`
+- the remote target branch tip equals `memory_commit_sha` and contains `final_sha` as an ancestor
+
+The memory-only commit does not require another QA and Review wave because it cannot change implementation or framework files. Any extra changed path, missing required content, commit failure, push failure, or ancestry failure keeps the parent incomplete and must be recorded as a concrete blocker.
+
 ## Correction vs Rework
 
 Use a focused correction on the same Issue when:

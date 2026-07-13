@@ -17,7 +17,7 @@ Resume a Goal queue from:
 - parent Issue fields and metadata
 - child Issues grouped by stage
 - the latest accepted Requirements and Plan comments
-- candidate and final SHAs
+- candidate, final, and memory commit SHAs
 - `memory/runs/<parent-identifier>.md` when present
 
 Required parent metadata for queue recovery:
@@ -30,6 +30,10 @@ Required parent metadata for queue recovery:
 - `candidate_branch`
 - `target_branch`
 - `target_head_sha`
+- `candidate_sha`
+- `final_sha`
+- `memory_commit_sha`
+- `memory_path`
 
 ## Resume Procedure
 
@@ -38,10 +42,12 @@ Required parent metadata for queue recovery:
 3. Confirm there is exactly one `queue_state = active` parent. If none is active, promote the first queued parent. If more than one is active, pause and correct the metadata before advancing work.
 4. List child Issues by stage for the active parent only.
 5. Read the most recent active comment threads on the current-stage child Issues.
-6. Confirm the last accepted gate, the active candidate branch, the active candidate SHA, and the recorded target head SHA, if any.
+6. Confirm the last accepted gate, the active candidate branch, `candidate_sha`, `final_sha`, `memory_commit_sha`, and the recorded target head SHA, if any.
 7. Inspect the repository state, verify the named SHA locally, and verify the named candidate branch remotely before opening verification.
 8. Before acceptance, compare the live target branch head with the recorded `target_head_sha`.
-9. Continue with the next safe action only after the workflow state is coherent.
+9. If `final_sha` is set but `memory_commit_sha` is empty, verify that the remote target tip equals `final_sha` before writing memory.
+10. If `memory_commit_sha` is set, verify that it changes only the canonical memory file, is the remote target tip, and contains `final_sha` as an ancestor.
+11. Continue with the next safe action only after the workflow state is coherent.
 
 ## Promotion Rule
 
@@ -62,6 +68,8 @@ Pause and escalate when:
 - the candidate SHA cannot be inspected
 - the remote candidate branch cannot be proven to contain the named SHA
 - the current target branch head differs from the recorded `target_head_sha`
+- a claimed memory-only commit changes any path other than the canonical run memory file
+- `memory_commit_sha` does not contain `final_sha` as an ancestor
 - required child Issue context is missing
 - another active Codex Goal appears to be operating the same parent Issue
 - queue metadata is missing or ambiguous
