@@ -11,7 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/huangxinxinyu/nano-notebook/internal/identity"
+	"github.com/huangxinxinyu/nano-notebook/internal/notebook"
 )
 
 type Config struct {
@@ -20,16 +21,18 @@ type Config struct {
 }
 
 type Server struct {
-	cfg Config
-	db  *DB
-	mux *http.ServeMux
+	cfg           Config
+	db            *DB
+	identity      *identity.Store
+	notebookStore *notebook.Store
+	mux           *http.ServeMux
 }
 
 func NewServer(cfg Config, db *DB) *Server {
 	if cfg.Version == "" {
 		cfg.Version = "dev"
 	}
-	s := &Server{cfg: cfg, db: db, mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, db: db, identity: identity.NewStore(db.Pool()), notebookStore: notebook.NewStore(db.Pool()), mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -112,31 +115,19 @@ func (s *Server) register(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
 		return
 	}
-	ctx := r.Context()
-	tx, err := s.db.pool.Begin(ctx)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
-		return
-	}
-	defer tx.Rollback(ctx)
-	_, err = tx.Exec(ctx, `insert into identity_users(id, canonical_email, display_email) values($1, $2, $3)`, userID, email, strings.TrimSpace(req.Email))
-	if err != nil {
+	err = s.identity.RegisterLocalUser(r.Context(), userID, email, strings.TrimSpace(req.Email), passwordHash)
+	if errors.Is(err, identity.ErrDuplicateEmail) {
 		writeError(w, r, http.StatusConflict, "duplicate_email", "error.registration_unavailable")
 		return
 	}
-	_, err = tx.Exec(ctx, `insert into identity_local_credentials(user_id, password_hash) values($1, $2)`, userID, passwordHash)
 	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
-		return
-	}
-	if err := tx.Commit(ctx); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
 		return
 	}
 	if !s.issueSession(w, r, userID) {
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"user": publicUser{ID: userID, Email: email}})
+	writeJSON(w, http.StatusCreated, map[string]any{"user": identity.User{ID: userID, Email: email}})
 }
 
 func (s *Server) signIn(w http.ResponseWriter, r *http.Request) {
@@ -161,12 +152,7 @@ func (s *Server) signIn(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusTooManyRequests, "rate_limited", "error.rate_limited")
 		return
 	}
-	var userID, passwordHash string
-	err = s.db.pool.QueryRow(r.Context(), `
-		select u.id, c.password_hash
-		from identity_users u
-		join identity_local_credentials c on c.user_id = u.id
-		where u.canonical_email = $1`, email).Scan(&userID, &passwordHash)
+	userID, passwordHash, err := s.identity.LocalCredential(r.Context(), email)
 	if err != nil || !verifyPassword(passwordHash, req.Password) {
 		_ = s.recordAttempt(r.Context(), email, false)
 		writeError(w, r, http.StatusUnauthorized, "invalid_credentials", "error.invalid_credentials")
@@ -176,7 +162,7 @@ func (s *Server) signIn(w http.ResponseWriter, r *http.Request) {
 	if !s.issueSession(w, r, userID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"user": publicUser{ID: userID, Email: email}})
+	writeJSON(w, http.StatusOK, map[string]any{"user": identity.User{ID: userID, Email: email}})
 }
 
 func (s *Server) signOut(w http.ResponseWriter, r *http.Request) {
@@ -184,11 +170,16 @@ func (s *Server) signOut(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
 		return
 	}
+	if !validCSRF(r) {
+		writeError(w, r, http.StatusForbidden, "csrf_required", "error.csrf_required")
+		return
+	}
 	cookie, err := r.Cookie(sessionCookieName)
 	if err == nil && cookie.Value != "" {
-		_, _ = s.db.pool.Exec(r.Context(), `update identity_sessions set revoked_at = now() where token_hash = $1 and revoked_at is null`, hashToken(cookie.Value))
+		_ = s.identity.RevokeSession(r.Context(), hashToken(cookie.Value))
 	}
 	http.SetCookie(w, expiredCookie(sessionCookieName))
+	http.SetCookie(w, expiredCookie(csrfCookieName))
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -202,7 +193,7 @@ func (s *Server) notebooks(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.listNotebooks(w, r, user.ID)
 	case http.MethodPost:
-		if r.Header.Get("X-CSRF-Token") == "" {
+		if !validCSRF(r) {
 			writeError(w, r, http.StatusForbidden, "csrf_required", "error.csrf_required")
 			return
 		}
@@ -214,29 +205,10 @@ func (s *Server) notebooks(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listNotebooks(w http.ResponseWriter, r *http.Request, userID string) {
 	query := strings.TrimSpace(r.URL.Query().Get("query"))
-	rows, err := s.db.pool.Query(r.Context(), `
-		select n.id, n.title, n.recent_at
-		from notebook_notebooks n
-		join notebook_memberships m on m.notebook_id = n.id
-		where m.user_id = $1
-		  and m.role = 'owner'
-		  and ($2 = '' or lower(n.title) like '%' || lower($2) || '%')
-		order by n.recent_at desc
-		limit 100`, userID, query)
+	notebooks, err := s.notebookStore.ListOwned(r.Context(), userID, query)
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
 		return
-	}
-	defer rows.Close()
-	notebooks := make([]map[string]any, 0)
-	for rows.Next() {
-		var id, title string
-		var recentAt time.Time
-		if err := rows.Scan(&id, &title, &recentAt); err != nil {
-			writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
-			return
-		}
-		notebooks = append(notebooks, map[string]any{"id": id, "title": title, "recent_at": recentAt})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"notebooks": notebooks})
 }
@@ -253,26 +225,6 @@ func (s *Server) createNotebook(w http.ResponseWriter, r *http.Request, userID s
 		return
 	}
 	hash := requestHash(body)
-	var existingHash, existingJSON string
-	var existingStatus int
-	err = s.db.pool.QueryRow(r.Context(), `
-		select request_hash, status_code, response_json::text
-		from platform_idempotency_keys
-		where principal_id = $1 and action = 'create_notebook' and key = $2`, userID, key).Scan(&existingHash, &existingStatus, &existingJSON)
-	if err == nil {
-		if existingHash != hash {
-			writeError(w, r, http.StatusConflict, "idempotency_mismatch", "error.idempotency_mismatch")
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(existingJSON))
-		return
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
-		return
-	}
 	var req struct {
 		Title string `json:"title"`
 	}
@@ -285,54 +237,29 @@ func (s *Server) createNotebook(w http.ResponseWriter, r *http.Request, userID s
 		writeError(w, r, http.StatusBadRequest, "validation_failed", "error.notebook_title")
 		return
 	}
-	var owned int
-	if err := s.db.pool.QueryRow(r.Context(), `select count(*) from notebook_memberships where user_id = $1 and role = 'owner'`, userID).Scan(&owned); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
-		return
-	}
-	if owned >= 100 {
-		writeError(w, r, http.StatusConflict, "quota_reached", "error.notebook_quota")
-		return
-	}
 	notebookID, err := newOpaqueID("nb")
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
 		return
 	}
-	tx, err := s.db.pool.Begin(r.Context())
+	created, reused, err := s.notebookStore.CreateOwned(r.Context(), userID, key, hash, notebookID, title)
+	if errors.Is(err, notebook.ErrIdempotencyMismatch) {
+		writeError(w, r, http.StatusConflict, "idempotency_mismatch", "error.idempotency_mismatch")
+		return
+	}
+	if errors.Is(err, notebook.ErrQuotaReached) {
+		writeError(w, r, http.StatusConflict, "quota_reached", "error.notebook_quota")
+		return
+	}
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
 		return
 	}
-	defer tx.Rollback(r.Context())
-	_, err = tx.Exec(r.Context(), `insert into notebook_notebooks(id, title) values($1, $2)`, notebookID, title)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
-		return
+	status := http.StatusCreated
+	if reused {
+		status = http.StatusOK
 	}
-	_, err = tx.Exec(r.Context(), `insert into notebook_memberships(notebook_id, user_id, role) values($1, $2, 'owner')`, notebookID, userID)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
-		return
-	}
-	response := map[string]any{"notebook": map[string]any{"id": notebookID, "title": title}}
-	responseBytes, err := json.Marshal(response)
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
-		return
-	}
-	_, err = tx.Exec(r.Context(), `
-		insert into platform_idempotency_keys(principal_id, action, key, request_hash, status_code, response_json)
-		values($1, 'create_notebook', $2, $3, $4, $5::jsonb)`, userID, key, hash, http.StatusCreated, string(responseBytes))
-	if err != nil {
-		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
-		return
-	}
-	if err := tx.Commit(r.Context()); err != nil {
-		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
-		return
-	}
-	writeJSON(w, http.StatusCreated, response)
+	writeJSON(w, status, map[string]any{"notebook": created})
 }
 
 func (s *Server) notebookByID(w http.ResponseWriter, r *http.Request) {
@@ -346,17 +273,12 @@ func (s *Server) notebookByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/v1/notebooks/")
-	var title string
-	err := s.db.pool.QueryRow(r.Context(), `
-		select n.title
-		from notebook_notebooks n
-		join notebook_memberships m on m.notebook_id = n.id
-		where n.id = $1 and m.user_id = $2 and m.role = 'owner'`, id, user.ID).Scan(&title)
+	notebook, err := s.notebookStore.GetOwned(r.Context(), user.ID, id)
 	if err != nil {
 		writeError(w, r, http.StatusNotFound, "not_found", "error.notebook_not_found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"notebook": map[string]any{"id": id, "title": title}})
+	writeJSON(w, http.StatusOK, map[string]any{"notebook": notebook})
 }
 
 func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, userID string) bool {
@@ -371,10 +293,7 @@ func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, userID str
 		return false
 	}
 	expires := time.Now().UTC().Add(24 * time.Hour)
-	_, err = s.db.pool.Exec(r.Context(), `
-		insert into identity_sessions(id, user_id, token_hash, expires_at)
-		values($1, $2, $3, $4)`, sessionID, userID, hashToken(token), expires)
-	if err != nil {
+	if err := s.identity.CreateSession(r.Context(), sessionID, userID, hashToken(token), expires); err != nil {
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
 		return false
 	}
@@ -387,50 +306,50 @@ func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, userID str
 		Secure:   s.cfg.CookieSecure,
 		Expires:  expires,
 	})
+	csrfToken, err := newToken()
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return false
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     csrfCookieName,
+		Value:    csrfToken,
+		Path:     "/",
+		HttpOnly: false,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   s.cfg.CookieSecure,
+		Expires:  expires,
+	})
 	return true
 }
 
-func (s *Server) currentUser(r *http.Request) (publicUser, bool) {
+func (s *Server) currentUser(r *http.Request) (identity.User, bool) {
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil || cookie.Value == "" {
-		return publicUser{}, false
+		return identity.User{}, false
 	}
-	var user publicUser
-	err = s.db.pool.QueryRow(r.Context(), `
-		select u.id, u.canonical_email
-		from identity_sessions s
-		join identity_users u on u.id = s.user_id
-		where s.token_hash = $1
-		  and s.revoked_at is null
-		  and s.expires_at > now()`, hashToken(cookie.Value)).Scan(&user.ID, &user.Email)
-	if err != nil {
-		return publicUser{}, false
-	}
-	return user, true
+	return s.identity.CurrentUser(r.Context(), hashToken(cookie.Value))
 }
 
 func (s *Server) rateLimited(ctx context.Context, email string) (bool, error) {
-	var failed int
-	err := s.db.pool.QueryRow(ctx, `
-		select count(*)
-		from identity_auth_attempts
-		where canonical_email = $1
-		  and succeeded = false
-		  and attempted_at > now() - interval '15 minutes'`, email).Scan(&failed)
-	return failed >= 5, err
+	return s.identity.RateLimited(ctx, email)
 }
 
 func (s *Server) recordAttempt(ctx context.Context, email string, succeeded bool) error {
-	_, err := s.db.pool.Exec(ctx, `insert into identity_auth_attempts(canonical_email, succeeded) values($1, $2)`, email, succeeded)
-	return err
-}
-
-type publicUser struct {
-	ID    string `json:"id"`
-	Email string `json:"email"`
+	return s.identity.RecordAttempt(ctx, email, succeeded)
 }
 
 const sessionCookieName = "nn_session"
+const csrfCookieName = "nn_csrf"
+
+func validCSRF(r *http.Request) bool {
+	cookie, err := r.Cookie(csrfCookieName)
+	if err != nil || cookie.Value == "" {
+		return false
+	}
+	header := r.Header.Get("X-CSRF-Token")
+	return header != "" && subtleConstantEqual(header, cookie.Value)
+}
 
 func expiredCookie(name string) *http.Cookie {
 	return &http.Cookie{Name: name, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode}

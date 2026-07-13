@@ -58,6 +58,16 @@ func RunMigrations(ctx context.Context, db *DB) error {
 }
 
 const migrationsSQL = `
+do $$
+begin
+	if not exists (select 1 from pg_roles where rolname = 'nano_app') then
+		create role nano_app;
+	end if;
+	if not exists (select 1 from pg_roles where rolname = 'nano_worker') then
+		create role nano_worker;
+	end if;
+end $$;
+
 create table if not exists identity_users (
 	id text primary key,
 	canonical_email text not null unique,
@@ -126,4 +136,67 @@ create table if not exists platform_idempotency_keys (
 	created_at timestamptz not null default now(),
 	primary key (principal_id, action, key)
 );
+
+alter table identity_users enable row level security;
+alter table identity_local_credentials enable row level security;
+alter table identity_sessions enable row level security;
+alter table identity_auth_attempts enable row level security;
+alter table notebook_notebooks enable row level security;
+alter table notebook_memberships enable row level security;
+alter table platform_idempotency_keys enable row level security;
+
+grant usage on schema public to nano_app, nano_worker;
+grant select, insert, update, delete on
+	identity_users,
+	identity_local_credentials,
+	identity_sessions,
+	identity_auth_attempts,
+	notebook_notebooks,
+	notebook_memberships,
+	platform_idempotency_keys
+to nano_app;
+grant select on
+	identity_users,
+	identity_sessions,
+	notebook_notebooks,
+	notebook_memberships
+to nano_worker;
+
+drop policy if exists identity_users_owner on identity_users;
+create policy identity_users_owner on identity_users
+	for all to nano_app
+	using (id = nullif(current_setting('app.principal_id', true), ''))
+	with check (id = nullif(current_setting('app.principal_id', true), ''));
+
+drop policy if exists identity_sessions_owner on identity_sessions;
+create policy identity_sessions_owner on identity_sessions
+	for all to nano_app
+	using (user_id = nullif(current_setting('app.principal_id', true), ''))
+	with check (user_id = nullif(current_setting('app.principal_id', true), ''));
+
+drop policy if exists notebook_memberships_owner on notebook_memberships;
+create policy notebook_memberships_owner on notebook_memberships
+	for all to nano_app
+	using (user_id = nullif(current_setting('app.principal_id', true), ''))
+	with check (user_id = nullif(current_setting('app.principal_id', true), ''));
+
+drop policy if exists notebook_notebooks_owner on notebook_notebooks;
+create policy notebook_notebooks_owner on notebook_notebooks
+	for all to nano_app
+	using (
+		exists (
+			select 1
+			from notebook_memberships m
+			where m.notebook_id = notebook_notebooks.id
+			  and m.user_id = nullif(current_setting('app.principal_id', true), '')
+			  and m.role = 'owner'
+		)
+	)
+	with check (true);
+
+drop policy if exists platform_idempotency_owner on platform_idempotency_keys;
+create policy platform_idempotency_owner on platform_idempotency_keys
+	for all to nano_app
+	using (principal_id = nullif(current_setting('app.principal_id', true), ''))
+	with check (principal_id = nullif(current_setting('app.principal_id', true), ''));
 `

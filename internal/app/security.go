@@ -92,6 +92,13 @@ func hashToken(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func subtleConstantEqual(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
 func requestHash(body []byte) string {
 	sum := sha256.Sum256(body)
 	return hex.EncodeToString(sum[:])
