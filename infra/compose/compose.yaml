@@ -1,0 +1,76 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: nano
+      POSTGRES_PASSWORD: nano
+      POSTGRES_DB: nano
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nano -d nano"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: nano
+      MINIO_ROOT_PASSWORD: nano-password
+    ports:
+      - "59000:9000"
+      - "59001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - minio-data:/data
+
+  qdrant:
+    image: qdrant/qdrant:v1.15.1
+    ports:
+      - "56333:6333"
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - qdrant-data:/qdrant/storage
+
+  bifrost:
+    image: python:3.13-alpine
+    command: ["python", "-m", "http.server", "56666"]
+    ports:
+      - "56666:56666"
+    healthcheck:
+      test: ["CMD-SHELL", "python - <<'PY'\nimport urllib.request\nurllib.request.urlopen('http://127.0.0.1:56666', timeout=2)\nPY"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "54317:4317"
+      - "54318:4318"
+      - "51686:16686"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:16686 >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  postgres-data:
+  minio-data:
+  qdrant-data:
+

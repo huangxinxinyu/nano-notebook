@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+export NANO_DATABASE_URL="${NANO_DATABASE_URL:-postgres://nano:nano@localhost:55432/nano?sslmode=disable}"
+export NANO_CONTROL_PLANE_ADDR="${NANO_CONTROL_PLANE_ADDR:-:8080}"
+export NANO_WORKER_ADDR="${NANO_WORKER_ADDR:-:8081}"
+
+docker compose -f infra/compose/compose.yaml up -d
+for i in $(seq 1 60); do
+  if docker compose -f infra/compose/compose.yaml exec -T postgres pg_isready -U nano -d nano >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+go run ./cmd/migrate
+
+cleanup() {
+  jobs -p | xargs -r kill 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+go run ./cmd/control-plane &
+go run ./cmd/worker &
+npm --prefix web run dev -- --host 127.0.0.1 &
+
+wait
+

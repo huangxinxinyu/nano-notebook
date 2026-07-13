@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Sprint 1 has no required seed data; register through the browser."
+

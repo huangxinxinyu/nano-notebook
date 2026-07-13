@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+curl -fsS http://localhost:8080/health/live
+echo
+curl -fsS http://localhost:8080/health/ready
+echo
+curl -fsS http://localhost:8081/health/live
+echo
+curl -fsS http://localhost:8081/health/ready
+echo
+curl -fsS http://localhost:5173 >/dev/null
+echo '{"status":"ready","service":"web"}'
+curl -fsS http://localhost:51686 >/dev/null
+echo '{"status":"ready","service":"jaeger"}'
+

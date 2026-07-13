@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+go mod download
+if [ -d web ]; then
+  npm --prefix web install
+fi
+docker compose -f infra/compose/compose.yaml pull postgres minio qdrant bifrost jaeger
+

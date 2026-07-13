@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+pkill -f "go run ./cmd/control-plane" 2>/dev/null || true
+pkill -f "go run ./cmd/worker" 2>/dev/null || true
+pkill -f "vite" 2>/dev/null || true
+docker compose -f infra/compose/compose.yaml down
+
