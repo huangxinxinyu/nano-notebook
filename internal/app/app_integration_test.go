@@ -85,6 +85,46 @@ func TestPrimaryJourneyPersistsOwnedNotebookAndRevokesSession(t *testing.T) {
 	}
 }
 
+func TestNotebookCreateIdempotencyUsesNormalizedRequest(t *testing.T) {
+	api := newTestAPI(t)
+	sessionCookie, csrfCookie := api.registerWithCSRF(t, "canonical-idempotency@example.com")
+
+	create := api.postRawJSONWithCookieAndCSRF(t, "/api/v1/notebooks", `{"title":"Retry Notes"}`, sessionCookie, csrfCookie, csrfCookie.Value, "canonical-create")
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, body = %s", create.Code, create.Body.String())
+	}
+	var created struct {
+		Notebook struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+		} `json:"notebook"`
+	}
+	decodeBody(t, create, &created)
+	if created.Notebook.Title != "Retry Notes" {
+		t.Fatalf("created title = %q, want normalized Retry Notes", created.Notebook.Title)
+	}
+
+	retry := api.postRawJSONWithCookieAndCSRF(t, "/api/v1/notebooks", `{"title": "  Retry Notes  "}`, sessionCookie, csrfCookie, csrfCookie.Value, "canonical-create")
+	if retry.Code != http.StatusOK {
+		t.Fatalf("canonical retry status = %d, body = %s", retry.Code, retry.Body.String())
+	}
+	var retried struct {
+		Notebook struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+		} `json:"notebook"`
+	}
+	decodeBody(t, retry, &retried)
+	if retried.Notebook.ID != created.Notebook.ID || retried.Notebook.Title != "Retry Notes" {
+		t.Fatalf("canonical retry returned %+v, want original %+v", retried.Notebook, created.Notebook)
+	}
+
+	mismatch := api.postRawJSONWithCookieAndCSRF(t, "/api/v1/notebooks", `{"title":"Different Retry Notes"}`, sessionCookie, csrfCookie, csrfCookie.Value, "canonical-create")
+	if mismatch.Code != http.StatusConflict {
+		t.Fatalf("canonical mismatch status = %d, body = %s", mismatch.Code, mismatch.Body.String())
+	}
+}
+
 func TestNotebookAccessDoesNotLeakAcrossUsers(t *testing.T) {
 	api := newTestAPI(t)
 
@@ -581,7 +621,12 @@ func (api *testAPI) postJSONWithCookieAndCSRF(t *testing.T, path string, payload
 	if err != nil {
 		t.Fatal(err)
 	}
-	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	return api.postRawJSONWithCookieAndCSRF(t, path, string(body), cookie, csrfCookie, csrfHeader, idempotencyKey)
+}
+
+func (api *testAPI) postRawJSONWithCookieAndCSRF(t *testing.T, path string, body string, cookie *http.Cookie, csrfCookie *http.Cookie, csrfHeader string, idempotencyKey string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
 	if csrfHeader != "" {
 		req.Header.Set("X-CSRF-Token", csrfHeader)

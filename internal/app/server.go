@@ -254,7 +254,6 @@ func (s *Server) createNotebook(w http.ResponseWriter, r *http.Request, userID s
 		writeError(w, r, http.StatusBadRequest, "bad_request", "error.bad_request")
 		return
 	}
-	hash := requestHash(body)
 	var req struct {
 		Title string `json:"title"`
 	}
@@ -267,6 +266,7 @@ func (s *Server) createNotebook(w http.ResponseWriter, r *http.Request, userID s
 		writeError(w, r, http.StatusBadRequest, "validation_failed", "error.notebook_title")
 		return
 	}
+	hash := notebookCreateRequestHash(title)
 	notebookID, err := newOpaqueID("nb")
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
@@ -296,6 +296,13 @@ func (s *Server) createNotebook(w http.ResponseWriter, r *http.Request, userID s
 		status = http.StatusOK
 	}
 	writeJSON(w, status, map[string]any{"notebook": created})
+}
+
+func notebookCreateRequestHash(title string) string {
+	canonical, _ := json.Marshal(struct {
+		Title string `json:"title"`
+	}{Title: title})
+	return requestHash(canonical)
 }
 
 func (s *Server) notebookByID(w http.ResponseWriter, r *http.Request) {
