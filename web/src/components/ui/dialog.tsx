@@ -1,6 +1,6 @@
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { X } from "lucide-react";
 import * as React from "react";
+import { MaterialSymbol } from "../icons/material-symbol";
 import { cn } from "../../lib/utils";
 
 function Dialog({ ...props }: React.ComponentProps<typeof DialogPrimitive.Root>) {
@@ -39,7 +39,7 @@ const DialogContent = ({
       {children}
       {showCloseButton ? (
         <DialogPrimitive.Close className="nn-dialog-close">
-          <X aria-hidden="true" />
+          <MaterialSymbol name="close" size={18} />
           <span className="sr-only">{closeLabel}</span>
         </DialogPrimitive.Close>
       ) : null}

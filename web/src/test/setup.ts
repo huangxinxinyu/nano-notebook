@@ -1,5 +1,16 @@
 import "@testing-library/jest-dom/vitest";
 
+class TestResizeObserver implements ResizeObserver {
+  disconnect() {}
+  observe() {}
+  unobserve() {}
+}
+
+Object.defineProperty(globalThis, "ResizeObserver", {
+  value: TestResizeObserver,
+  configurable: true
+});
+
 const store = new Map<string, string>();
 
 Object.defineProperty(globalThis, "localStorage", {
