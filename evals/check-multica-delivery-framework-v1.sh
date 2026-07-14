@@ -47,6 +47,7 @@ check_contains "docs/superpowers/specs/2026-07-12-multica-delivery-framework-des
 check_absent "docs/superpowers/specs/2026-07-12-multica-delivery-framework-design.md" "Release, merge, deployment, tagging, or production observation."
 check_absent "docs/superpowers/specs/2026-07-12-multica-delivery-framework-design.md" "memory/runs/<issue-id>.md"
 check_contains "agents/delivery-expert.md" "REMOTE_BRANCH: <remote branch or N/A>"
+check_contains "agents/delivery-expert.md" '`frontend-design` when building or modifying user-facing web interfaces.'
 check_contains "templates/implementation-issue.md" "Push HEAD without force to the named candidate branch."
 check_contains "templates/implementation-issue.md" "REMOTE_BRANCH: <remote branch or N/A>"
 check_contains "templates/qa-issue.md" "- Candidate branch: \`<candidate-branch>\`"

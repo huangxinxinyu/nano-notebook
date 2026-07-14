@@ -21,6 +21,7 @@ Use these local Codex Skills when their trigger applies:
 - `atomic-step-commit` when preparing commits.
 - `acceptance-before-completion` before reporting successful completion.
 - `writing-skills` when creating or changing a reusable Skill.
+- `frontend-design` when building or modifying user-facing web interfaces.
 
 ## Requirements Issue
 
