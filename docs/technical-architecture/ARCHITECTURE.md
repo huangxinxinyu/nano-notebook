@@ -166,6 +166,8 @@ Stopped, failed, or invalidated work retains the User Message and Run status but
 
 The Web Client is a React and TypeScript SPA built with Vite. It consumes JSON REST commands and queries from the Go Control Plane and uses resumable SSE for Source, Job, Agent-stage, and answer projections. SSE event identifiers support reconnection, but the client first reads the latest durable snapshot; SSE is not authoritative state.
 
+The selected browser UI baseline is React 19, TypeScript, Vite, Tailwind CSS 4, shadcn/ui New York-style primitives on Radix UI, TanStack Query, TanStack Table, React Hook Form, Zod, Sonner, and locally hosted Material Symbols. `@assistant-ui/react` is the selected future Chat presentation framework. It is deliberately dependency-only in the current shell: no Assistant UI runtime, message transport, streaming adapter, or synthetic reply behavior is mounted until the Chat and Agent contracts exist. A later Chat implementation may connect Assistant UI's local runtime boundary to the Control Plane, but durable messages, Runs, authorization, and publication remain server-owned.
+
 Each Chat belongs to one creator and remains private even from the Notebook Owner. Source-selection changes apply only to later Runs. A submitted User Message creates a Run with a fixed Run Evidence Set. Only the Publication Barrier can add the corresponding Assistant Message. Failed or stopped Runs can be retried as new Runs without editing history.
 
 ## 11. Model Gateway And Provider Portfolio
@@ -233,7 +235,7 @@ The following are intentionally unresolved until the owning subsystem is impleme
 - Run Working State, Checkpoint, Ledger, Context Builder, cancellation polling, and full Trace schemas;
 - chunking, embeddings, sparse representation, retrieval limits, fusion weights, reranking, and evaluation thresholds;
 - exact parser libraries, OCR prompts, transcription timestamp normalization, and Citation coordinate schemas;
-- Go HTTP framework, SQL access layer, migrations, repository package layout, and frontend component libraries;
+- Go HTTP framework, SQL access layer, migrations, repository package layout, and frontend component choices beyond the selected browser UI baseline;
 - session expiry values, invitation email implementation, retry counts, timeouts, concurrency values, and retention durations;
 - production AWS compute, OIDC provider, email provider, secret store, observability backend, and optional future MQ.
 

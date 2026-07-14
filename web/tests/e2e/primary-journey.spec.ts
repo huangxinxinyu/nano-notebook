@@ -48,9 +48,10 @@ test("registers, creates, finds, opens, signs out, and signs back in", async ({ 
   await page.getByRole("button", { name: "Back to Library" }).click();
 
   await expectNotebookOrder(page, ["Beta Field Notes", "Alpha Field Notes"]);
+  await page.getByRole("button", { name: "Search notebooks" }).click();
   await page.getByPlaceholder("Search notebooks").fill("Alpha");
-  await expect(page.getByRole("button", { name: /Alpha Field Notes/ })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Beta Field Notes/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Open Alpha Field Notes", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open Beta Field Notes", exact: true })).toHaveCount(0);
   await page.getByPlaceholder("Search notebooks").fill("No Match");
   await expect(page.getByText("No notebooks match that search.")).toBeVisible();
   await page.getByPlaceholder("Search notebooks").fill("");
@@ -60,7 +61,8 @@ test("registers, creates, finds, opens, signs out, and signs back in", async ({ 
   await expect(page.getByText("Notebook not found or unavailable.")).toBeVisible();
   await page.getByRole("button", { name: "Back to Library" }).click();
 
-  await page.getByRole("button", { name: "Sign out" }).click();
+  await page.getByRole("button", { name: "Open user menu" }).click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
   await expect(page.getByRole("button", { name: "Create account" })).toBeVisible();
   await page.getByRole("tab", { name: "Sign in" }).click();
   await page.getByLabel("Email").fill(email);
@@ -128,7 +130,7 @@ test("Simplified Chinese journey exposes localized product states and a11y names
   }).toPass();
 });
 
-test("desktop workspace shows sources, chat, and outputs as simultaneous panels", async ({ page }, testInfo) => {
+test("desktop workspace shows sources, chat, and Studio as simultaneous panels", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium-desktop", "desktop hierarchy is only asserted at the desktop viewport");
   const title = await createNotebook(page, testInfo, "Desktop Hierarchy Notes", "desktop");
 
@@ -138,13 +140,13 @@ test("desktop workspace shows sources, chat, and outputs as simultaneous panels"
   await expect(panels).toHaveCount(3);
   const sourcesPanel = workspacePanels.getByRole("region", { name: "Sources" });
   const chatPanel = workspacePanels.getByRole("region", { name: "Chat" });
-  const outputsPanel = workspacePanels.getByRole("region", { name: "Outputs" });
+  const studioPanel = workspacePanels.getByRole("region", { name: "Studio" });
   await expect(sourcesPanel).toBeVisible();
   await expect(chatPanel).toBeVisible();
-  await expect(outputsPanel).toBeVisible();
+  await expect(studioPanel).toBeVisible();
   await expect(sourcesPanel).toContainText("Sources are not available in Sprint 1.");
   await expect(chatPanel).toContainText("Chat is intentionally empty until source processing and retrieval exist.");
-  await expect(outputsPanel).toContainText("Outputs are reserved without generation controls in this sprint.");
+  await expect(studioPanel).toContainText("Studio output will be saved here");
   await expect(page.getByRole("tablist", { name: "Notebook panels" })).toBeHidden();
 
   const boxes = await panels.evaluateAll((nodes) =>
@@ -170,25 +172,25 @@ test("compact workspace keeps one-panel tab navigation without horizontal overfl
   await expect(page.getByRole("tablist", { name: "Notebook panels" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "Sources" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "Chat" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "Outputs" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Studio" })).toBeVisible();
 
   const compactWorkspace = page.locator(".workspace-compact-tabs");
   const sourcesPanel = compactWorkspace.locator('[role="tabpanel"]').filter({ hasText: "Sources are not available in Sprint 1." });
   const chatPanel = compactWorkspace.locator('[role="tabpanel"]').filter({ hasText: "Chat is intentionally empty until source processing and retrieval exist." });
-  const outputsPanel = compactWorkspace.locator('[role="tabpanel"]').filter({ hasText: "Outputs are reserved without generation controls in this sprint." });
+  const studioPanel = compactWorkspace.locator('[role="tabpanel"]').filter({ hasText: "Studio output will be saved here" });
   await expect(sourcesPanel).toBeVisible();
   await expect(chatPanel).toBeHidden();
-  await expect(outputsPanel).toBeHidden();
+  await expect(studioPanel).toBeHidden();
 
   await page.getByRole("tab", { name: "Chat" }).click();
   await expect(sourcesPanel).toBeHidden();
   await expect(chatPanel).toBeVisible();
-  await expect(outputsPanel).toBeHidden();
+  await expect(studioPanel).toBeHidden();
 
-  await page.getByRole("tab", { name: "Outputs" }).click();
+  await page.getByRole("tab", { name: "Studio" }).click();
   await expect(sourcesPanel).toBeHidden();
   await expect(chatPanel).toBeHidden();
-  await expect(outputsPanel).toBeVisible();
+  await expect(studioPanel).toBeVisible();
   await expect(async () => {
     const overflows = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
     expect(overflows).toBe(false);

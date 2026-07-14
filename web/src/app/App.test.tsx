@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "./App";
@@ -56,7 +56,41 @@ test("completes the first notebook journey in English", async () => {
   await screen.findByRole("heading", { name: "My Research Topic" });
   expect(screen.getByRole("tab", { name: "Sources" })).toBeInTheDocument();
   expect(screen.getByRole("tab", { name: "Chat" })).toBeInTheDocument();
-  expect(screen.getByRole("tab", { name: "Outputs" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Studio" })).toBeInTheDocument();
+});
+
+test("renders a truthful static workspace shell without starting a chat runtime", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  fetchHandler = authenticatedWorkspaceHandler();
+
+  render(<App />);
+  const user = userEvent.setup();
+
+  await screen.findByRole("heading", { name: "My Research Topic" });
+  const sources = screen.getByRole("region", { name: "Sources" });
+  expect(sources).toBeInTheDocument();
+  const chat = screen.getByRole("region", { name: "Chat" });
+  expect(chat).toHaveAttribute("data-placeholder", "true");
+  expect(chat).toHaveAttribute("data-chat-framework", "@assistant-ui/react");
+  expect(within(chat).getByRole("textbox", { name: "Chat is not available yet" })).toBeDisabled();
+  expect(screen.getByRole("region", { name: "Studio" })).toBeInTheDocument();
+
+  await user.click(within(sources).getByRole("button", { name: "Add sources" }));
+  expect(await screen.findByText("This feature is coming soon.")).toBeInTheDocument();
+  expect(vi.mocked(fetch).mock.calls.every(([input]) => !String(input).includes("/chat"))).toBe(true);
+});
+
+test("exposes compact Sources, Chat, and Studio navigation", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  fetchHandler = authenticatedWorkspaceHandler();
+
+  render(<App />);
+
+  await screen.findByRole("heading", { name: "My Research Topic" });
+  const tabs = screen.getByRole("tablist", { name: "Notebook panels" });
+  expect(within(tabs).getByRole("tab", { name: "Sources" })).toBeInTheDocument();
+  expect(within(tabs).getByRole("tab", { name: "Chat" })).toBeInTheDocument();
+  expect(within(tabs).getByRole("tab", { name: "Studio" })).toBeInTheDocument();
 });
 
 test("defaults to Simplified Chinese for zh browser locales and can switch languages", async () => {
@@ -70,6 +104,15 @@ test("defaults to Simplified Chinese for zh browser locales and can switch langu
   await user.click(screen.getByRole("button", { name: "切换到 English" }));
   expect(await screen.findByRole("button", { name: "Switch to 简体中文" })).toBeInTheDocument();
   expect(screen.getByRole("tablist", { name: "Authentication mode" })).toBeInTheDocument();
+});
+
+test("uses the local Material Symbols system throughout authentication", async () => {
+  render(<App />);
+
+  const heading = await screen.findByRole("heading", { name: "Nano Notebook" });
+  const panel = heading.closest(".auth-panel");
+  expect(panel?.querySelector(".material-symbol")).toBeInTheDocument();
+  expect(panel?.querySelector("svg")).not.toBeInTheDocument();
 });
 
 test("syncs document language with initial locale and visible switching", async () => {
@@ -238,12 +281,91 @@ test("keeps the library visible when sign-out revocation fails", async () => {
   render(<App />);
   const user = userEvent.setup();
   await screen.findByRole("heading", { name: "Library" });
-  await user.click(screen.getByRole("button", { name: "Sign out" }));
+  await user.click(screen.getByRole("button", { name: "Open user menu" }));
+  await user.click(screen.getByRole("menuitem", { name: "Sign out" }));
 
   expect(await screen.findByRole("alert")).toHaveTextContent("Sign out failed. Retry to revoke the server session.");
   expect(screen.getByRole("heading", { name: "Library" })).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Create account" })).not.toBeInTheDocument();
 });
+
+test("renders real notebooks in a table and sorts them by title", async () => {
+  fetchHandler = authenticatedLibraryHandler([
+    { id: "nb_zulu", title: "Zulu Notes", recent_at: "2026-07-14T10:00:00Z" },
+    { id: "nb_alpha", title: "Alpha Notes", recent_at: "2026-07-13T10:00:00Z" }
+  ]);
+
+  render(<App />);
+  const user = userEvent.setup();
+  const table = await screen.findByRole("table", { name: "Recently opened notebooks" });
+
+  expect(within(table).getByRole("columnheader", { name: "Title" })).toBeInTheDocument();
+  expect(within(table).getByRole("columnheader", { name: "Source" })).toBeInTheDocument();
+  expect(within(table).getByRole("columnheader", { name: "Creation date" })).toBeInTheDocument();
+  expect(within(table).getByRole("columnheader", { name: "Role" })).toBeInTheDocument();
+  expect((await within(table).findAllByRole("button", { name: /Open .* Notes/ })).map((button) => button.getAttribute("aria-label"))).toEqual([
+    "Open Zulu Notes",
+    "Open Alpha Notes"
+  ]);
+
+  await user.click(screen.getByRole("button", { name: "Sort notebooks" }));
+  await user.click(screen.getByRole("menuitem", { name: "Title" }));
+
+  expect(within(table).getAllByRole("button", { name: /Open .* Notes/ }).map((button) => button.getAttribute("aria-label"))).toEqual([
+    "Open Alpha Notes",
+    "Open Zulu Notes"
+  ]);
+});
+
+test("expands and closes notebook search while querying the backend", async () => {
+  fetchHandler = authenticatedLibraryHandler([{ id: "nb_alpha", title: "Alpha Notes" }]);
+
+  render(<App />);
+  const user = userEvent.setup();
+  await screen.findByRole("heading", { name: "Library" });
+
+  expect(screen.queryByPlaceholderText("Search notebooks")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Search notebooks" }));
+  const input = screen.getByPlaceholderText("Search notebooks");
+  await user.type(input, "Alpha");
+
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/v1/notebooks?query=Alpha", expect.anything()));
+  await user.click(screen.getByRole("button", { name: "Close search" }));
+  expect(screen.queryByPlaceholderText("Search notebooks")).not.toBeInTheDocument();
+});
+
+test("keeps featured notebook rows isolated as coming-soon placeholders", async () => {
+  fetchHandler = authenticatedLibraryHandler([]);
+
+  render(<App />);
+  const user = userEvent.setup();
+  const table = await screen.findByRole("table", { name: "Featured notebooks" });
+  const placeholder = table.querySelector('[data-placeholder="true"]');
+
+  expect(placeholder).toBeInTheDocument();
+  await user.click(within(table).getByRole("button", { name: /Open Benjamin Franklin/ }));
+  expect(await screen.findByText("Featured notebooks are coming soon.")).toBeInTheDocument();
+});
+
+function authenticatedLibraryHandler(notebooks: Array<{ id: string; title: string; recent_at?: string }>) {
+  return async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.startsWith("/api/v1/notebooks?") && method === "GET") return json({ notebooks });
+    if (url.endsWith("/api/v1/auth/sign-out")) return new Response(null, { status: 204 });
+    return json({ error: { code: "not_found" } }, 404);
+  };
+}
+
+function authenticatedWorkspaceHandler() {
+  return async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
+    return json({ error: { code: "not_found" } }, 404);
+  };
+}
 
 function json(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {
