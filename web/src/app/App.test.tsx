@@ -56,7 +56,41 @@ test("completes the first notebook journey in English", async () => {
   await screen.findByRole("heading", { name: "My Research Topic" });
   expect(screen.getByRole("tab", { name: "Sources" })).toBeInTheDocument();
   expect(screen.getByRole("tab", { name: "Chat" })).toBeInTheDocument();
-  expect(screen.getByRole("tab", { name: "Outputs" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Studio" })).toBeInTheDocument();
+});
+
+test("renders a truthful static workspace shell without starting a chat runtime", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  fetchHandler = authenticatedWorkspaceHandler();
+
+  render(<App />);
+  const user = userEvent.setup();
+
+  await screen.findByRole("heading", { name: "My Research Topic" });
+  const sources = screen.getByRole("region", { name: "Sources" });
+  expect(sources).toBeInTheDocument();
+  const chat = screen.getByRole("region", { name: "Chat" });
+  expect(chat).toHaveAttribute("data-placeholder", "true");
+  expect(chat).toHaveAttribute("data-chat-framework", "@assistant-ui/react");
+  expect(within(chat).getByRole("textbox", { name: "Chat is not available yet" })).toBeDisabled();
+  expect(screen.getByRole("region", { name: "Studio" })).toBeInTheDocument();
+
+  await user.click(within(sources).getByRole("button", { name: "Add sources" }));
+  expect(await screen.findByText("This feature is coming soon.")).toBeInTheDocument();
+  expect(vi.mocked(fetch).mock.calls.every(([input]) => !String(input).includes("/chat"))).toBe(true);
+});
+
+test("exposes compact Sources, Chat, and Studio navigation", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  fetchHandler = authenticatedWorkspaceHandler();
+
+  render(<App />);
+
+  await screen.findByRole("heading", { name: "My Research Topic" });
+  const tabs = screen.getByRole("tablist", { name: "Notebook panels" });
+  expect(within(tabs).getByRole("tab", { name: "Sources" })).toBeInTheDocument();
+  expect(within(tabs).getByRole("tab", { name: "Chat" })).toBeInTheDocument();
+  expect(within(tabs).getByRole("tab", { name: "Studio" })).toBeInTheDocument();
 });
 
 test("defaults to Simplified Chinese for zh browser locales and can switch languages", async () => {
@@ -311,6 +345,15 @@ function authenticatedLibraryHandler(notebooks: Array<{ id: string; title: strin
     if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
     if (url.startsWith("/api/v1/notebooks?") && method === "GET") return json({ notebooks });
     if (url.endsWith("/api/v1/auth/sign-out")) return new Response(null, { status: 204 });
+    return json({ error: { code: "not_found" } }, 404);
+  };
+}
+
+function authenticatedWorkspaceHandler() {
+  return async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
     return json({ error: { code: "not_found" } }, 404);
   };
 }

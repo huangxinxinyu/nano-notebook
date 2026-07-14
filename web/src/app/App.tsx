@@ -1,5 +1,5 @@
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
-import { ArrowLeft, BookOpen, Languages, ShieldCheck } from "lucide-react";
+import { BookOpen, Languages, ShieldCheck } from "lucide-react";
 import { useLayoutEffect, useState, type ReactNode } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
@@ -10,12 +10,14 @@ import { Dialog, DialogClose, DialogContent, DialogTitle, DialogTrigger } from "
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Toaster } from "../components/ui/sonner";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
+import { Tabs, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { MaterialSymbol } from "../components/icons/material-symbol";
 import { FeaturedNotebooks } from "../components/library/featured-notebooks";
 import { LibraryToolbar, type LibraryView, type NotebookSort } from "../components/library/library-toolbar";
 import { NotebookTable } from "../components/library/notebook-table";
 import { LibraryHeader } from "../components/layout/app-header";
+import { NotebookWorkspace } from "../components/workspace/notebook-workspace";
+import { WorkspaceHeader } from "../components/workspace/workspace-header";
 import { queryClient } from "./queryClient";
 
 type Locale = "en" | "zh";
@@ -47,10 +49,10 @@ const strings = {
     back: "Back to Library",
     sources: "Sources",
     chat: "Chat",
-    outputs: "Outputs",
+    outputs: "Studio",
     sourcesEmpty: "Sources are not available in Sprint 1. This area is reserved for later ingestion work.",
     chatEmpty: "Chat is intentionally empty until source processing and retrieval exist.",
-    outputsEmpty: "Outputs are reserved without generation controls in this sprint.",
+    outputsEmpty: "Studio outputs are reserved without generation controls in this sprint.",
     unreachable: "Control Plane is unreachable. Retry after starting the local system.",
     validation: "Use a valid email, a 15+ character password, and a notebook title.",
     safeNotFound: "Notebook not found or unavailable.",
@@ -99,7 +101,31 @@ const strings = {
     featuredComingSoon: "Featured notebooks are coming soon.",
     emptyTable: "No notebooks yet.",
     viewAll: "View all",
-    gridComingSoon: "Grid view is coming soon."
+    gridComingSoon: "Grid view is coming soon.",
+    analyze: "Analyze",
+    addSources: "Add sources",
+    searchWeb: "Search the web for new sources",
+    web: "Web",
+    fastResearch: "Fast Research",
+    sourcesEmptyTitle: "Saved sources will appear here",
+    collapsePanel: "Collapse panel",
+    chatUnavailable: "Chat is not available yet",
+    chatEmptyTitle: "Chat will start here",
+    chatEmptyBody: "Chat is intentionally empty until source processing and retrieval exist.",
+    chatComposer: "Add sources to start chatting",
+    beta: "Beta",
+    studioEmptyTitle: "Studio output will be saved here",
+    studioEmptyBody: "Add sources, then choose an output above when generation becomes available.",
+    addNote: "Add note",
+    audioOverview: "Audio overview",
+    presentation: "Slide deck",
+    videoOverview: "Video overview",
+    mindMap: "Mind map",
+    report: "Report",
+    flashcards: "Flashcards",
+    quiz: "Quiz",
+    dataTable: "Data table",
+    infographic: "Infographic"
   },
   zh: {
     languageSwitch: "切换到 English",
@@ -124,10 +150,10 @@ const strings = {
     back: "返回笔记库",
     sources: "资料",
     chat: "对话",
-    outputs: "输出",
+    outputs: "Studio",
     sourcesEmpty: "Sprint 1 尚不支持资料导入，此区域为后续资料流程预留。",
     chatEmpty: "在资料处理和检索完成前，对话区域保持为空。",
-    outputsEmpty: "本迭代仅保留输出区域，不提供生成控件。",
+    outputsEmpty: "本迭代仅保留 Studio 输出区域，不提供生成控件。",
     unreachable: "无法连接 Control Plane。请先启动本地系统后重试。",
     validation: "请输入有效邮箱、至少 15 个字符的密码，以及笔记本标题。",
     safeNotFound: "笔记本不存在或不可访问。",
@@ -176,7 +202,31 @@ const strings = {
     featuredComingSoon: "精选笔记本功能即将推出",
     emptyTable: "还没有笔记本。",
     viewAll: "查看全部",
-    gridComingSoon: "网格视图即将推出。"
+    gridComingSoon: "网格视图即将推出。",
+    analyze: "分析",
+    addSources: "添加来源",
+    searchWeb: "在网络中搜索新来源",
+    web: "Web",
+    fastResearch: "快速研究",
+    sourcesEmptyTitle: "已保存的来源将显示在此处",
+    collapsePanel: "收起面板",
+    chatUnavailable: "聊天功能尚未开放",
+    chatEmptyTitle: "对话将在这里开始",
+    chatEmptyBody: "在资料处理和检索完成前，对话区域保持为空。",
+    chatComposer: "添加来源后即可开始对话",
+    beta: "Beta 版",
+    studioEmptyTitle: "Studio 输出将保存在此处",
+    studioEmptyBody: "添加来源后，生成能力开放时即可从上方选择输出。",
+    addNote: "添加笔记",
+    audioOverview: "音频概览",
+    presentation: "演示文稿",
+    videoOverview: "视频概览",
+    mindMap: "思维导图",
+    report: "报告",
+    flashcards: "闪卡",
+    quiz: "测验",
+    dataTable: "数据表格",
+    infographic: "信息图"
   }
 } satisfies Record<Locale, Record<string, string>>;
 
@@ -257,7 +307,10 @@ function AppShell() {
   } else if (!activeUser) {
     shell = <AuthScreen t={t} locale={locale} sessionNotice={sessionNotice} onLocale={switchLocale} onAuthed={setUser} />;
   } else if (notebookID) {
-    shell = <Workspace t={t} onLocale={switchLocale} user={activeUser} notebookID={notebookID} onLibrary={() => navigate("/")} />;
+    shell = <Workspace t={t} onLocale={switchLocale} user={activeUser} notebookID={notebookID} onLibrary={() => navigate("/")} onOpen={(id) => navigate(`/notebooks/${id}`)} onSignedOut={() => {
+      queryClient.setQueryData(["session"], { status: "anonymous" } satisfies SessionState);
+      setUser(null);
+    }} />;
   } else {
     shell = <LibraryScreen t={t} locale={locale} onLocale={switchLocale} user={activeUser} onOpen={(id) => navigate(`/notebooks/${id}`)} onSignedOut={() => {
       queryClient.setQueryData(["session"], { status: "anonymous" } satisfies SessionState);
@@ -509,7 +562,9 @@ function CreateNotebookDialog({ t, onOpen, onClose }: { t: typeof strings.en; on
   );
 }
 
-function Workspace({ t, notebookID, onLocale, onLibrary }: { t: typeof strings.en; user: User; notebookID: string; onLocale: () => void; onLibrary: () => void }) {
+function Workspace({ t, user, notebookID, onLocale, onLibrary, onOpen, onSignedOut }: { t: typeof strings.en; user: User; notebookID: string; onLocale: () => void; onLibrary: () => void; onOpen: (id: string) => void; onSignedOut: () => void }) {
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
   const notebook = useQuery({
     queryKey: ["notebook", notebookID],
     queryFn: async () => {
@@ -520,55 +575,73 @@ function Workspace({ t, notebookID, onLocale, onLibrary }: { t: typeof strings.e
     }
   });
 
+  async function signOut() {
+    setSigningOut(true);
+    try {
+      const response = await api("/api/v1/auth/sign-out", { method: "POST", headers: { "X-CSRF-Token": csrfToken() } });
+      if (!response.ok) throw new Error(t.signOutFailed);
+      onSignedOut();
+    } catch {
+      toast.error(t.signOutFailed);
+    } finally {
+      setSigningOut(false);
+    }
+  }
+
+  const createAction = (
+    <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+      <DialogTrigger asChild>
+        <Button className="workspace-create-action"><MaterialSymbol name="add" size={20} />{t.createNotebook}</Button>
+      </DialogTrigger>
+      <CreateNotebookDialog t={t} onOpen={onOpen} onClose={() => setDialogOpen(false)} />
+    </Dialog>
+  );
+
+  const workspaceCopy = {
+    panelsLabel: t.notebookPanelsLabel,
+    sources: t.sources,
+    chat: t.chat,
+    studio: t.outputs,
+    addSources: t.addSources,
+    searchWeb: t.searchWeb,
+    web: t.web,
+    fastResearch: t.fastResearch,
+    sourcesEmptyTitle: t.sourcesEmptyTitle,
+    sourcesEmptyBody: t.sourcesEmpty,
+    collapsePanel: t.collapsePanel,
+    comingSoon: t.comingSoon,
+    chatUnavailable: t.chatUnavailable,
+    chatEmptyTitle: t.chatEmptyTitle,
+    chatEmptyBody: t.chatEmptyBody,
+    chatComposer: t.chatComposer,
+    beta: t.beta,
+    studioEmptyTitle: t.studioEmptyTitle,
+    studioEmptyBody: t.studioEmptyBody,
+    addNote: t.addNote,
+    studioActions: [
+      { icon: "graphic_eq", label: t.audioOverview, tone: "violet" },
+      { icon: "view_carousel", label: t.presentation, tone: "amber", beta: true },
+      { icon: "slideshow", label: t.videoOverview, tone: "green" },
+      { icon: "account_tree", label: t.mindMap, tone: "rose" },
+      { icon: "summarize", label: t.report, tone: "amber" },
+      { icon: "style", label: t.flashcards, tone: "orange" },
+      { icon: "quiz", label: t.quiz, tone: "blue" },
+      { icon: "table_view", label: t.dataTable, tone: "slate" },
+      { icon: "insert_chart", label: t.infographic, tone: "plum", beta: true }
+    ]
+  };
+
   return (
     <main className="workspace-layout">
-      <header className="topbar">
-        <Button variant="secondary" className="icon-action" onClick={onLibrary}><ArrowLeft aria-hidden="true" />{t.back}</Button>
-        <LanguageButton label={t.languageSwitch} onClick={onLocale} />
-      </header>
-      {notebook.isLoading ? <p>{t.loading}</p> : null}
-      {notebook.isError ? <RetryableAlert message={notebook.error.message} retryLabel={t.retry} onRetry={() => void notebook.refetch()} /> : null}
+      {notebook.isLoading ? <div className="workspace-system-state"><p>{t.loading}</p></div> : null}
+      {notebook.isError ? <div className="workspace-system-state"><Button variant="ghost" onClick={onLibrary}><MaterialSymbol name="arrow_back" size={20} />{t.back}</Button><RetryableAlert message={notebook.error.message} retryLabel={t.retry} onRetry={() => void notebook.refetch()} /></div> : null}
       {notebook.data ? (
         <>
-          <h1>{notebook.data.title}</h1>
-          <div className="workspace-panels" aria-label={t.notebookPanelsLabel}>
-            <PanelRegion value="sources" title={t.sources} body={t.sourcesEmpty} />
-            <PanelRegion value="chat" title={t.chat} body={t.chatEmpty} />
-            <PanelRegion value="outputs" title={t.outputs} body={t.outputsEmpty} />
-          </div>
-          <Tabs defaultValue="sources" className="workspace-compact-tabs">
-            <TabsList className="workspace-tabs" aria-label={t.notebookPanelsLabel}>
-              <TabsTrigger value="sources">{t.sources}</TabsTrigger>
-              <TabsTrigger value="chat">{t.chat}</TabsTrigger>
-              <TabsTrigger value="outputs">{t.outputs}</TabsTrigger>
-            </TabsList>
-            <PanelTab value="sources" title={t.sources} body={t.sourcesEmpty} />
-            <PanelTab value="chat" title={t.chat} body={t.chatEmpty} />
-            <PanelTab value="outputs" title={t.outputs} body={t.outputsEmpty} />
-          </Tabs>
+          <WorkspaceHeader title={notebook.data.title} backLabel={t.back} createAction={createAction} analyzeLabel={t.analyze} shareLabel={t.share} settingsLabel={t.settings} appsLabel={t.apps} email={user.email} openUserMenuLabel={t.openUserMenu} languageLabel={t.languageSwitch} signOutLabel={t.signOut} signingOutLabel={t.signingOut} signingOut={signingOut} comingSoonMessage={t.comingSoon} onBack={onLibrary} onLanguage={onLocale} onSignOut={() => void signOut()} />
+          <NotebookWorkspace copy={workspaceCopy} />
         </>
       ) : null}
     </main>
-  );
-}
-
-function PanelRegion({ value, title, body }: { value: string; title: string; body: string }) {
-  const titleID = `workspace-${value}-title`;
-
-  return (
-    <section className="workspace-panel" role="region" aria-labelledby={titleID}>
-      <h2 id={titleID}>{title}</h2>
-      <p>{body}</p>
-    </section>
-  );
-}
-
-function PanelTab({ value, title, body }: { value: string; title: string; body: string }) {
-  return (
-    <TabsContent className="workspace-panel" value={value}>
-      <h2>{title}</h2>
-      <p>{body}</p>
-    </TabsContent>
   );
 }
 
