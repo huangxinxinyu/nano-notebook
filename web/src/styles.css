@@ -1,6 +1,22 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+@font-face {
+  font-family: "Material Symbols Rounded";
+  src: url("./assets/material-symbols/material-symbols-rounded.woff2") format("woff2");
+  font-display: block;
+  font-style: normal;
+  font-weight: 100 700;
+}
+
+@font-face {
+  font-family: "Material Symbols Outlined";
+  src: url("./assets/material-symbols/material-symbols-outlined.woff2") format("woff2");
+  font-display: block;
+  font-style: normal;
+  font-weight: 100 700;
+}
+
 @layer theme, base, components;
 
 @layer theme {
@@ -53,6 +69,36 @@ input {
 button {
   border: 0;
   cursor: pointer;
+}
+
+.material-symbol {
+  display: inline-block;
+  flex: none;
+  overflow: hidden;
+  width: 1em;
+  height: 1em;
+  font-feature-settings: "liga";
+  font-style: normal;
+  font-variation-settings:
+    "FILL" var(--symbol-fill),
+    "wght" var(--symbol-weight),
+    "GRAD" var(--symbol-grade),
+    "opsz" var(--symbol-opsz);
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  user-select: none;
+}
+
+.material-symbol--rounded {
+  font-family: "Material Symbols Rounded";
+}
+
+.material-symbol--outlined {
+  font-family: "Material Symbols Outlined";
 }
 
 button:focus-visible,
