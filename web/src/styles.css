@@ -849,7 +849,7 @@ h2 {
 
 .library-section .nn-table-head,
 .library-section .nn-table-cell {
-  height: 55px;
+  height: 59px;
   padding: 0 16px;
 }
 
@@ -970,7 +970,7 @@ h2 {
 
 .featured-section {
   position: relative;
-  margin-top: 45px;
+  margin-top: 57px;
 }
 
 .featured-section .nn-table-row[data-placeholder="true"] {
