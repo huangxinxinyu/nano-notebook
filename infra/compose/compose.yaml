@@ -46,6 +46,9 @@ services:
 
   bifrost:
     image: maximhq/bifrost:v1.6.3
+    env_file:
+      - path: .env
+        required: false
     environment:
       APP_HOST: 0.0.0.0
       APP_PORT: "56666"

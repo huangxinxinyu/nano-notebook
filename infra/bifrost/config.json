@@ -1,6 +1,31 @@
 {
   "$schema": "https://www.getbifrost.ai/schema",
-  "providers": {},
+  "providers": {
+    "aliyun": {
+      "keys": [
+        {
+          "name": "dashscope-local",
+          "value": "env.DASHSCOPE_API_KEY",
+          "models": [
+            "qwen-flash"
+          ],
+          "weight": 1
+        }
+      ],
+      "network_config": {
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode",
+        "default_request_timeout_in_seconds": 60,
+        "max_retries": 2
+      },
+      "custom_provider_config": {
+        "base_provider_type": "openai",
+        "allowed_requests": {
+          "chat_completion": true,
+          "chat_completion_stream": true
+        }
+      }
+    }
+  },
   "config_store": {
     "enabled": false
   },
