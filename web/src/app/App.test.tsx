@@ -106,6 +106,15 @@ test("defaults to Simplified Chinese for zh browser locales and can switch langu
   expect(screen.getByRole("tablist", { name: "Authentication mode" })).toBeInTheDocument();
 });
 
+test("uses the local Material Symbols system throughout authentication", async () => {
+  render(<App />);
+
+  const heading = await screen.findByRole("heading", { name: "Nano Notebook" });
+  const panel = heading.closest(".auth-panel");
+  expect(panel?.querySelector(".material-symbol")).toBeInTheDocument();
+  expect(panel?.querySelector("svg")).not.toBeInTheDocument();
+});
+
 test("syncs document language with initial locale and visible switching", async () => {
   Object.defineProperty(window.navigator, "language", { value: "zh-CN", configurable: true });
   render(<App />);

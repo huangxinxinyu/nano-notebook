@@ -1,5 +1,4 @@
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
-import { BookOpen, Languages, ShieldCheck } from "lucide-react";
 import { useLayoutEffect, useState, type ReactNode } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
@@ -371,7 +370,7 @@ function AuthScreen({ t, locale, sessionNotice, onLocale, onAuthed }: { t: typeo
       <LanguageButton label={t.languageSwitch} onClick={onLocale} />
       <section className="auth-panel" aria-labelledby="auth-title">
         <div className="brand-lockup">
-          <BookOpen aria-hidden="true" />
+          <span className="auth-brand-icon"><MaterialSymbol name="book_2" size={30} weight={500} /></span>
           <h1 id="auth-title">{t.app}</h1>
         </div>
         <p>{t.subtitle}</p>
@@ -394,7 +393,7 @@ function AuthScreen({ t, locale, sessionNotice, onLocale, onAuthed }: { t: typeo
           </div>
           <Button disabled={busy}>{busy ? t.submitting : mode === "register" ? t.createAccount : t.signIn}</Button>
         </form>
-        <p className="notice"><ShieldCheck aria-hidden="true" /> {locale === "en" ? t.localOnly : t.localOnly}</p>
+        <p className="notice"><MaterialSymbol name="verified_user" size={19} /> {locale === "en" ? t.localOnly : t.localOnly}</p>
       </section>
     </main>
   );
@@ -651,7 +650,7 @@ function SystemState({ t, onLocale, message, alert = false, onRetry }: { t: type
       <LanguageButton label={t.languageSwitch} onClick={onLocale} />
       <section className="auth-panel" aria-labelledby="system-title">
         <div className="brand-lockup">
-          <BookOpen aria-hidden="true" />
+          <span className="auth-brand-icon"><MaterialSymbol name="book_2" size={30} weight={500} /></span>
           <h1 id="system-title">{t.app}</h1>
         </div>
         {alert ? <Alert variant="destructive"><AlertDescription>{message}</AlertDescription></Alert> : <p>{message}</p>}
@@ -671,7 +670,7 @@ function RetryableAlert({ message, retryLabel, onRetry }: { message: string; ret
 }
 
 function LanguageButton({ label, onClick }: { label: string; onClick: () => void }) {
-  return <Button variant="secondary" className="icon-action" onClick={onClick} aria-label={label}><Languages aria-hidden="true" />{label}</Button>;
+  return <Button variant="secondary" className="icon-action" onClick={onClick} aria-label={label}><MaterialSymbol name="language" size={19} />{label}</Button>;
 }
 
 async function api(path: string, init: RequestInit = {}) {
