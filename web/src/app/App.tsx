@@ -1,17 +1,21 @@
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
-import { ArrowLeft, BookOpen, Languages, Library, LogOut, Plus, Search, ShieldCheck } from "lucide-react";
+import { ArrowLeft, BookOpen, Languages, ShieldCheck } from "lucide-react";
 import { useLayoutEffect, useState, type ReactNode } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
 import { Alert, AlertDescription } from "../components/ui/alert";
 import { Button } from "../components/ui/button";
-import { Card, CardContent } from "../components/ui/card";
 import { Dialog, DialogClose, DialogContent, DialogTitle, DialogTrigger } from "../components/ui/dialog";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { Toaster } from "../components/ui/sonner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/ui/tabs";
+import { MaterialSymbol } from "../components/icons/material-symbol";
+import { FeaturedNotebooks } from "../components/library/featured-notebooks";
+import { LibraryToolbar, type LibraryView, type NotebookSort } from "../components/library/library-toolbar";
+import { NotebookTable } from "../components/library/notebook-table";
+import { LibraryHeader } from "../components/layout/app-header";
 import { queryClient } from "./queryClient";
 
 type Locale = "en" | "zh";
@@ -64,7 +68,38 @@ const strings = {
     sessionExpired: "Your session expired or was revoked. Sign in again to continue.",
     authModeLabel: "Authentication mode",
     notebookPanelsLabel: "Notebook panels",
-    notificationsLabel: "Notifications"
+    notificationsLabel: "Notifications",
+    settings: "Settings",
+    apps: "Google apps",
+    openUserMenu: "Open user menu",
+    allNotebooks: "All",
+    featuredNotebooks: "Featured notebooks",
+    sharedWithMe: "Shared with me",
+    closeSearch: "Close search",
+    gridView: "Grid view",
+    listView: "List view",
+    sortNotebooks: "Sort notebooks",
+    recent: "Recent",
+    sortTitle: "Title",
+    recentlyOpened: "Recently opened notebooks",
+    columnTitle: "Title",
+    columnSource: "Source",
+    creationDate: "Creation date",
+    role: "Role",
+    owner: "Owner",
+    reader: "Reader",
+    zeroSources: "0 sources",
+    missingDate: "—",
+    openNotebook: "Open",
+    moreActions: "More actions for",
+    rename: "Rename",
+    share: "Share",
+    delete: "Delete",
+    comingSoon: "This feature is coming soon.",
+    featuredComingSoon: "Featured notebooks are coming soon.",
+    emptyTable: "No notebooks yet.",
+    viewAll: "View all",
+    gridComingSoon: "Grid view is coming soon."
   },
   zh: {
     languageSwitch: "切换到 English",
@@ -110,7 +145,38 @@ const strings = {
     sessionExpired: "会话已过期或被撤销。请重新登录以继续。",
     authModeLabel: "认证方式",
     notebookPanelsLabel: "笔记本面板",
-    notificationsLabel: "通知"
+    notificationsLabel: "通知",
+    settings: "设置",
+    apps: "Google 应用",
+    openUserMenu: "打开用户菜单",
+    allNotebooks: "全部",
+    featuredNotebooks: "精选笔记本",
+    sharedWithMe: "与我共享",
+    closeSearch: "关闭搜索",
+    gridView: "网格视图",
+    listView: "列表视图",
+    sortNotebooks: "排序笔记本",
+    recent: "最近",
+    sortTitle: "标题",
+    recentlyOpened: "最近打开过的笔记本",
+    columnTitle: "标题",
+    columnSource: "来源",
+    creationDate: "创建日期",
+    role: "角色",
+    owner: "所有者",
+    reader: "阅读者",
+    zeroSources: "0 个来源",
+    missingDate: "—",
+    openNotebook: "打开",
+    moreActions: "更多操作：",
+    rename: "重命名",
+    share: "分享",
+    delete: "删除",
+    comingSoon: "该功能即将推出",
+    featuredComingSoon: "精选笔记本功能即将推出",
+    emptyTable: "还没有笔记本。",
+    viewAll: "查看全部",
+    gridComingSoon: "网格视图即将推出。"
   }
 } satisfies Record<Locale, Record<string, string>>;
 
@@ -193,7 +259,7 @@ function AppShell() {
   } else if (notebookID) {
     shell = <Workspace t={t} onLocale={switchLocale} user={activeUser} notebookID={notebookID} onLibrary={() => navigate("/")} />;
   } else {
-    shell = <LibraryScreen t={t} onLocale={switchLocale} user={activeUser} onOpen={(id) => navigate(`/notebooks/${id}`)} onSignedOut={() => {
+    shell = <LibraryScreen t={t} locale={locale} onLocale={switchLocale} user={activeUser} onOpen={(id) => navigate(`/notebooks/${id}`)} onSignedOut={() => {
       queryClient.setQueryData(["session"], { status: "anonymous" } satisfies SessionState);
       setUser(null);
     }} />;
@@ -281,8 +347,11 @@ function AuthScreen({ t, locale, sessionNotice, onLocale, onAuthed }: { t: typeo
   );
 }
 
-function LibraryScreen({ t, user, onLocale, onOpen, onSignedOut }: { t: typeof strings.en; user: User; onLocale: () => void; onOpen: (id: string) => void; onSignedOut: () => void }) {
+function LibraryScreen({ t, locale, user, onLocale, onOpen, onSignedOut }: { t: typeof strings.en; locale: Locale; user: User; onLocale: () => void; onOpen: (id: string) => void; onSignedOut: () => void }) {
   const [query, setQuery] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [view, setView] = useState<LibraryView>("list");
+  const [sort, setSort] = useState<NotebookSort>("recent");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
@@ -310,45 +379,79 @@ function LibraryScreen({ t, user, onLocale, onOpen, onSignedOut }: { t: typeof s
     }
   }
 
+  const createAction = (
+    <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+      <DialogTrigger asChild>
+        <Button className="create-notebook-action"><MaterialSymbol name="add" size={20} />{t.newNotebook}</Button>
+      </DialogTrigger>
+      <CreateNotebookDialog t={t} onOpen={onOpen} onClose={() => setDialogOpen(false)} />
+    </Dialog>
+  );
+
   return (
-    <main className="app-layout">
-      <header className="topbar">
-        <div className="brand-small"><Library aria-hidden="true" /><span>{t.app}</span></div>
-        <div className="topbar-actions">
-          <LanguageButton label={t.languageSwitch} onClick={onLocale} />
-          <Button variant="secondary" className="icon-action" onClick={signOut} disabled={signingOut}><LogOut aria-hidden="true" />{signingOut ? t.signingOut : t.signOut}</Button>
-        </div>
-      </header>
-      {signOutError ? <Alert variant="destructive"><AlertDescription>{signOutError}</AlertDescription></Alert> : null}
-      <section className="library-heading">
-        <div>
-          <h1>{t.library}</h1>
-          <p>{user.email}</p>
-        </div>
-        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-          <DialogTrigger asChild>
-            <Button className="create-notebook-action"><Plus aria-hidden="true" />{t.newNotebook}</Button>
-          </DialogTrigger>
-          <CreateNotebookDialog t={t} onOpen={onOpen} onClose={() => setDialogOpen(false)} />
-        </Dialog>
-      </section>
-      <label className="search-box">
-        <Search aria-hidden="true" />
-        <span className="sr-only">{t.search}</span>
-        <input placeholder={t.search} value={query} onChange={(event) => setQuery(event.target.value)} />
-      </label>
-      <section className="notebook-grid" aria-live="polite">
-        {notebooks.isLoading ? <p>{t.loading}</p> : null}
-        {notebooks.isError ? <RetryableAlert message={t.unreachable} retryLabel={t.retry} onRetry={() => void notebooks.refetch()} /> : null}
-        {notebooks.data?.length === 0 && query ? <p className="empty-line">{t.noResults}</p> : null}
-        {notebooks.data?.length === 0 && !query ? <EmptyLibrary t={t} /> : null}
-        {notebooks.data?.map((notebook) => (
-          <Button variant="ghost" className="library-item-action" key={notebook.id} onClick={() => onOpen(notebook.id)}>
-            <BookOpen aria-hidden="true" />
-            <span>{notebook.title}</span>
-          </Button>
-        ))}
-      </section>
+    <main className="library-layout">
+      <LibraryHeader appName={t.app} email={user.email} settingsLabel={t.settings} appsLabel={t.apps} openUserMenuLabel={t.openUserMenu} languageLabel={t.languageSwitch} signOutLabel={t.signOut} signingOutLabel={t.signingOut} comingSoonMessage={t.comingSoon} signingOut={signingOut} onLanguage={onLocale} onSignOut={() => void signOut()} />
+      <h1 className="sr-only">{t.library}</h1>
+      <div className="library-content">
+        {signOutError ? <Alert variant="destructive"><AlertDescription>{signOutError}</AlertDescription></Alert> : null}
+        <LibraryToolbar
+          allLabel={t.allNotebooks}
+          featuredLabel={t.featuredNotebooks}
+          sharedLabel={t.sharedWithMe}
+          searchLabel={t.search}
+          closeSearchLabel={t.closeSearch}
+          gridLabel={t.gridView}
+          listLabel={t.listView}
+          sortLabel={t.sortNotebooks}
+          recentLabel={t.recent}
+          titleLabel={t.sortTitle}
+          searchOpen={searchOpen}
+          query={query}
+          view={view}
+          sort={sort}
+          createAction={createAction}
+          onSearchOpen={() => setSearchOpen(true)}
+          onSearchClose={() => { setQuery(""); setSearchOpen(false); }}
+          onQueryChange={setQuery}
+          onViewChange={setView}
+          onSortChange={setSort}
+        />
+        <section className="library-section" aria-labelledby="recent-notebooks-heading">
+          <h2 id="recent-notebooks-heading">{t.recentlyOpened}</h2>
+          {view === "list" ? (
+            <NotebookTable
+              notebooks={notebooks.data ?? []}
+              sort={sort}
+              label={t.recentlyOpened}
+              titleLabel={t.columnTitle}
+              sourceLabel={t.columnSource}
+              creationDateLabel={t.creationDate}
+              roleLabel={t.role}
+              ownerLabel={t.owner}
+              zeroSourcesLabel={t.zeroSources}
+              missingDateLabel={t.missingDate}
+              openLabel={(title) => `${t.openNotebook} ${title}`}
+              moreLabel={(title) => `${t.moreActions} ${title}`}
+              renameLabel={t.rename}
+              shareLabel={t.share}
+              deleteLabel={t.delete}
+              comingSoonMessage={t.comingSoon}
+              emptyMessage={query ? t.noResults : t.emptyTable}
+              errorMessage={t.unreachable}
+              loading={notebooks.isLoading}
+              error={notebooks.isError}
+              retryLabel={t.retry}
+              onOpen={onOpen}
+              onRetry={() => void notebooks.refetch()}
+            />
+          ) : <div className="grid-placeholder" data-placeholder="true">{t.gridComingSoon}</div>}
+        </section>
+        <section className="library-section featured-section" aria-labelledby="featured-notebooks-heading">
+          <h2 id="featured-notebooks-heading">{t.featuredNotebooks}</h2>
+          <FeaturedNotebooks locale={locale} label={t.featuredNotebooks} titleLabel={t.columnTitle} sourceLabel={t.columnSource} creationDateLabel={t.creationDate} roleLabel={t.role} readerLabel={t.reader} openLabel={(title) => `${t.openNotebook} ${title}`} comingSoonMessage={t.featuredComingSoon} />
+          <Button className="view-all-featured" variant="outline" onClick={() => toast(t.featuredComingSoon)}>{t.viewAll}<MaterialSymbol name="keyboard_arrow_right" size={18} /></Button>
+        </section>
+      </div>
     </main>
   );
 }
@@ -466,18 +569,6 @@ function PanelTab({ value, title, body }: { value: string; title: string; body: 
       <h2>{title}</h2>
       <p>{body}</p>
     </TabsContent>
-  );
-}
-
-function EmptyLibrary({ t }: { t: typeof strings.en }) {
-  return (
-    <Card className="empty-state">
-      <BookOpen aria-hidden="true" />
-      <CardContent>
-        <h2>{t.emptyTitle}</h2>
-        <p>{t.emptyBody}</p>
-      </CardContent>
-    </Card>
   );
 }
 

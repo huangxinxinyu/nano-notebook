@@ -48,9 +48,10 @@ test("registers, creates, finds, opens, signs out, and signs back in", async ({ 
   await page.getByRole("button", { name: "Back to Library" }).click();
 
   await expectNotebookOrder(page, ["Beta Field Notes", "Alpha Field Notes"]);
+  await page.getByRole("button", { name: "Search notebooks" }).click();
   await page.getByPlaceholder("Search notebooks").fill("Alpha");
-  await expect(page.getByRole("button", { name: /Alpha Field Notes/ })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Beta Field Notes/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Open Alpha Field Notes", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open Beta Field Notes", exact: true })).toHaveCount(0);
   await page.getByPlaceholder("Search notebooks").fill("No Match");
   await expect(page.getByText("No notebooks match that search.")).toBeVisible();
   await page.getByPlaceholder("Search notebooks").fill("");
@@ -60,7 +61,8 @@ test("registers, creates, finds, opens, signs out, and signs back in", async ({ 
   await expect(page.getByText("Notebook not found or unavailable.")).toBeVisible();
   await page.getByRole("button", { name: "Back to Library" }).click();
 
-  await page.getByRole("button", { name: "Sign out" }).click();
+  await page.getByRole("button", { name: "Open user menu" }).click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
   await expect(page.getByRole("button", { name: "Create account" })).toBeVisible();
   await page.getByRole("tab", { name: "Sign in" }).click();
   await page.getByLabel("Email").fill(email);
