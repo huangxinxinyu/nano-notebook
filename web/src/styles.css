@@ -21,33 +21,51 @@
 
 @layer theme {
   :root {
-    --radius: 8px;
-    --background: #f6f7f3;
-    --foreground: #17201b;
-    --card: #fffdf8;
-    --card-foreground: #17201b;
-    --popover: #fffdf8;
-    --popover-foreground: #17201b;
-    --primary: #1d7f5f;
-    --primary-foreground: #ffffff;
-    --secondary: #edf1e8;
-    --secondary-foreground: #1f3028;
-    --muted: #e7ebe1;
-    --muted-foreground: #546259;
-    --accent: #e8f2ee;
-    --accent-foreground: #11231c;
-    --destructive: #9f1239;
-    --destructive-surface: #fff1f2;
-    --border: #cbd4c3;
-    --input: #b8c2b1;
-    --ring: #2454a6;
+    color-scheme: dark;
+    --app-background: #202124;
+    --header-background: #1b1c1f;
+    --panel-background: #222326;
+    --panel-background-subtle: #28292e;
+    --control-background: #292a2f;
+    --control-background-hover: #303137;
+    --selected-background: #2b3045;
+    --primary-foreground: #e8eaed;
+    --secondary-foreground: #bdc1c6;
+    --muted-foreground: #9aa0a6;
+    --border: #35363a;
+    --border-subtle: #303134;
+    --inverse-background: #f1f3f4;
+    --inverse-foreground: #202124;
+    --focus-ring: #a8c7fa;
+    --panel-radius: 16px;
+    --control-radius: 999px;
+    --content-max-width: 1550px;
+    --header-height: 64px;
+    --workspace-gap: 16px;
+
+    --radius: 12px;
+    --background: var(--app-background);
+    --foreground: var(--primary-foreground);
+    --card: var(--panel-background);
+    --card-foreground: var(--primary-foreground);
+    --popover: var(--panel-background-subtle);
+    --popover-foreground: var(--primary-foreground);
+    --primary: var(--inverse-background);
+    --secondary: var(--control-background);
+    --muted: var(--panel-background-subtle);
+    --accent: var(--selected-background);
+    --accent-foreground: var(--primary-foreground);
+    --destructive: #f28b82;
+    --destructive-surface: rgba(242, 139, 130, 0.12);
+    --input: var(--border);
+    --ring: var(--focus-ring);
   }
 }
 
 :root {
   color: var(--foreground);
   background: var(--background);
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: "Google Sans Text", "Google Sans", Roboto, Arial, sans-serif;
   line-height: 1.5;
 }
 
@@ -59,6 +77,8 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  background: var(--app-background);
+  color: var(--primary-foreground);
 }
 
 button,
@@ -103,7 +123,7 @@ button {
 
 button:focus-visible,
 input:focus-visible {
-  outline: 3px solid #2454a6;
+  outline: 3px solid var(--focus-ring);
   outline-offset: 3px;
 }
 
@@ -117,10 +137,7 @@ input:focus-visible {
 .auth-layout {
   display: grid;
   place-items: center;
-  background:
-    linear-gradient(135deg, rgba(255,255,255,0.88), rgba(246,247,243,0.92)),
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1600' height='900' viewBox='0 0 1600 900'%3E%3Crect width='1600' height='900' fill='%23e9ece4'/%3E%3Cg fill='none' stroke='%23c2cbbb' stroke-width='2' opacity='.7'%3E%3Cpath d='M120 170h430v560H120zM610 170h390v560H610zM1060 170h420v560h-420z'/%3E%3Cpath d='M170 250h330M170 310h260M170 370h300M660 250h290M660 310h220M1110 250h300M1110 310h240M1110 370h280'/%3E%3C/g%3E%3C/svg%3E");
-  background-size: cover;
+  background: var(--app-background);
 }
 
 .auth-layout > .icon-action {
