@@ -11,6 +11,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
+	"github.com/jackc/pgx/v5"
 )
 
 func TestWorkerClaimsBuildsContextAndPublishesOneAnswer(t *testing.T) {
@@ -205,6 +206,9 @@ func TestPublicationRejectsAnExpiredAttemptAfterTheJobIsReclaimed(t *testing.T) 
 	if err := runtime.Publish(ctx, attemptFromClaim(first), result); !errors.Is(err, agent.ErrLeaseLost) {
 		t.Fatalf("stale publish error = %v, want ErrLeaseLost", err)
 	}
+	if err := runtime.Fail(ctx, attemptFromClaim(first), "model_unavailable"); !errors.Is(err, agent.ErrLeaseLost) {
+		t.Fatalf("stale failure error = %v, want ErrLeaseLost", err)
+	}
 	if err := runtime.Publish(ctx, attemptFromClaim(second), result); err != nil {
 		t.Fatal(err)
 	}
@@ -214,6 +218,45 @@ func TestPublicationRejectsAnExpiredAttemptAfterTheJobIsReclaimed(t *testing.T) 
 	}
 	if assistantCount != 1 {
 		t.Fatalf("assistant count = %d, want exactly one for run %q", assistantCount, runID)
+	}
+}
+
+func TestPublicationAcknowledgementLossReconcilesCommittedSuccess(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "publish-reconcile@example.com")
+	admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c025")
+	ctx := context.Background()
+	claimed, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(ctx)
+	if err != nil || !ok {
+		t.Fatalf("claim = %+v ok=%v err=%v", claimed, ok, err)
+	}
+	ackLost := errors.New("simulated commit acknowledgement loss")
+	firstCommit := true
+	runtime := agent.NewPostgresRuntime(
+		api.db.Pool(),
+		"System prompt.",
+		func() string { return "msg_reconciled_answer" },
+		agent.WithCommitFunc(func(ctx context.Context, tx pgx.Tx) error {
+			err := tx.Commit(ctx)
+			if firstCommit && err == nil {
+				firstCommit = false
+				return ackLost
+			}
+			return err
+		}),
+	)
+	if err := runtime.Publish(ctx, attemptFromClaim(claimed), models.ChatResult{Text: "Committed exactly once.", FinishReason: "stop"}); err != nil {
+		t.Fatalf("reconciled publication = %v", err)
+	}
+	var runStatus string
+	var assistants int
+	if err := api.db.Pool().QueryRow(ctx, `select status from agent_runs where id=$1`, claimed.RunID).Scan(&runStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from chat_messages where chat_id=$1 and role='assistant'`, chatID).Scan(&assistants); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "completed" || assistants != 1 {
+		t.Fatalf("reconciled state run=%q assistants=%d", runStatus, assistants)
 	}
 }
 

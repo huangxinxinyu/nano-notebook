@@ -19,16 +19,34 @@ type PostgresRuntime struct {
 	pool         *pgxpool.Pool
 	systemPrompt string
 	newMessageID func() string
+	commit       func(context.Context, pgx.Tx) error
 }
 
-func NewPostgresRuntime(pool *pgxpool.Pool, systemPrompt string, newMessageID func() string) *PostgresRuntime {
+type RuntimeOption func(*PostgresRuntime)
+
+func WithCommitFunc(commit func(context.Context, pgx.Tx) error) RuntimeOption {
+	return func(runtime *PostgresRuntime) {
+		if commit != nil {
+			runtime.commit = commit
+		}
+	}
+}
+
+func NewPostgresRuntime(pool *pgxpool.Pool, systemPrompt string, newMessageID func() string, options ...RuntimeOption) *PostgresRuntime {
 	if systemPrompt == "" {
 		systemPrompt = BareSystemPrompt
 	}
 	if newMessageID == nil {
 		newMessageID = func() string { return "msg_" + uuid.NewString() }
 	}
-	return &PostgresRuntime{pool: pool, systemPrompt: systemPrompt, newMessageID: newMessageID}
+	runtime := &PostgresRuntime{
+		pool: pool, systemPrompt: systemPrompt, newMessageID: newMessageID,
+		commit: func(ctx context.Context, tx pgx.Tx) error { return tx.Commit(ctx) },
+	}
+	for _, option := range options {
+		option(runtime)
+	}
+	return runtime
 }
 
 func (r *PostgresRuntime) Load(ctx context.Context, attempt Attempt) (Execution, error) {
@@ -109,6 +127,36 @@ func (r *PostgresRuntime) Build(ctx context.Context, execution Execution) (model
 }
 
 func (r *PostgresRuntime) Publish(ctx context.Context, attempt Attempt, result models.ChatResult) error {
+	messageID := r.newMessageID()
+	if messageID == "" {
+		return errors.New("empty Assistant Message ID")
+	}
+	var publishErr error
+	for publishTry := 0; publishTry < 2; publishTry++ {
+		publishErr = r.publishOnce(ctx, attempt, messageID, result)
+		if publishErr == nil {
+			return nil
+		}
+		if errors.Is(publishErr, ErrLeaseLost) {
+			return publishErr
+		}
+		state, reconcileErr := r.reconcilePublication(ctx, attempt)
+		if reconcileErr != nil {
+			return errors.Join(publishErr, reconcileErr)
+		}
+		switch state {
+		case publicationCompleted:
+			return nil
+		case publicationLeaseLost:
+			return ErrLeaseLost
+		case publicationCurrent:
+			continue
+		}
+	}
+	return publishErr
+}
+
+func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, messageID string, result models.ChatResult) error {
 	tx, err := r.workerTx(ctx)
 	if err != nil {
 		return err
@@ -137,10 +185,6 @@ func (r *PostgresRuntime) Publish(ctx context.Context, attempt Attempt, result m
 	}
 	if !authorized {
 		return errors.New("Run is no longer authorized to publish")
-	}
-	messageID := r.newMessageID()
-	if messageID == "" {
-		return errors.New("empty Assistant Message ID")
 	}
 	if _, err := tx.Exec(ctx, `
 		insert into chat_messages(id, chat_id, role, content, answer_mode)
@@ -180,7 +224,49 @@ func (r *PostgresRuntime) Publish(ctx context.Context, attempt Attempt, result m
 	if _, err := tx.Exec(ctx, `select pg_notify('nano_agent_runs', $1)`, attempt.RunID); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return r.commit(ctx, tx)
+}
+
+type publicationState int
+
+const (
+	publicationLeaseLost publicationState = iota
+	publicationCurrent
+	publicationCompleted
+)
+
+func (r *PostgresRuntime) reconcilePublication(ctx context.Context, attempt Attempt) (publicationState, error) {
+	tx, err := r.workerTx(ctx)
+	if err != nil {
+		return publicationLeaseLost, err
+	}
+	defer tx.Rollback(ctx)
+	var runStatus, jobStatus string
+	var outputMessageID *string
+	var currentLease bool
+	err = tx.QueryRow(ctx, `
+		select r.status, r.output_message_id, j.status,
+			coalesce(j.id = $2 and j.lease_token = $3::uuid and j.lease_expires_at > now(), false)
+		from agent_runs r
+		join agent_jobs j on j.run_id = r.id
+		where r.id = $1`, attempt.RunID, attempt.JobID, attempt.LeaseToken).
+		Scan(&runStatus, &outputMessageID, &jobStatus, &currentLease)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return publicationLeaseLost, nil
+	}
+	if err != nil {
+		return publicationLeaseLost, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return publicationLeaseLost, err
+	}
+	if runStatus == "completed" && outputMessageID != nil && jobStatus == "succeeded" {
+		return publicationCompleted, nil
+	}
+	if runStatus == "running" && jobStatus == "running" && outputMessageID == nil && currentLease {
+		return publicationCurrent, nil
+	}
+	return publicationLeaseLost, nil
 }
 
 func (r *PostgresRuntime) Fail(ctx context.Context, attempt Attempt, errorCode string) error {
