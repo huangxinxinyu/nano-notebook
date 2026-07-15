@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
@@ -196,5 +197,101 @@ func TestRunCommandsRequireCSRFAndDoNotLeakAcrossUsers(t *testing.T) {
 	retryWithoutKey := api.postJSONWithCookieAndCSRF(t, "/api/v1/agent-runs/"+runID+"/retry", map[string]any{}, ownerSession, ownerCSRF, ownerCSRF.Value, "")
 	if retryWithoutKey.Code != http.StatusBadRequest || decodeError(t, retryWithoutKey).Code != "idempotency_required" {
 		t.Fatalf("retry without key status=%d body=%s", retryWithoutKey.Code, retryWithoutKey.Body.String())
+	}
+}
+
+func TestConcurrentCancelAndPublishCommitOneConsistentTerminalOutcome(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "cancel-publish-race@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c038")
+	claimed, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("claim=%+v ok=%v err=%v", claimed, ok, err)
+	}
+	runtime := agent.NewPostgresRuntime(api.db.Pool(), "System prompt.", func() string { return "msg_cancel_publish_race" })
+	start := make(chan struct{})
+	var cancelResponseStatus int
+	var cancelErrorCode string
+	var publishErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		response := api.postJSONWithCookieAndCSRF(t, "/api/v1/agent-runs/"+runID+"/cancel", map[string]any{}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+		cancelResponseStatus = response.Code
+		if response.Code != http.StatusOK {
+			cancelErrorCode = decodeError(t, response).Code
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		publishErr = runtime.Publish(context.Background(), attemptFromClaim(claimed), models.ChatResult{Text: "Race result", FinishReason: "stop"})
+	}()
+	close(start)
+	wg.Wait()
+
+	var runStatus, jobStatus string
+	var assistants int
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select r.status, j.status from agent_runs r join agent_jobs j on j.run_id=r.id where r.id=$1`, runID).
+		Scan(&runStatus, &jobStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from chat_messages where chat_id=$1 and role='assistant'`, chatID).Scan(&assistants); err != nil {
+		t.Fatal(err)
+	}
+	if cancelResponseStatus == http.StatusOK {
+		if !errors.Is(publishErr, agent.ErrLeaseLost) || runStatus != "cancelled" || jobStatus != "cancelled" || assistants != 0 {
+			t.Fatalf("cancel-first outcome cancel=%d publish=%v run=%q job=%q assistants=%d", cancelResponseStatus, publishErr, runStatus, jobStatus, assistants)
+		}
+		return
+	}
+	if cancelResponseStatus != http.StatusConflict || cancelErrorCode != "run_not_cancellable" || publishErr != nil || runStatus != "completed" || jobStatus != "succeeded" || assistants != 1 {
+		t.Fatalf("publish-first outcome cancel=%d/%q publish=%v run=%q job=%q assistants=%d", cancelResponseStatus, cancelErrorCode, publishErr, runStatus, jobStatus, assistants)
+	}
+}
+
+func TestRetryRejectsAnotherChatsActiveRunWithoutPartialRows(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "retry-active-conflict@example.com")
+	const messageID = "0190cdd2-5f2d-7ad8-b3f5-1b588788c039"
+	sourceRunID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, messageID)
+	cancelled := api.postJSONWithCookieAndCSRF(t, "/api/v1/agent-runs/"+sourceRunID+"/cancel", map[string]any{}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if cancelled.Code != http.StatusOK {
+		t.Fatalf("cancel status=%d body=%s", cancelled.Code, cancelled.Body.String())
+	}
+	var notebookID string
+	if err := api.db.Pool().QueryRow(context.Background(), `select notebook_id from chat_chats where id=$1`, chatID).Scan(&notebookID); err != nil {
+		t.Fatal(err)
+	}
+	created := api.postJSONWithCookieAndCSRF(t, "/api/v1/notebooks/"+notebookID+"/chats", map[string]any{}, sessionCookie, csrfCookie, csrfCookie.Value, "retry-conflict-chat")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("second chat status=%d body=%s", created.Code, created.Body.String())
+	}
+	var createdBody struct {
+		Chat struct {
+			ID string `json:"id"`
+		} `json:"chat"`
+	}
+	decodeBody(t, created, &createdBody)
+	active := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+createdBody.Chat.ID+"/messages", map[string]any{
+		"id": "0190cdd2-5f2d-7ad8-b3f5-1b588788c040", "content": "Occupy the global slot.",
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if active.Code != http.StatusAccepted {
+		t.Fatalf("active admission=%d body=%s", active.Code, active.Body.String())
+	}
+	retry := api.postJSONWithCookieAndCSRF(t, "/api/v1/agent-runs/"+sourceRunID+"/retry", map[string]any{}, sessionCookie, csrfCookie, csrfCookie.Value, "retry-active-conflict")
+	if retry.Code != http.StatusConflict || decodeError(t, retry).Code != "active_run_conflict" {
+		t.Fatalf("retry active conflict status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	var sourceRuns, retryKeys int
+	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from agent_runs where input_message_id=$1`, messageID).Scan(&sourceRuns); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from platform_idempotency_keys where action='retry_agent_run' and key='retry-active-conflict'`).Scan(&retryKeys); err != nil {
+		t.Fatal(err)
+	}
+	if sourceRuns != 1 || retryKeys != 0 {
+		t.Fatalf("rejected retry left source runs=%d idempotency rows=%d", sourceRuns, retryKeys)
 	}
 }
