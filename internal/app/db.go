@@ -247,10 +247,6 @@ create index if not exists agent_jobs_queued_idx
 	on agent_jobs(created_at, id)
 	where status = 'queued';
 
-create index if not exists agent_jobs_expired_lease_idx
-	on agent_jobs(lease_expires_at, created_at, id)
-	where status = 'running';
-
 -- Upgrade Sprint 2A databases in place. A process restart may leave an old
 -- running row without a lease, so make that work claimable by lease-aware
 -- workers.
@@ -262,6 +258,9 @@ alter table agent_runs add constraint agent_runs_status_check
 alter table agent_jobs add column if not exists attempt_no integer not null default 0;
 alter table agent_jobs add column if not exists lease_token uuid;
 alter table agent_jobs add column if not exists lease_expires_at timestamptz;
+create index if not exists agent_jobs_expired_lease_idx
+	on agent_jobs(lease_expires_at, created_at, id)
+	where status = 'running';
 alter table agent_jobs drop constraint if exists agent_jobs_status_check;
 alter table agent_jobs drop constraint if exists agent_jobs_execution_state_check;
 update agent_runs r

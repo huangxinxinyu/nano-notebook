@@ -524,6 +524,58 @@ func TestMigrationsReapplyAndInstallRLSBoundary(t *testing.T) {
 	}
 }
 
+func TestMigrationsUpgradeAPopulatedSprint2ADatabase(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "migration-2a@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c026")
+	ctx := context.Background()
+	if _, err := api.db.Pool().Exec(ctx, `
+		drop index if exists agent_jobs_expired_lease_idx;
+		drop index if exists agent_runs_one_active_per_input_idx;
+		drop index if exists agent_runs_one_completed_per_input_idx;
+		alter table agent_jobs drop constraint if exists agent_jobs_execution_state_check;
+		alter table agent_jobs drop constraint if exists agent_jobs_status_check;
+		alter table agent_jobs drop column if exists attempt_no;
+		alter table agent_jobs drop column if exists lease_token;
+		alter table agent_jobs drop column if exists lease_expires_at;
+		alter table agent_jobs add constraint agent_jobs_status_check check (status in ('queued', 'running', 'succeeded', 'failed'));
+		alter table agent_runs drop constraint if exists agent_runs_status_check;
+		alter table agent_runs add constraint agent_runs_status_check check (status in ('queued', 'running', 'completed', 'failed'));
+		alter table agent_runs add constraint agent_runs_input_message_id_key unique(input_message_id);`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `update agent_runs set status='running', started_at=now() where id=$1`, runID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `update agent_jobs set status='running', started_at=now() where run_id=$1`, runID); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.RunMigrations(ctx, api.db); err != nil {
+		t.Fatalf("Sprint 2A upgrade migration: %v", err)
+	}
+
+	var runStatus, jobStatus string
+	var attemptNo int
+	var token *string
+	if err := api.db.Pool().QueryRow(ctx, `
+		select r.status, j.status, j.attempt_no, j.lease_token::text
+		from agent_runs r join agent_jobs j on j.run_id=r.id where r.id=$1`, runID).
+		Scan(&runStatus, &jobStatus, &attemptNo, &token); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "queued" || jobStatus != "queued" || attemptNo != 0 || token != nil {
+		t.Fatalf("upgraded legacy running state run=%q job=%q attempt=%d token=%v", runStatus, jobStatus, attemptNo, token)
+	}
+	for _, indexName := range []string{"agent_runs_one_active_per_input_idx", "agent_runs_one_completed_per_input_idx", "agent_jobs_expired_lease_idx"} {
+		var exists bool
+		if err := api.db.Pool().QueryRow(ctx, `select to_regclass($1) is not null`, indexName).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if !exists {
+			t.Fatalf("upgraded schema is missing index %q", indexName)
+		}
+	}
+}
+
 func TestApplicationRequestsAreConstrainedByRequestRoleRLS(t *testing.T) {
 	api := newTestAPI(t)
 	ctx := context.Background()
