@@ -473,11 +473,98 @@ func (s *Server) agentRunByID(w http.ResponseWriter, r *http.Request) {
 	}
 	remainder := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/agent-runs/"), "/")
 	parts := strings.Split(remainder, "/")
-	if r.Method != http.MethodGet || len(parts) != 2 || parts[0] == "" || parts[1] != "events" {
+	if len(parts) != 2 || parts[0] == "" {
 		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
 		return
 	}
-	s.streamRun(w, r, user.ID, parts[0])
+	if r.Method == http.MethodGet && parts[1] == "events" {
+		s.streamRun(w, r, user.ID, parts[0])
+		return
+	}
+	if r.Method == http.MethodPost && parts[1] == "cancel" {
+		s.cancelRun(w, r, user.ID, parts[0])
+		return
+	}
+	if r.Method == http.MethodPost && parts[1] == "retry" {
+		s.retryRun(w, r, user.ID, parts[0])
+		return
+	}
+	writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
+}
+
+func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request, userID, runID string) {
+	if !validCSRF(r) {
+		writeError(w, r, http.StatusForbidden, "csrf_required", "error.csrf_required")
+		return
+	}
+	var run agent.RunSnapshot
+	err := s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
+		var err error
+		run, err = agent.NewStore(tx).Cancel(r.Context(), userID, runID)
+		return err
+	})
+	if errors.Is(err, agent.ErrRunNotFound) {
+		writeError(w, r, http.StatusNotFound, "not_found", "error.run_not_found")
+		return
+	}
+	if errors.Is(err, agent.ErrRunNotCancellable) {
+		writeError(w, r, http.StatusConflict, "run_not_cancellable", "error.run_not_cancellable")
+		return
+	}
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"run": run})
+}
+
+func (s *Server) retryRun(w http.ResponseWriter, r *http.Request, userID, sourceRunID string) {
+	if !validCSRF(r) {
+		writeError(w, r, http.StatusForbidden, "csrf_required", "error.csrf_required")
+		return
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if key == "" {
+		writeError(w, r, http.StatusBadRequest, "idempotency_required", "error.idempotency_required")
+		return
+	}
+	runID, err := newOpaqueID("run")
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	jobID, err := newOpaqueID("job")
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	var run agent.RunSnapshot
+	err = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
+		var err error
+		run, _, err = agent.NewStore(tx).RetryQueued(r.Context(), userID, sourceRunID, key, requestHash([]byte(sourceRunID)), runID, jobID)
+		return err
+	})
+	if errors.Is(err, agent.ErrRunNotFound) {
+		writeError(w, r, http.StatusNotFound, "not_found", "error.run_not_found")
+		return
+	}
+	if errors.Is(err, agent.ErrRunNotRetryable) {
+		writeError(w, r, http.StatusConflict, "run_not_retryable", "error.run_not_retryable")
+		return
+	}
+	if errors.Is(err, agent.ErrActiveRun) || isUniqueViolation(err, "agent_runs_one_active_per_user_idx") || isUniqueViolation(err, "agent_runs_one_active_per_input_idx") {
+		writeError(w, r, http.StatusConflict, "active_run_conflict", "error.active_run_conflict")
+		return
+	}
+	if errors.Is(err, agent.ErrIdempotencyMismatch) {
+		writeError(w, r, http.StatusConflict, "idempotency_mismatch", "error.idempotency_mismatch")
+		return
+	}
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"run": run})
 }
 
 func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, userID, runID string) {
@@ -558,7 +645,7 @@ func writeRunEvent(w io.Writer, projection agent.RunProjection) error {
 }
 
 func terminalRun(status string) bool {
-	return status == "completed" || status == "failed"
+	return status == "completed" || status == "failed" || status == "cancelled"
 }
 
 func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, chatID string) {

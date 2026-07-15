@@ -2,7 +2,9 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -10,8 +12,11 @@ import (
 )
 
 var (
-	ErrActiveRun   = errors.New("active run conflict")
-	ErrRunNotFound = errors.New("agent run not found")
+	ErrActiveRun           = errors.New("active run conflict")
+	ErrRunNotFound         = errors.New("agent run not found")
+	ErrRunNotCancellable   = errors.New("agent run not cancellable")
+	ErrRunNotRetryable     = errors.New("agent run not retryable")
+	ErrIdempotencyMismatch = errors.New("idempotency mismatch")
 )
 
 type DBTX interface {
@@ -136,6 +141,138 @@ func (s *Store) LatestForChat(ctx context.Context, userID, chatID string) ([]Run
 		runs = append(runs, run)
 	}
 	return runs, rows.Err()
+}
+
+func (s *Store) Cancel(ctx context.Context, userID, runID string) (RunSnapshot, error) {
+	var run RunSnapshot
+	var jobID string
+	err := s.db.QueryRow(ctx, `
+		select r.id, r.input_message_id, r.status, r.error_code, j.id
+		from agent_runs r
+		join agent_jobs j on j.run_id = r.id
+		where r.id = $1 and r.user_id = $2
+		for update of r, j`, runID, userID).
+		Scan(&run.ID, &run.InputMessageID, &run.Status, &run.ErrorCode, &jobID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return RunSnapshot{}, ErrRunNotFound
+	}
+	if err != nil {
+		return RunSnapshot{}, err
+	}
+	if run.Status == "cancelled" {
+		return run, nil
+	}
+	if run.Status == "completed" || run.Status == "failed" {
+		return RunSnapshot{}, ErrRunNotCancellable
+	}
+	runTag, err := s.db.Exec(ctx, `
+		update agent_runs
+		set status = 'cancelled', error_code = null, finished_at = now(), updated_at = now()
+		where id = $1 and status in ('queued', 'running')`, runID)
+	if err != nil {
+		return RunSnapshot{}, err
+	}
+	jobTag, err := s.db.Exec(ctx, `
+		update agent_jobs
+		set status = 'cancelled', lease_token = null, lease_expires_at = null,
+			finished_at = now(), updated_at = now()
+		where id = $1 and status in ('queued', 'running')`, jobID)
+	if err != nil {
+		return RunSnapshot{}, err
+	}
+	if runTag.RowsAffected() != 1 || jobTag.RowsAffected() != 1 {
+		return RunSnapshot{}, ErrRunNotCancellable
+	}
+	if _, err := s.db.Exec(ctx, `select pg_notify('nano_agent_runs', $1)`, runID); err != nil {
+		return RunSnapshot{}, err
+	}
+	run.Status = "cancelled"
+	run.ErrorCode = nil
+	return run, nil
+}
+
+func (s *Store) RetryQueued(ctx context.Context, userID, sourceRunID, key, requestHash, runID, jobID string) (RunSnapshot, bool, error) {
+	if _, err := s.db.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, "admit_agent_run:"+userID); err != nil {
+		return RunSnapshot{}, false, err
+	}
+	var existingHash, existingJSON string
+	err := s.db.QueryRow(ctx, `
+		select request_hash, response_json::text
+		from platform_idempotency_keys
+		where principal_id = $1 and action = 'retry_agent_run' and key = $2`, userID, key).
+		Scan(&existingHash, &existingJSON)
+	if err == nil {
+		if existingHash != requestHash {
+			return RunSnapshot{}, false, ErrIdempotencyMismatch
+		}
+		var body struct {
+			Run RunSnapshot `json:"run"`
+		}
+		if err := json.Unmarshal([]byte(existingJSON), &body); err != nil {
+			return RunSnapshot{}, false, err
+		}
+		return body.Run, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return RunSnapshot{}, false, err
+	}
+
+	var inputMessageID, chatID, model, promptVersion, status string
+	err = s.db.QueryRow(ctx, `
+		select input_message_id, chat_id, model, prompt_version, status
+		from agent_runs
+		where id = $1 and user_id = $2
+		for update`, sourceRunID, userID).
+		Scan(&inputMessageID, &chatID, &model, &promptVersion, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return RunSnapshot{}, false, ErrRunNotFound
+	}
+	if err != nil {
+		return RunSnapshot{}, false, err
+	}
+	if status != "failed" && status != "cancelled" {
+		return RunSnapshot{}, false, ErrRunNotRetryable
+	}
+	var retryable bool
+	err = s.db.QueryRow(ctx, `
+		select
+			$1 = (select id from agent_runs where input_message_id = $2 order by created_at desc, id desc limit 1)
+			and not exists(select 1 from agent_runs where input_message_id = $2 and status = 'completed')
+			and $2 = (select id from chat_messages where chat_id = $3 order by created_at desc, id desc limit 1)`,
+		sourceRunID, inputMessageID, chatID).Scan(&retryable)
+	if err != nil {
+		return RunSnapshot{}, false, err
+	}
+	if !retryable {
+		return RunSnapshot{}, false, ErrRunNotRetryable
+	}
+	if _, active, err := s.ActiveByUser(ctx, userID); err != nil {
+		return RunSnapshot{}, false, err
+	} else if active {
+		return RunSnapshot{}, false, ErrActiveRun
+	}
+	if err := s.CreateQueued(ctx, runID, userID, chatID, inputMessageID, model, promptVersion); err != nil {
+		return RunSnapshot{}, false, err
+	}
+	if _, err := s.db.Exec(ctx, `
+		insert into agent_jobs(id, kind, run_id, status)
+		values($1, 'agent_run', $2, 'queued')`, jobID, runID); err != nil {
+		return RunSnapshot{}, false, err
+	}
+	run := RunSnapshot{ID: runID, InputMessageID: inputMessageID, Status: "queued"}
+	response, err := json.Marshal(map[string]any{"run": run})
+	if err != nil {
+		return RunSnapshot{}, false, err
+	}
+	if _, err := s.db.Exec(ctx, `
+		insert into platform_idempotency_keys(principal_id, action, key, request_hash, status_code, response_json)
+		values($1, 'retry_agent_run', $2, $3, $4, $5::jsonb)`, userID, key, requestHash, http.StatusAccepted, string(response)); err != nil {
+		return RunSnapshot{}, false, err
+	}
+	if _, err := s.db.Exec(ctx, `select pg_notify('nano_agent_jobs', $1)`, jobID); err != nil {
+		return RunSnapshot{}, false, err
+	}
+	return run, false, nil
 }
 
 type Store struct {
