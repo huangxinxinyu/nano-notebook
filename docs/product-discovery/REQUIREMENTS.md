@@ -112,9 +112,9 @@ Documents include extracted text, document structure, readable tables, and usabl
 - A Chat title is generated from its first question and can be renamed.
 - The creator can permanently delete a Chat after confirmation.
 - The initial release does not support sharing, archiving, starring, exporting, or restoring Chats.
-- Historical user messages cannot be edited. A user can retry a failed or stopped Agent run as a new run.
+- Historical user messages cannot be edited. A user can retry a failed or stopped Agent run as a new run only while its question remains the latest unanswered User Message; after the Chat advances, historical retry and branching are unavailable.
 - An empty Chat offers a small set of suggested questions derived only from its selected Sources.
-- A user can copy a completed answer or retry its question, but cannot publish or share the answer in the initial release.
+- A user can copy a completed answer, but completed-answer regeneration is unavailable and the answer cannot be published or shared in the initial release.
 
 ### Chat Response Controls
 
@@ -157,10 +157,10 @@ If selected Sources do not support a source-grounded answer, the Agent states th
 - A user can navigate elsewhere in the web product and return without losing the run.
 - Reloading the page reconnects to the current run or displays its latest durable state.
 - The user can stop a run.
-- A stopped or failed run preserves the question and offers retry.
+- A stopped or failed run preserves the question and offers retry only while it remains the latest unanswered User Message.
 - An incomplete response is not presented as a completed Grounded Answer.
 - The initial release permits one active Agent run per user at a time. Other Chats remain readable while it runs.
-- If a selected Source is deleted before a run completes, the run stops without producing a completed answer and offers retry against the remaining selection.
+- If a selected Source is deleted before a run completes, the run stops without producing a completed answer and offers retry against the remaining selection only while its question remains the latest unanswered User Message.
 - Removing a Member or deleting the Notebook cancels affected active runs before applying the permanent-deletion lifecycle.
 
 ### Grounded Answers And Citations
@@ -295,6 +295,7 @@ The initial product baseline is complete when all four primary acceptance journe
 - A Viewer, Editor, or Owner cannot cross the role and private-Chat boundaries defined in the capability matrix.
 - Source and membership deletion produce the documented irreversible outcomes without silently rewriting surviving Chat history.
 - An Agent run survives navigation and reload, exposes its product-level progress, and can be stopped or retried.
+- Reloading a Chat restores the latest Agent Run outcome for each User Message; only the latest unanswered Message may expose Retry.
 - No initial-release workflow depends on a committed follow-up or uncommitted capability.
 
 Growth, retention, monetization, and enterprise adoption are not success criteria for this learning-focused initial product.

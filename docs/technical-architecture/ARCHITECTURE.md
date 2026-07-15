@@ -144,17 +144,41 @@ The bounded PostgreSQL Durable Runtime supports fixed product Job types, not arb
 
 Sprint 2A establishes the first production-shaped slice with one fixed pass: `LoadRun -> BuildContext -> InvokeModel -> PublishAnswer`. A request transaction commits the User Message, product-facing Agent Run, and internal Agent Job atomically. The independent Worker claims the Job from PostgreSQL, builds one in-memory request from the system prompt and latest 20 durable Messages, calls Bifrost without provider token streaming, and publishes the complete Assistant Message through one transaction. This is intentionally a fixed Agent Loop with no tool-call iteration, Retrieval, MCP, checkpoint, or generic workflow abstraction.
 
-Sprint 2A Jobs have only `queued`, `running`, and terminal delivery state. PostgreSQL `LISTEN/NOTIFY` reduces wake-up latency and a five-second indexed scan recovers lost notifications; the Job row is always queue truth. Attempts, leases, heartbeats, fencing, process-loss recovery, and safe re-execution are Sprint 2C work and must be added before claiming at-least-once recovery semantics.
+Sprint 2A Jobs have only `queued`, `running`, and terminal delivery state. PostgreSQL `LISTEN/NOTIFY` reduces wake-up latency and a five-second indexed scan recovers lost notifications; the Job row is always queue truth. Attempts, leases, heartbeats, fencing, process-loss recovery, and safe re-execution are Sprint 2B work and must be added before claiming at-least-once recovery semantics.
 
 The completed durable runtime will use at-least-once leases, attempts, heartbeats, and idempotent effect boundaries. Fixed interactive Agent, Source Processing, and offline Eval/Reindex Workload Classes reserve capacity so background work cannot starve user-facing Runs.
 
-Checkpoint representation, Run Working State schema, exact recovery algorithm, lease values, retry values, and context-manifest format are deferred to the Runtime detailed-design grill. Overall architecture requires only that a Run survive process loss and that the Context Builder can construct the next bounded model input from persistent Chat, accepted actions, Evidence, and versioned configuration.
+Sprint 2B keeps the current Agent Job lease generation on the `agent_jobs` row instead of creating a durable Attempt history. Claiming queued or expired work increments `attempt_no`, replaces a random `lease_token`, and sets `lease_expires_at` in one PostgreSQL transaction. A Worker conditionally extends that deadline with periodic heartbeats using PostgreSQL time. Heartbeat, failure, and publication writes must present the current unexpired Lease Token; reclaiming the Job fences every older execution. Full per-attempt history belongs to the Sprint 3 Durable Agent Trace rather than this recovery state.
+
+The Sprint 2B defaults are a 30-second lease and a heartbeat every 10 seconds. Each successful heartbeat sets `lease_expires_at` to PostgreSQL current time plus 30 seconds rather than adding time to the prior deadline. These values are server configuration, not a product API contract. A zero-row conditional heartbeat means the attempt has lost authority and must cancel its local execution; a database error never counts as a successful renewal, and final publication independently revalidates the current unexpired Lease Token.
+
+Sprint 2B does not add Run Checkpoints to the source-less Fixed Agent Loop. Recovery after an expired lease reconstructs context from durable Chat state and re-executes the single model invocation; a Provider call interrupted in flight cannot resume from a partial generation. If the Worker loses a completed model result before the existing Publication Barrier commits it, recovery may repeat that model call, while fencing still permits only the current lease to publish one Assistant Message.
+
+Automatic Job recovery is limited to an expired lease on a still-active, non-cancelled Run, which means the runtime lost the executor without receiving a terminal outcome. An explicit terminal Bifrost result such as model timeout, unavailability after gateway retries, or invalid response fails the Run and Job without another Agent Job attempt. This prevents Job recovery from multiplying the gateway's bounded Provider retry budget; a user retry creates a new Run.
+
+An Agent Job permits at most three total execution attempts, including its initial claim. The first two expired leases may be reclaimed; expiry of the third attempt atomically fails the active Run and Job with the safe code `recovery_exhausted` instead of starting a fourth model call. This bounds crash-loop cost and duration while leaving product retry as a new Run.
+
+Lease expiry and reclaim do not add a product-visible `recovering` or `retrying` Agent Run state. The Run remains `running` across infrastructure attempts; only completion, explicit failure, terminal cancellation, or exhausted recovery changes its user-visible state. Attempt number and lease transitions remain internal Job Runtime data and are absent from SSE and Chat projections.
+
+Reclaim is a single PostgreSQL claim transaction, not a two-step transition through `queued`. The indexed claim query selects either an ordinary queued Job or an expired running Job with fewer than three attempts using `FOR UPDATE SKIP LOCKED`; an expired selection remains `running` while its attempt number increments and its Lease Token and deadline are replaced. An expired third attempt is terminalized as `recovery_exhausted` instead of being reclaimed.
+
+On graceful Worker shutdown, the process stops claiming new Jobs, cancels its active model-call context, and conditionally sets the current lease deadline to PostgreSQL current time using its Job ID and Lease Token. It then notifies the Job channel so another Worker can reclaim without waiting 30 seconds. If PostgreSQL is unavailable during shutdown, stopping heartbeats falls back to natural lease expiry; the Job never moves back through `queued`.
+
+Run Checkpoints become required before the Agent Controller introduces multi-step model/action iteration. The future runtime must persist accepted model and tool results at explicit step boundaries, reuse completed results after recovery, and continue from the first incomplete step. This checkpoint state is runtime authority rather than a Worker process snapshot or the Sprint 3 Durable Agent Trace.
+
+Run Checkpoint representation, Run Working State schema, retry values beyond the three-attempt Agent Job policy, and context-manifest format beyond the Sprint 2B single-call recovery slice are deferred to the multi-step Agent Runtime detailed-design grill. Overall architecture requires that a Run survive process loss and that the future Context Builder can construct the next bounded model input from persistent Chat, accepted actions, Evidence, and versioned configuration.
 
 No generic workflow SDK, arbitrary DAG, deterministic replay, exactly-once promise, multi-Agent runtime, or Agent Sandbox enters the first release. An external MQ is metrics-triggered evolution rather than scheduled scope. If PostgreSQL dispatch becomes a measured bottleneck in the intended AWS environment, SQS plus a transactional outbox is the preferred direction while PostgreSQL retains authoritative Job and Run state.
 
 ## 9. Cancellation And Publication
 
 Stop, Source deletion, Membership removal, and Notebook deletion first persist cancellation or invalidation. Workers observe it at bounded transitions, reauthorize, and request cancellation of in-flight dependencies where supported. Expired Worker attempts cannot commit through lease fencing and state-version checks.
+
+For a user Stop command, the PostgreSQL transaction is the product boundary. If cancellation commits before publication, the Agent Run becomes terminal `cancelled` immediately, releases the user's active-Run slot, and can never publish an Assistant Message; aborting an in-flight Provider request remains a best-effort resource optimization. If publication commits first, the completed answer is not retroactively cancelled. Recovery cleans up cancelled Jobs without re-executing their model call.
+
+The same Stop transaction marks the queued or running Agent Job `cancelled`. Sprint 2B adds no separate cancellation listener: a running Worker discovers the lost authority when its next 10-second conditional heartbeat updates zero rows, then cancels its local model-call context. A model result that arrives before that detection remains provisional. Publication always locks and revalidates the Run and Job as `running`, the current unexpired Lease Token, authorization, and absence of cancellation, so a result arriving during this window is discarded rather than published.
+
+A Publication transaction error is not itself a terminal Run failure because the Worker may have lost the commit acknowledgement after PostgreSQL committed. The current Worker first reloads authoritative state: `completed` means publication succeeded; `running` with the same unexpired Lease Token permits a bounded retry using the same in-memory normalized model result; `cancelled` or a lost lease discards the result. If PostgreSQL remains unavailable and the outcome cannot be reconciled, the Worker stops renewing and lets lease recovery inspect durable state. A new attempt can reclaim only a still-running Run, while uniqueness and the Publication Barrier prevent a duplicate Assistant Message.
 
 Streaming text is provisional. A draft becomes a durable Assistant Message and Citations only through one transactional Publication Barrier that revalidates:
 
@@ -166,11 +190,23 @@ Streaming text is provisional. A draft becomes a durable Assistant Message and C
 
 The Sprint 2A model-knowledge path has no Citations or Run Evidence Set. Its publication transaction still revalidates private Chat creator ownership and current Notebook membership, then inserts exactly one Assistant Message marked `model_knowledge` while completing the Run and Job. Failed Runs publish no Assistant Message. Source availability and Citation validation join the same barrier when grounded answering is implemented.
 
-Stopped, failed, or invalidated work retains the User Message and Run status but never presents an incomplete response as a completed Grounded Answer.
+Cancelled, failed, or invalidated work retains the User Message and Run status but never presents an incomplete response as a completed Grounded Answer. Product copy may say “stopped”; the canonical durable Agent Run state is `cancelled`.
 
 ## 10. Chat And Browser Interfaces
 
 The Web Client is a React and TypeScript SPA built with Vite. It consumes JSON REST commands and queries from the Go Control Plane and uses SSE for asynchronous projections. The client first reads the latest durable snapshot; SSE is never authoritative state.
+
+The browser stops an owned Run with an authenticated, CSRF-protected `POST /api/v1/agent-runs/{run_id}/cancel`. Cancelling queued or running work atomically returns the terminal `cancelled` Run snapshot; repeating the command for that Run returns the same successful snapshot without an additional idempotency key. A completed or failed Run returns `409 run_not_cancellable`, and inaccessible Runs remain safe `404`s. Per-Run SSE projects the committed `cancelled` snapshot and then closes; the Chat retains the User Message and offers retry.
+
+Command replay, execution recovery, and product retry have different identities. Replaying the original Message command returns its existing Run; reclaiming an expired lease creates another execution attempt inside the same Run and Job; an explicit retry after `cancelled` or `failed` creates a new Run and Job for the same immutable input Message. A terminal Run is never reopened. The retry command is independently idempotent and freezes the then-current model and prompt configuration on the new Run.
+
+Sprint 2B therefore removes the Sprint 2A global uniqueness of `agent_runs.input_message_id`. One input Message may own multiple historical cancelled or failed Runs, at most one queued or running Run, and at most one completed Run. Completed-answer regeneration, multiple successful answer variants, and branching are excluded and not planned scope.
+
+The browser retries an owned cancelled or failed Run with `POST /api/v1/agent-runs/{run_id}/retry` and a required `Idempotency-Key`. One transaction locks and validates the prior Run and input Message, rejects an existing completed Run or any active Run for the user, creates a new queued Run with the then-current model and prompt configuration plus a new queued Agent Job, and notifies the Worker. Replaying the same key returns that same new Run. Runs are grouped and ordered by their shared input Message; Sprint 2B adds no `retry_of_run_id` lineage column.
+
+Run Retry is available only while that input remains the Chat's latest unanswered User Message. If any later Message exists, the retry command returns `409 retry_not_latest`; old failed or cancelled Runs remain immutable history and cannot create an implicit branch. The Context Builder independently anchors its latest-20 query at the Run's input Message tuple rather than the Chat head, so later content can never enter a recovered or retried Run even under a race. Historical retry and conversation branching are not planned scope.
+
+The Sprint 2B Chat snapshot replaces its single `active_run` field with a `runs` projection containing only the newest Agent Run for each User Message. Queued or running projections let the browser reconnect the one permitted active Run; the latest unanswered cancelled or failed projection restores Retry; older terminal projections explain unanswered historical Messages without offering Retry; completed projections correlate with their durable Assistant Message. The snapshot exposes no superseded Runs, Jobs, attempts, leases, or Trace data.
 
 The selected browser UI baseline is React 19, TypeScript, Vite, Tailwind CSS 4, shadcn/ui New York-style primitives on Radix UI, TanStack Query, TanStack Table, React Hook Form, Zod, Sonner, and locally hosted Material Symbols. Sprint 2A mounts `@assistant-ui/react` through its external-store boundary: PostgreSQL-backed Messages and Run state remain server-owned, while Assistant UI supplies accessible thread and composer interaction. The browser assigns the User Message UUID, submits one command, and projects queued/running/terminal state from a per-Run EventSource.
 
@@ -240,11 +276,11 @@ Before production launch, the architecture requires at least:
 
 The following are intentionally unresolved until the owning subsystem is implemented:
 
-- Run Working State, Checkpoint, Ledger, Context Builder, cancellation polling, and full Trace schemas;
+- future multi-step Run Working State, Checkpoint, Ledger, cancellation boundaries, and full Trace schemas;
 - chunking, embeddings, sparse representation, retrieval limits, fusion weights, reranking, and evaluation thresholds;
 - exact parser libraries, OCR prompts, transcription timestamp normalization, and Citation coordinate schemas;
 - Go HTTP framework, SQL access layer, migrations, repository package layout, and frontend component choices beyond the selected browser UI baseline;
-- session expiry values, invitation email implementation, retry counts, timeouts, concurrency values, and retention durations;
+- session expiry values, invitation email implementation, retry/timeout/concurrency values not fixed by an owning Sprint, and retention durations;
 - production AWS compute, OIDC provider, email provider, secret store, observability backend, and optional future MQ.
 
 These decisions must preserve the authority, isolation, and data-flow boundaries in this document.

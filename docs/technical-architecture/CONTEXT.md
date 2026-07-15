@@ -25,12 +25,20 @@ A named product operation authorized from a Principal's Notebook role and resour
 _Avoid_: Permission flag, endpoint role check
 
 **Job**:
-A durable unit of asynchronous work whose state survives process failure and can be claimed, retried, cancelled, or completed by a Worker.
+A durable unit of asynchronous work whose state survives process failure and can be claimed, reclaimed after lease expiry, cancelled, or completed by a Worker.
 _Avoid_: Goroutine, task when durability matters
 
 **Agent Run**:
-The user-visible durable lifecycle of one requested answer. It owns product status and the input/output Message relationship; it does not double as Worker delivery state.
+The user-visible durable lifecycle of one requested answer. It owns product status and the input/output Message relationship; one input Message may have later Runs after explicit user retries, but a Run does not double as Worker delivery state.
 _Avoid_: Queue item, model request
+
+**Run Retry**:
+An explicit user request to answer the latest unanswered input Message again after its prior Run was cancelled or failed. It creates a new Agent Run, is unavailable after the Chat advances, and is distinct from automatic execution attempts inside an existing Run.
+_Avoid_: Job retry, Attempt, reopening a terminal Run
+
+**Run Cancellation**:
+The durable product decision that an active Agent Run will publish no answer. It may become final before an in-flight Provider request actually stops.
+_Avoid_: Process kill, guaranteed Provider cancellation
 
 **Agent Job**:
 The internal durable delivery record that tells an Agent Worker which Run to execute. The browser never depends on Agent Job state; Sprint 2A keeps it separate even before attempts and leases are added.
@@ -39,6 +47,14 @@ _Avoid_: Agent Run, frontend status
 **Job Lease**:
 An expiring claim that permits one Worker attempt to advance a Job while heartbeats continue. Lease expiry enables recovery and does not imply that the prior attempt produced no side effects.
 _Avoid_: Lock, exactly-once execution
+
+**Lease Token**:
+The identity of the current leased execution of a Job. Reclaiming the Job replaces the token so stale Workers can no longer heartbeat, fail, or publish for it.
+_Avoid_: Session token, Worker identity, permanent ownership
+
+**Run Checkpoint**:
+A durable boundary after a completed Agent step from which later execution can reuse accepted results and continue with the first incomplete step. It is not a snapshot of a Worker process or an in-flight model generation.
+_Avoid_: Process snapshot, partial-token continuation, Durable Agent Trace
 
 **Workload Class**:
 A fixed product category such as interactive Agent, Source Processing, or offline Eval/Reindex, used to reserve concurrency and prevent background work from starving user-facing Jobs.

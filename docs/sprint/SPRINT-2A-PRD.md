@@ -6,7 +6,7 @@
 - **Status:** Complete
 - **Date:** 2026-07-14
 - **Theme:** Durable bare AgentLoop and private model-knowledge chat
-- **Delivery boundary:** Sprint 2A implements the smallest production-shaped Agent execution path. Sprint 2B adds interruption, Sprint 2C adds crash recovery, and Sprint 3 adds the reusable Observability/Audit SDK.
+- **Delivery boundary:** Sprint 2A implements the smallest production-shaped Agent execution path. Sprint 2B adds interruption and crash recovery, and Sprint 3 adds the reusable Observability/Audit SDK.
 
 ## 1. Decision And Product Change
 
@@ -142,7 +142,7 @@ If the model call fails after Bifrost exhausts its configured retries, the Run a
 - MCP, executable tools, tool-call iteration, planners, critics, reflection, or subagents
 - Token streaming, fake typewriter playback, partial-output storage, backpressure, or delta replay
 - Interrupt or stop controls; these belong to Sprint 2B
-- Leases, heartbeats, attempts, retry/backoff, fencing, stale-Job recovery, or process-loss recovery; these belong to Sprint 2C
+- Leases, heartbeats, attempts, fencing, stale-Job recovery, or process-loss recovery; these belong to Sprint 2B
 - Run Events, Model Call payload retention, Durable Agent Trace, Trace UI, new OpenTelemetry abstractions, or a reusable observability/audit layer; these belong to Sprint 3
 - Redis, an external MQ, an outbox, or a separate persisted Context/Session blob
 - Token-aware trimming, summarization, compaction, or long-term memory
@@ -241,7 +241,7 @@ A submitted User Message is limited to 8,000 Unicode characters after preserving
 | `status` | `queued`, `running`, `completed`, or `failed` |
 | `model` | Configured provider/model identifier, frozen at admission |
 | `prompt_version` | Frozen system-prompt version, initially `agent-bare-v1` |
-| `iteration_count` | `0` before invocation, `1` after the sole invocation attempt |
+| `iteration_count` | `0` before model-loop invocation, `1` after the sole Fixed Agent Loop iteration; this is not a Job attempt count |
 | `finish_reason` | Nullable normalized model finish reason |
 | `prompt_tokens` | Nullable usage count from a successful response |
 | `completion_tokens` | Nullable usage count from a successful response |
@@ -395,9 +395,9 @@ queued --claim--> running --publication--> succeeded
                            \--terminal error--> failed
 ```
 
-The frontend never reads Job status. Run and Job transition together in Sprint 2A because there is one Job per Run, but they remain distinct state owners so Sprint 2C can introduce multiple delivery attempts without changing product Run identity.
+The frontend never reads Job status. Run and Job transition together in Sprint 2A because there is one Job per Run, but they remain distinct state owners so Sprint 2B can introduce multiple execution attempts without changing product Run identity.
 
-If a Worker process dies after claim, the Job and Run may remain `running` in Sprint 2A. Detecting and recovering that condition is the explicit Sprint 2C problem, not hidden retry behavior in this slice.
+If a Worker process dies after claim, the Job and Run may remain `running` in Sprint 2A. Detecting and recovering that condition is the explicit Sprint 2B problem, not hidden recovery behavior in this slice.
 
 ## 15. Worker And PostgreSQL Dispatch
 
@@ -536,7 +536,7 @@ Raw Provider bodies, secrets, stack traces, and prompt content are not sent to t
 | Bifrost final failure | SSE `failed` snapshot | failed Run/Job, no Assistant |
 | SSE disconnect | browser reconnects | no state change |
 | Lost PostgreSQL notification | fallback scan/snapshot recovery | rows remain authoritative |
-| Worker dies after claim | Run remains running | intentionally deferred to Sprint 2C |
+| Worker dies after claim | Run remains running | intentionally deferred to Sprint 2B |
 
 ## 22. Verification Strategy
 
@@ -598,22 +598,27 @@ Sprint 2A is complete only when all of the following are demonstrated:
 8. Retrying one Message UUID does not create a second answer; another send during an active Run returns `409` with no rows.
 9. Final Bifrost failure produces a failed Run/Job and no Assistant Message.
 10. Automated Go, frontend, PostgreSQL integration, controlled Bifrost-protocol, build, lint, and type checks pass.
-11. The source-less product rule and Sprint 2A/2B/2C/3 boundaries are reflected in the relevant product and architecture documentation.
+11. The source-less product rule and Sprint 2A/2B/3 boundaries are reflected in the relevant product and architecture documentation.
 
 ## 24. Deferred Roadmap
 
-### Sprint 2B — Interruption
+### Sprint 2B — Interruption And Recovery
 
 - User stop command
+- idempotent Run-scoped REST cancellation and terminal `cancelled` SSE projection
+- idempotent Run-scoped retry that creates a new Run and Job for the same input Message without a parent-Run column
 - cooperative context cancellation
-- persisted cancellation intent
-- prevention of late publication
-
-### Sprint 2C — Recovery
-
-- Job attempts, leases, heartbeats, fencing, and retry policy
-- stale-running detection after process loss
-- safe re-execution without duplicate Assistant Messages
+- terminal durable cancellation and prevention of late publication
+- cancellation propagated to a running Worker by the existing heartbeat, without a separate cancellation listener
+- Job lease generations, heartbeats, fencing, and bounded reclaim policy without a separate Attempt history table
+- configurable defaults of a 30-second lease and 10-second heartbeat, renewed from PostgreSQL current time
+- stale-running detection and whole-pass re-execution only after lease expiry; explicit terminal model failures are not re-executed by the Job Runtime
+- at most three total Job attempts, then terminal `recovery_exhausted`
+- no user-visible recovery state; the Run remains `running` while expired work is reclaimed
+- direct transactional reclaim of expired `running` Jobs without an intermediate `queued` transition
+- graceful Worker shutdown actively expires its current lease and wakes reclaim, with natural expiry as fallback
+- reconciliation of unknown Publication commit outcomes before failure or lease recovery
+- safe whole-pass re-execution without duplicate Assistant Messages; no Run Checkpoint or partial model-generation resume
 - restart and fault-injection verification
 
 ### Sprint 3 — Reusable Observability And Audit SDK
@@ -625,3 +630,11 @@ Sprint 2A is complete only when all of the following are demonstrated:
 - retention, redaction, correlation, and Trace UI
 
 These later Sprints must extend the Run, Job, ModelClient, and Publisher seams established here instead of replacing the Sprint 2A information flow.
+
+Run Checkpoints are required before a later Sprint introduces multi-step model/tool iteration. They will persist accepted step results and resume from the first incomplete step; they are intentionally unnecessary for Sprint 2B's single-call Fixed Agent Loop and are distinct from Sprint 3 trace or audit storage.
+
+Sprint 2B also evolves the Sprint 2A one-Run-per-input-Message constraint. Transport replay still returns the originally admitted Run, and infrastructure recovery still creates only a new attempt within that Run. An explicit user retry after a cancelled or failed Run creates a new Run and Job for the same immutable User Message; the input may have multiple failed or cancelled Runs but at most one active and one completed Run. Completed-answer regeneration remains outside scope.
+
+Retry remains available only while that input is the latest unanswered User Message. Once the Chat advances, the historical Run cannot be retried; Sprint 2B does not implement branching. Context construction is anchored at the Run input Message rather than the current Chat head.
+
+Sprint 2B evolves the Chat snapshot from one `active_run` to a `runs` projection containing only the newest Run for each User Message. This restores active execution, terminal failure/cancellation labels, and latest-message Retry after refresh without exposing superseded Runs or Job-runtime state.

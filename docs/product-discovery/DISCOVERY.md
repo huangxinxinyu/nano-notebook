@@ -94,7 +94,7 @@ The product shows both high-level execution stages and detailed reasoning visibi
 
 The interface shows high-level stages plus an expandable, structured Reasoning Trace containing the Agent's retrieval queries, Sources and passages inspected, evidence selected or rejected with concise reasons, comparisons performed, uncertainty, and a conclusion summary. This trace describes observable research actions and generated rationale rather than claiming to reveal hidden model cognition.
 
-Users can stop an Agent run. A stopped or failed run preserves the user's question and offers retry, but an incomplete response is not presented as a completed Grounded Answer.
+Users can stop an Agent run. A stopped or failed run preserves the user's question and offers retry only while it remains the latest unanswered question; once the Chat advances, historical retry and branching are unavailable. An incomplete response is not presented as a completed Grounded Answer.
 
 **Status**: Confirmed.
 
