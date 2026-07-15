@@ -3,69 +3,181 @@ package jobs
 import (
 	"context"
 	"errors"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+const DefaultLeaseDuration = 30 * time.Second
+
 type Queue struct {
-	pool *pgxpool.Pool
+	pool          *pgxpool.Pool
+	leaseDuration time.Duration
 }
 
 type ClaimedJob struct {
-	ID    string
-	RunID string
+	ID         string
+	RunID      string
+	AttemptNo  int
+	LeaseToken string
 }
 
 func NewQueue(pool *pgxpool.Pool) *Queue {
-	return &Queue{pool: pool}
+	return &Queue{pool: pool, leaseDuration: DefaultLeaseDuration}
 }
 
 func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
+	for {
+		tx, err := q.pool.Begin(ctx)
+		if err != nil {
+			return ClaimedJob{}, false, err
+		}
+		defer tx.Rollback(ctx)
+		if _, err := tx.Exec(ctx, `set local role nano_worker`); err != nil {
+			return ClaimedJob{}, false, err
+		}
+
+		var job ClaimedJob
+		var status string
+		err = tx.QueryRow(ctx, `
+			select j.id, j.run_id, j.status, j.attempt_no
+			from agent_jobs j
+			join agent_runs r on r.id = j.run_id
+			where (j.status = 'queued' and r.status = 'queued')
+				or (j.status = 'running' and r.status = 'running' and j.lease_expires_at <= now())
+			order by j.created_at, j.id
+			for update of r, j skip locked
+			limit 1`).Scan(&job.ID, &job.RunID, &status, &job.AttemptNo)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ClaimedJob{}, false, nil
+		}
+		if err != nil {
+			return ClaimedJob{}, false, err
+		}
+
+		if status == "running" && job.AttemptNo >= 3 {
+			if err := exhaustRecovery(ctx, tx, job); err != nil {
+				return ClaimedJob{}, false, err
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return ClaimedJob{}, false, err
+			}
+			continue
+		}
+
+		job.AttemptNo++
+		job.LeaseToken = uuid.NewString()
+		jobTag, err := tx.Exec(ctx, `
+			update agent_jobs
+			set status = 'running',
+				attempt_no = $2,
+				lease_token = $3,
+				lease_expires_at = now() + ($4 * interval '1 second'),
+				started_at = coalesce(started_at, now()),
+				updated_at = now()
+			where id = $1`, job.ID, job.AttemptNo, job.LeaseToken, q.leaseDuration.Seconds())
+		if err != nil {
+			return ClaimedJob{}, false, err
+		}
+		runTag, err := tx.Exec(ctx, `
+			update agent_runs
+			set status = 'running', started_at = coalesce(started_at, now()), updated_at = now()
+			where id = $1 and status in ('queued', 'running')`, job.RunID)
+		if err != nil {
+			return ClaimedJob{}, false, err
+		}
+		if jobTag.RowsAffected() != 1 || runTag.RowsAffected() != 1 {
+			return ClaimedJob{}, false, errors.New("claimable Job and Run did not transition together")
+		}
+		if status == "queued" {
+			if _, err := tx.Exec(ctx, `select pg_notify('nano_agent_runs', $1)`, job.RunID); err != nil {
+				return ClaimedJob{}, false, err
+			}
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return ClaimedJob{}, false, err
+		}
+		return job, true, nil
+	}
+}
+
+func (q *Queue) Heartbeat(ctx context.Context, jobID, leaseToken string, leaseDuration time.Duration) (bool, error) {
+	if leaseDuration <= 0 {
+		leaseDuration = q.leaseDuration
+	}
 	tx, err := q.pool.Begin(ctx)
 	if err != nil {
-		return ClaimedJob{}, false, err
+		return false, err
 	}
 	defer tx.Rollback(ctx)
 	if _, err := tx.Exec(ctx, `set local role nano_worker`); err != nil {
-		return ClaimedJob{}, false, err
+		return false, err
 	}
-	var job ClaimedJob
-	err = tx.QueryRow(ctx, `
-		select id, run_id
-		from agent_jobs
-		where status = 'queued'
-		order by created_at, id
-		for update skip locked
-		limit 1`).Scan(&job.ID, &job.RunID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ClaimedJob{}, false, nil
-	}
+	tag, err := tx.Exec(ctx, `
+		update agent_jobs
+		set lease_expires_at = now() + ($3 * interval '1 second'), updated_at = now()
+		where id = $1
+			and status = 'running'
+			and lease_token = $2
+			and lease_expires_at > now()`, jobID, leaseToken, leaseDuration.Seconds())
 	if err != nil {
-		return ClaimedJob{}, false, err
+		return false, err
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func (q *Queue) ReleaseLease(ctx context.Context, jobID, leaseToken string) (bool, error) {
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `set local role nano_worker`); err != nil {
+		return false, err
+	}
+	tag, err := tx.Exec(ctx, `
+		update agent_jobs
+		set lease_expires_at = now(), updated_at = now()
+		where id = $1 and status = 'running' and lease_token = $2::uuid`, jobID, leaseToken)
+	if err != nil {
+		return false, err
+	}
+	if tag.RowsAffected() == 1 {
+		if _, err := tx.Exec(ctx, `select pg_notify('nano_agent_jobs', $1)`, jobID); err != nil {
+			return false, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+func exhaustRecovery(ctx context.Context, tx pgx.Tx, job ClaimedJob) error {
 	jobTag, err := tx.Exec(ctx, `
 		update agent_jobs
-		set status = 'running', started_at = now(), updated_at = now()
-		where id = $1 and status = 'queued'`, job.ID)
+		set status = 'failed', lease_token = null, lease_expires_at = null,
+			finished_at = now(), updated_at = now()
+		where id = $1 and status = 'running'`, job.ID)
 	if err != nil {
-		return ClaimedJob{}, false, err
+		return err
 	}
 	runTag, err := tx.Exec(ctx, `
 		update agent_runs
-		set status = 'running', started_at = now(), updated_at = now()
-		where id = $1 and status = 'queued'`, job.RunID)
+		set status = 'failed', error_code = 'recovery_exhausted',
+			finished_at = now(), updated_at = now()
+		where id = $1 and status = 'running' and output_message_id is null`, job.RunID)
 	if err != nil {
-		return ClaimedJob{}, false, err
+		return err
 	}
 	if jobTag.RowsAffected() != 1 || runTag.RowsAffected() != 1 {
-		return ClaimedJob{}, false, errors.New("queued Job and Run did not transition together")
+		return errors.New("recovery exhaustion did not transition Run and Job together")
 	}
-	if _, err := tx.Exec(ctx, `select pg_notify('nano_agent_runs', $1)`, job.RunID); err != nil {
-		return ClaimedJob{}, false, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return ClaimedJob{}, false, err
-	}
-	return job, true, nil
+	_, err = tx.Exec(ctx, `select pg_notify('nano_agent_runs', $1)`, job.RunID)
+	return err
 }

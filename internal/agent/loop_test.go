@@ -10,9 +10,9 @@ import (
 
 func TestLoopExecutesOneFixedModelPassAndPublishes(t *testing.T) {
 	steps := make([]string, 0, 4)
-	loader := loaderFunc(func(_ context.Context, runID string) (Execution, error) {
+	loader := loaderFunc(func(_ context.Context, attempt Attempt) (Execution, error) {
 		steps = append(steps, "load")
-		return Execution{RunID: runID, Model: "aliyun/qwen-flash"}, nil
+		return Execution{Attempt: attempt, Model: "aliyun/qwen-flash"}, nil
 	})
 	builder := builderFunc(func(_ context.Context, execution Execution) (models.ChatRequest, error) {
 		steps = append(steps, "context")
@@ -28,7 +28,8 @@ func TestLoopExecutesOneFixedModelPassAndPublishes(t *testing.T) {
 	publisher := &recordingPublisher{steps: &steps}
 
 	loop := NewLoop(loader, builder, runner, publisher)
-	if err := loop.Execute(context.Background(), "run_one"); err != nil {
+	attempt := Attempt{JobID: "job_one", RunID: "run_one", LeaseToken: "lease_one"}
+	if err := loop.Execute(context.Background(), attempt); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(steps, []string{"load", "context", "model", "publish"}) {
@@ -39,10 +40,10 @@ func TestLoopExecutesOneFixedModelPassAndPublishes(t *testing.T) {
 	}
 }
 
-type loaderFunc func(context.Context, string) (Execution, error)
+type loaderFunc func(context.Context, Attempt) (Execution, error)
 
-func (fn loaderFunc) Load(ctx context.Context, runID string) (Execution, error) {
-	return fn(ctx, runID)
+func (fn loaderFunc) Load(ctx context.Context, attempt Attempt) (Execution, error) {
+	return fn(ctx, attempt)
 }
 
 type builderFunc func(context.Context, Execution) (models.ChatRequest, error)
@@ -63,13 +64,13 @@ type recordingPublisher struct {
 	result models.ChatResult
 }
 
-func (p *recordingPublisher) Publish(_ context.Context, runID string, result models.ChatResult) error {
+func (p *recordingPublisher) Publish(_ context.Context, attempt Attempt, result models.ChatResult) error {
 	*p.steps = append(*p.steps, "publish")
-	p.runID = runID
+	p.runID = attempt.RunID
 	p.result = result
 	return nil
 }
 
-func (p *recordingPublisher) Fail(context.Context, string, string) error {
+func (p *recordingPublisher) Fail(context.Context, Attempt, string) error {
 	return nil
 }

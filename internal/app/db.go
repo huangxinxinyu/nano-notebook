@@ -235,7 +235,12 @@ create table if not exists agent_jobs (
 	created_at timestamptz not null default now(),
 	started_at timestamptz,
 	finished_at timestamptz,
-	updated_at timestamptz not null default now()
+	updated_at timestamptz not null default now(),
+	constraint agent_jobs_execution_state_check check (
+		(status = 'queued' and attempt_no = 0 and lease_token is null and lease_expires_at is null)
+		or (status = 'running' and attempt_no between 1 and 3 and lease_token is not null and lease_expires_at is not null)
+		or (status in ('succeeded', 'failed', 'cancelled') and attempt_no between 0 and 3 and lease_token is null and lease_expires_at is null)
+	)
 );
 
 create index if not exists agent_jobs_queued_idx
@@ -258,6 +263,7 @@ alter table agent_jobs add column if not exists attempt_no integer not null defa
 alter table agent_jobs add column if not exists lease_token uuid;
 alter table agent_jobs add column if not exists lease_expires_at timestamptz;
 alter table agent_jobs drop constraint if exists agent_jobs_status_check;
+alter table agent_jobs drop constraint if exists agent_jobs_execution_state_check;
 update agent_runs r
 	set status = 'queued', started_at = null, updated_at = now()
 	from agent_jobs j
@@ -267,6 +273,11 @@ update agent_jobs
 	where status = 'running' and lease_token is null;
 alter table agent_jobs add constraint agent_jobs_status_check
 	check (status in ('queued', 'running', 'succeeded', 'failed', 'cancelled'));
+alter table agent_jobs add constraint agent_jobs_execution_state_check check (
+	(status = 'queued' and attempt_no = 0 and lease_token is null and lease_expires_at is null)
+	or (status = 'running' and attempt_no between 1 and 3 and lease_token is not null and lease_expires_at is not null)
+	or (status in ('succeeded', 'failed', 'cancelled') and attempt_no between 0 and 3 and lease_token is null and lease_expires_at is null)
+);
 
 alter table identity_users enable row level security;
 alter table identity_local_credentials enable row level security;

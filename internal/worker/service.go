@@ -6,24 +6,29 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type JobQueue interface {
 	ClaimNext(context.Context) (jobs.ClaimedJob, bool, error)
+	Heartbeat(context.Context, string, string, time.Duration) (bool, error)
+	ReleaseLease(context.Context, string, string) (bool, error)
 }
 
 type Executor interface {
-	Execute(context.Context, string) error
+	Execute(context.Context, agent.Attempt) error
 }
 
 type Service struct {
-	pool         *pgxpool.Pool
-	queue        JobQueue
-	executor     Executor
-	scanInterval time.Duration
-	runTimeout   time.Duration
+	pool              *pgxpool.Pool
+	queue             JobQueue
+	executor          Executor
+	scanInterval      time.Duration
+	runTimeout        time.Duration
+	heartbeatInterval time.Duration
+	leaseDuration     time.Duration
 }
 
 func NewService(pool *pgxpool.Pool, queue JobQueue, executor Executor, scanInterval, runTimeout time.Duration) *Service {
@@ -33,7 +38,11 @@ func NewService(pool *pgxpool.Pool, queue JobQueue, executor Executor, scanInter
 	if runTimeout <= 0 {
 		runTimeout = 210 * time.Second
 	}
-	return &Service{pool: pool, queue: queue, executor: executor, scanInterval: scanInterval, runTimeout: runTimeout}
+	return &Service{
+		pool: pool, queue: queue, executor: executor,
+		scanInterval: scanInterval, runTimeout: runTimeout,
+		heartbeatInterval: 10 * time.Second, leaseDuration: jobs.DefaultLeaseDuration,
+	}
 }
 
 func (s *Service) ProcessAvailable(ctx context.Context) (int, error) {
@@ -48,14 +57,68 @@ func (s *Service) ProcessAvailable(ctx context.Context) (int, error) {
 			return processed, processErr
 		}
 		processed++
-		runCtx, cancel := context.WithTimeout(ctx, s.runTimeout)
-		err = s.executor.Execute(runCtx, job.RunID)
-		cancel()
+		err = s.executeClaim(ctx, job)
 		if err != nil {
 			processErr = errors.Join(processErr, err)
 			slog.Error("agent run execution failed", "run_id", job.RunID, "job_id", job.ID, "error", err)
 		}
 	}
+}
+
+func (s *Service) executeClaim(ctx context.Context, job jobs.ClaimedJob) error {
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, s.runTimeout)
+	runCtx, cancelRun := context.WithCancelCause(timeoutCtx)
+	stopHeartbeat := make(chan struct{})
+	heartbeatDone := make(chan struct{})
+	heartbeatFailure := make(chan error, 1)
+	go func() {
+		defer close(heartbeatDone)
+		ticker := time.NewTicker(s.heartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-stopHeartbeat:
+				return
+			case <-ticker.C:
+				ok, err := s.queue.Heartbeat(runCtx, job.ID, job.LeaseToken, s.leaseDuration)
+				if err != nil {
+					heartbeatFailure <- err
+					cancelRun(err)
+					return
+				}
+				if !ok {
+					heartbeatFailure <- agent.ErrLeaseLost
+					cancelRun(agent.ErrLeaseLost)
+					return
+				}
+			}
+		}
+	}()
+
+	attempt := agent.Attempt{JobID: job.ID, RunID: job.RunID, AttemptNo: job.AttemptNo, LeaseToken: job.LeaseToken}
+	executeErr := s.executor.Execute(runCtx, attempt)
+	wasCancelled := runCtx.Err() != nil
+	close(stopHeartbeat)
+	<-heartbeatDone
+	cancelRun(nil)
+	timeoutCancel()
+
+	var heartbeatErr error
+	select {
+	case heartbeatErr = <-heartbeatFailure:
+	default:
+	}
+	if wasCancelled || heartbeatErr != nil {
+		releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		_, releaseErr := s.queue.ReleaseLease(releaseCtx, job.ID, job.LeaseToken)
+		cancel()
+		if releaseErr != nil {
+			slog.Warn("agent Job lease release failed; natural expiry will recover it", "job_id", job.ID, "error", releaseErr)
+		}
+	}
+	return errors.Join(executeErr, heartbeatErr)
 }
 
 func (s *Service) Run(ctx context.Context) error {

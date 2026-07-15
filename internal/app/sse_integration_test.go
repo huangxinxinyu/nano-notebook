@@ -37,7 +37,7 @@ func TestRunSSEReconnectSendsTheCompletedDurableSnapshot(t *testing.T) {
 	}
 	model := &recordingModelClient{result: models.ChatResult{Text: "The durable answer.", FinishReason: "stop"}}
 	runtime := agent.NewPostgresRuntime(api.db.Pool(), "System prompt.", func() string { return "msg_sse_answer" })
-	if err := agent.NewLoop(runtime, runtime, agent.NewModelRunner(model), runtime).Execute(ctx, claimed.RunID); err != nil {
+	if err := agent.NewLoop(runtime, runtime, agent.NewModelRunner(model), runtime).Execute(ctx, attemptFromClaim(claimed)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -107,7 +107,7 @@ func TestRunSSEProjectsQueuedRunningAndCompletedAcrossPostgresNotifications(t *t
 
 	runtime := agent.NewPostgresRuntime(api.db.Pool(), "System prompt.", func() string { return "msg_sse_live" })
 	model := &recordingModelClient{result: models.ChatResult{Text: "Projected completion.", FinishReason: "stop"}}
-	if err := agent.NewLoop(runtime, runtime, agent.NewModelRunner(model), runtime).Execute(context.Background(), claimed.RunID); err != nil {
+	if err := agent.NewLoop(runtime, runtime, agent.NewModelRunner(model), runtime).Execute(context.Background(), attemptFromClaim(claimed)); err != nil {
 		t.Fatal(err)
 	}
 	select {

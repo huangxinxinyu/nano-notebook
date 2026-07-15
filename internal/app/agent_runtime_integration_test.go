@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -60,7 +61,7 @@ func TestWorkerClaimsBuildsContextAndPublishesOneAnswer(t *testing.T) {
 	model := models.NewBifrostClient(upstream.URL, upstream.Client(), 2048)
 	runtime := agent.NewPostgresRuntime(api.db.Pool(), "System prompt for the bare agent.", func() string { return "msg_worker_answer" })
 	loop := agent.NewLoop(runtime, runtime, agent.NewModelRunner(model), runtime)
-	if err := loop.Execute(ctx, claimed.RunID); err != nil {
+	if err := loop.Execute(ctx, attemptFromClaim(claimed)); err != nil {
 		t.Fatal(err)
 	}
 	if modelRequest.Model != "aliyun/qwen-flash" || modelRequest.Stream || modelRequest.MaxCompletionTokens != 2048 {
@@ -118,7 +119,7 @@ func TestWorkerPersistsTerminalBifrostFailureWithoutAssistantMessage(t *testing.
 	model := models.NewBifrostClient(upstream.URL, upstream.Client(), 2048)
 	runtime := agent.NewPostgresRuntime(api.db.Pool(), agent.BareSystemPrompt, nil)
 	loop := agent.NewLoop(runtime, runtime, agent.NewModelRunner(model), runtime)
-	if err := loop.Execute(ctx, claimed.RunID); err == nil {
+	if err := loop.Execute(ctx, attemptFromClaim(claimed)); err == nil {
 		t.Fatal("failed Bifrost call returned nil error")
 	}
 
@@ -164,9 +165,14 @@ func TestContextBuilderSelectsTheLatestTwentyDurableMessages(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if _, err := api.db.Pool().Exec(ctx, `
+		insert into chat_messages(id, chat_id, role, content, created_at)
+		values('msg_context_later', $1, 'user', 'must-not-enter-earlier-run', timestamp with time zone '2026-07-14 00:01:00+00')`, chatID); err != nil {
+		t.Fatal(err)
+	}
 
 	runtime := agent.NewPostgresRuntime(api.db.Pool(), "Bounded system prompt.", nil)
-	request, err := runtime.Build(ctx, agent.Execution{ChatID: chatID, Model: "aliyun/qwen-flash"})
+	request, err := runtime.Build(ctx, agent.Execution{ChatID: chatID, InputMessageID: messageIDForIndex(25), Model: "aliyun/qwen-flash"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,6 +182,43 @@ func TestContextBuilderSelectsTheLatestTwentyDurableMessages(t *testing.T) {
 	if request.Messages[1].Content != "message-06" || request.Messages[20].Content != "message-25" {
 		t.Fatalf("context bounds = %q ... %q", request.Messages[1].Content, request.Messages[20].Content)
 	}
+}
+
+func TestPublicationRejectsAnExpiredAttemptAfterTheJobIsReclaimed(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "publish-fence@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c022")
+	ctx := context.Background()
+	queue := jobs.NewQueue(api.db.Pool())
+	first, ok, err := queue.ClaimNext(ctx)
+	if err != nil || !ok {
+		t.Fatalf("first claim = %+v ok=%v err=%v", first, ok, err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `update agent_jobs set lease_expires_at = now() - interval '1 second' where id = $1`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	second, ok, err := queue.ClaimNext(ctx)
+	if err != nil || !ok {
+		t.Fatalf("reclaim = %+v ok=%v err=%v", second, ok, err)
+	}
+	runtime := agent.NewPostgresRuntime(api.db.Pool(), "System prompt.", func() string { return "msg_fenced_answer" })
+	result := models.ChatResult{Text: "Only the current attempt may publish.", FinishReason: "stop"}
+	if err := runtime.Publish(ctx, attemptFromClaim(first), result); !errors.Is(err, agent.ErrLeaseLost) {
+		t.Fatalf("stale publish error = %v, want ErrLeaseLost", err)
+	}
+	if err := runtime.Publish(ctx, attemptFromClaim(second), result); err != nil {
+		t.Fatal(err)
+	}
+	var assistantCount int
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from chat_messages where chat_id = $1 and role = 'assistant'`, chatID).Scan(&assistantCount); err != nil {
+		t.Fatal(err)
+	}
+	if assistantCount != 1 {
+		t.Fatalf("assistant count = %d, want exactly one for run %q", assistantCount, runID)
+	}
+}
+
+func attemptFromClaim(job jobs.ClaimedJob) agent.Attempt {
+	return agent.Attempt{JobID: job.ID, RunID: job.RunID, AttemptNo: job.AttemptNo, LeaseToken: job.LeaseToken}
 }
 
 func messageIDForIndex(index int) string {

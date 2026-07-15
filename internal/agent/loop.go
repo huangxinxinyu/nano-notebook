@@ -9,14 +9,22 @@ import (
 )
 
 type Execution struct {
-	RunID  string
-	ChatID string
-	UserID string
-	Model  string
+	Attempt
+	ChatID         string
+	UserID         string
+	InputMessageID string
+	Model          string
+}
+
+type Attempt struct {
+	JobID      string
+	RunID      string
+	AttemptNo  int
+	LeaseToken string
 }
 
 type Loader interface {
-	Load(context.Context, string) (Execution, error)
+	Load(context.Context, Attempt) (Execution, error)
 }
 
 type ContextBuilder interface {
@@ -28,8 +36,8 @@ type Runner interface {
 }
 
 type Publisher interface {
-	Publish(context.Context, string, models.ChatResult) error
-	Fail(context.Context, string, string) error
+	Publish(context.Context, Attempt, models.ChatResult) error
+	Fail(context.Context, Attempt, string) error
 }
 
 type Loop struct {
@@ -43,8 +51,8 @@ func NewLoop(loader Loader, builder ContextBuilder, runner Runner, publisher Pub
 	return &Loop{loader: loader, builder: builder, runner: runner, publisher: publisher}
 }
 
-func (l *Loop) Execute(ctx context.Context, runID string) error {
-	execution, err := l.loader.Load(ctx, runID)
+func (l *Loop) Execute(ctx context.Context, attempt Attempt) error {
+	execution, err := l.loader.Load(ctx, attempt)
 	if err != nil {
 		return err
 	}
@@ -52,13 +60,16 @@ func (l *Loop) Execute(ctx context.Context, runID string) error {
 	if err != nil {
 		failCtx, cancel := terminalContext(ctx)
 		defer cancel()
-		if failErr := l.publisher.Fail(failCtx, runID, "context_failed"); failErr != nil {
+		if failErr := l.publisher.Fail(failCtx, attempt, "context_failed"); failErr != nil {
 			return errors.Join(err, failErr)
 		}
 		return err
 	}
 	result, err := l.runner.Run(ctx, request)
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return err
+		}
 		code := string(models.ErrorUnavailable)
 		var modelErr *models.ModelError
 		if errors.As(err, &modelErr) {
@@ -66,12 +77,12 @@ func (l *Loop) Execute(ctx context.Context, runID string) error {
 		}
 		failCtx, cancel := terminalContext(ctx)
 		defer cancel()
-		if failErr := l.publisher.Fail(failCtx, runID, code); failErr != nil {
+		if failErr := l.publisher.Fail(failCtx, attempt, code); failErr != nil {
 			return errors.Join(err, failErr)
 		}
 		return err
 	}
-	return l.publisher.Publish(ctx, runID, result)
+	return l.publisher.Publish(ctx, attempt, result)
 }
 
 func terminalContext(ctx context.Context) (context.Context, context.CancelFunc) {
