@@ -484,6 +484,18 @@ func TestMigrationsReapplyAndInstallRLSBoundary(t *testing.T) {
 	if policies < 4 {
 		t.Fatalf("RLS policy count = %d, want at least 4", policies)
 	}
+	var agentPolicies int
+	if err := api.db.Pool().QueryRow(ctx, `
+		select count(distinct tablename)
+		from pg_policies
+		where schemaname = 'public'
+		  and tablename in ('chat_chats', 'chat_messages', 'agent_runs', 'agent_jobs')
+	`).Scan(&agentPolicies); err != nil {
+		t.Fatal(err)
+	}
+	if agentPolicies != 4 {
+		t.Fatalf("Sprint 2A RLS table coverage = %d, want 4", agentPolicies)
+	}
 
 	tx, err := api.db.Pool().Begin(ctx)
 	if err != nil {
@@ -549,6 +561,7 @@ func TestApplicationRequestsAreConstrainedByRequestRoleRLS(t *testing.T) {
 
 type testAPI struct {
 	handler       http.Handler
+	server        *app.Server
 	db            *app.DB
 	csrfBySession map[string]*http.Cookie
 }
@@ -572,7 +585,7 @@ func newTestAPI(t *testing.T) *testAPI {
 		t.Fatal(err)
 	}
 	server := app.NewServer(app.Config{CookieSecure: false}, db)
-	return &testAPI{handler: server.Handler(), db: db, csrfBySession: map[string]*http.Cookie{}}
+	return &testAPI{handler: server.Handler(), server: server, db: db, csrfBySession: map[string]*http.Cookie{}}
 }
 
 func (api *testAPI) register(t *testing.T, email string) *http.Cookie {

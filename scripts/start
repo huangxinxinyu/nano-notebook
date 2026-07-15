@@ -7,6 +7,8 @@ cd "$ROOT"
 export NANO_DATABASE_URL="${NANO_DATABASE_URL:-postgres://nano:nano@localhost:55432/nano?sslmode=disable}"
 export NANO_CONTROL_PLANE_ADDR="${NANO_CONTROL_PLANE_ADDR:-:8080}"
 export NANO_WORKER_ADDR="${NANO_WORKER_ADDR:-:8081}"
+export NANO_CHAT_MODEL="${NANO_CHAT_MODEL:-aliyun/qwen-flash}"
+export NANO_BIFROST_URL="${NANO_BIFROST_URL:-http://127.0.0.1:56666}"
 
 docker compose -f infra/compose/compose.yaml up -d
 for i in $(seq 1 60); do

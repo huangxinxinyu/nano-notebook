@@ -12,6 +12,7 @@ import (
 
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/telemetry"
+	"github.com/huangxinxinyu/nano-notebook/internal/realtime"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
@@ -42,7 +43,18 @@ func main() {
 	}()
 	telemetry.StartupSpan(ctx, "nano-control-plane")
 
-	server := app.NewServer(app.Config{CookieSecure: os.Getenv("NANO_COOKIE_SECURE") == "true", Version: env("NANO_VERSION", "dev")}, db)
+	server := app.NewServer(app.Config{
+		CookieSecure: os.Getenv("NANO_COOKIE_SECURE") == "true",
+		Version:      env("NANO_VERSION", "dev"),
+		DefaultModel: env("NANO_CHAT_MODEL", "aliyun/qwen-flash"),
+	}, db)
+	runListener := realtime.NewRunListener(db.Pool(), server.NotifyRun)
+	go func() {
+		if err := runListener.Run(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("Run projection listener failed", "error", err)
+			stop()
+		}
+	}()
 	httpServer := &http.Server{
 		Addr:              env("NANO_CONTROL_PLANE_ADDR", ":8080"),
 		Handler:           otelhttp.NewHandler(server.Handler(), "control-plane"),

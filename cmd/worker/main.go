@@ -10,8 +10,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
+	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/telemetry"
+	agentworker "github.com/huangxinxinyu/nano-notebook/internal/worker"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
@@ -38,9 +42,20 @@ func main() {
 	}()
 	telemetry.StartupSpan(ctx, "nano-worker")
 
+	modelClient := models.NewBifrostClient(env("NANO_BIFROST_URL", "http://127.0.0.1:56666"), &http.Client{}, 2048)
+	runtime := agent.NewPostgresRuntime(db.Pool(), agent.BareSystemPrompt, nil)
+	loop := agent.NewLoop(runtime, runtime, agent.NewModelRunner(modelClient), runtime)
+	workerService := agentworker.NewService(db.Pool(), jobs.NewQueue(db.Pool()), loop, 5*time.Second, 210*time.Second)
+	go func() {
+		if err := workerService.Run(ctx); err != nil && ctx.Err() == nil {
+			slog.Error("agent worker failed", "error", err)
+			stop()
+		}
+	}()
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", func(w http.ResponseWriter, r *http.Request) {
-		writeWorkerJSON(w, http.StatusOK, `{"status":"live","service":"worker","mode":"noop"}`)
+		writeWorkerJSON(w, http.StatusOK, `{"status":"live","service":"worker","mode":"agent"}`)
 	})
 	mux.HandleFunc("/health/ready", func(w http.ResponseWriter, r *http.Request) {
 		pingCtx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
@@ -49,12 +64,12 @@ func main() {
 			writeWorkerJSON(w, http.StatusServiceUnavailable, `{"status":"not_ready","service":"worker"}`)
 			return
 		}
-		writeWorkerJSON(w, http.StatusOK, `{"status":"ready","service":"worker","mode":"noop"}`)
+		writeWorkerJSON(w, http.StatusOK, `{"status":"ready","service":"worker","mode":"agent"}`)
 	})
 
 	httpServer := &http.Server{Addr: env("NANO_WORKER_ADDR", ":8081"), Handler: otelhttp.NewHandler(mux, "worker"), ReadHeaderTimeout: 5 * time.Second}
 	go func() {
-		slog.Info("worker listening", "addr", httpServer.Addr, "mode", "noop", "provider_credentials_required", false)
+		slog.Info("worker listening", "addr", httpServer.Addr, "mode", "agent", "provider_credentials_required", true)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("worker failed", "error", err)
 			os.Exit(1)

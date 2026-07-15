@@ -161,6 +161,76 @@ create table if not exists platform_idempotency_keys (
 	primary key (principal_id, action, key)
 );
 
+create table if not exists chat_chats (
+	id text primary key,
+	notebook_id text not null references notebook_notebooks(id) on delete cascade,
+	creator_user_id text not null references identity_users(id) on delete cascade,
+	title text not null check (char_length(title) between 1 and 160),
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now()
+);
+
+create index if not exists chat_chats_private_recent_idx
+	on chat_chats(creator_user_id, notebook_id, updated_at desc, id desc);
+
+create table if not exists chat_messages (
+	id text primary key,
+	chat_id text not null references chat_chats(id) on delete cascade,
+	role text not null check (role in ('user', 'assistant')),
+	content text not null check (char_length(content) between 1 and 65536),
+	answer_mode text check (
+		(role = 'user' and answer_mode is null)
+		or (role = 'assistant' and answer_mode = 'model_knowledge')
+	),
+	created_at timestamptz not null default now()
+);
+
+create index if not exists chat_messages_order_idx
+	on chat_messages(chat_id, created_at, id);
+
+create table if not exists agent_runs (
+	id text primary key,
+	user_id text not null references identity_users(id) on delete cascade,
+	chat_id text not null references chat_chats(id) on delete cascade,
+	input_message_id text not null unique references chat_messages(id) on delete restrict,
+	output_message_id text unique references chat_messages(id) on delete restrict,
+	status text not null check (status in ('queued', 'running', 'completed', 'failed')),
+	model text not null,
+	prompt_version text not null,
+	iteration_count integer not null default 0 check (iteration_count between 0 and 1),
+	finish_reason text,
+	prompt_tokens integer check (prompt_tokens is null or prompt_tokens >= 0),
+	completion_tokens integer check (completion_tokens is null or completion_tokens >= 0),
+	total_tokens integer check (total_tokens is null or total_tokens >= 0),
+	error_code text,
+	created_at timestamptz not null default now(),
+	started_at timestamptz,
+	finished_at timestamptz,
+	updated_at timestamptz not null default now()
+);
+
+create unique index if not exists agent_runs_one_active_per_user_idx
+	on agent_runs(user_id)
+	where status in ('queued', 'running');
+
+create index if not exists agent_runs_chat_recent_idx
+	on agent_runs(chat_id, created_at desc, id desc);
+
+create table if not exists agent_jobs (
+	id text primary key,
+	kind text not null check (kind = 'agent_run'),
+	run_id text not null unique references agent_runs(id) on delete cascade,
+	status text not null check (status in ('queued', 'running', 'succeeded', 'failed')),
+	created_at timestamptz not null default now(),
+	started_at timestamptz,
+	finished_at timestamptz,
+	updated_at timestamptz not null default now()
+);
+
+create index if not exists agent_jobs_queued_idx
+	on agent_jobs(created_at, id)
+	where status = 'queued';
+
 alter table identity_users enable row level security;
 alter table identity_local_credentials enable row level security;
 alter table identity_sessions enable row level security;
@@ -168,6 +238,10 @@ alter table identity_auth_attempts enable row level security;
 alter table notebook_notebooks enable row level security;
 alter table notebook_memberships enable row level security;
 alter table platform_idempotency_keys enable row level security;
+alter table chat_chats enable row level security;
+alter table chat_messages enable row level security;
+alter table agent_runs enable row level security;
+alter table agent_jobs enable row level security;
 
 grant usage on schema public to nano_app, nano_worker;
 grant select, insert, update, delete on
@@ -177,14 +251,23 @@ grant select, insert, update, delete on
 	identity_auth_attempts,
 	notebook_notebooks,
 	notebook_memberships,
-	platform_idempotency_keys
+	platform_idempotency_keys,
+	chat_chats,
+	chat_messages,
+	agent_runs,
+	agent_jobs
 to nano_app;
 grant select on
 	identity_users,
 	identity_sessions,
 	notebook_notebooks,
-	notebook_memberships
+	notebook_memberships,
+	chat_chats,
+	chat_messages,
+	agent_runs
 to nano_worker;
+grant select, insert, update, delete on agent_jobs to nano_worker;
+grant insert, update on chat_messages, chat_chats, agent_runs to nano_worker;
 
 drop policy if exists identity_users_owner on identity_users;
 create policy identity_users_owner on identity_users
@@ -204,6 +287,11 @@ create policy notebook_memberships_owner on notebook_memberships
 	using (user_id = nullif(current_setting('app.principal_id', true), ''))
 	with check (user_id = nullif(current_setting('app.principal_id', true), ''));
 
+drop policy if exists notebook_memberships_worker on notebook_memberships;
+create policy notebook_memberships_worker on notebook_memberships
+	for select to nano_worker
+	using (true);
+
 drop policy if exists notebook_notebooks_owner on notebook_notebooks;
 create policy notebook_notebooks_owner on notebook_notebooks
 	for all to nano_app
@@ -218,9 +306,99 @@ create policy notebook_notebooks_owner on notebook_notebooks
 	)
 	with check (true);
 
+drop policy if exists notebook_notebooks_worker on notebook_notebooks;
+create policy notebook_notebooks_worker on notebook_notebooks
+	for select to nano_worker
+	using (true);
+
 drop policy if exists platform_idempotency_owner on platform_idempotency_keys;
 create policy platform_idempotency_owner on platform_idempotency_keys
 	for all to nano_app
 	using (principal_id = nullif(current_setting('app.principal_id', true), ''))
 	with check (principal_id = nullif(current_setting('app.principal_id', true), ''));
+
+drop policy if exists chat_chats_private on chat_chats;
+create policy chat_chats_private on chat_chats
+	for all to nano_app
+	using (
+		creator_user_id = nullif(current_setting('app.principal_id', true), '')
+		and exists (
+			select 1 from notebook_memberships m
+			where m.notebook_id = chat_chats.notebook_id
+			  and m.user_id = nullif(current_setting('app.principal_id', true), '')
+		)
+	)
+	with check (
+		creator_user_id = nullif(current_setting('app.principal_id', true), '')
+		and exists (
+			select 1 from notebook_memberships m
+			where m.notebook_id = chat_chats.notebook_id
+			  and m.user_id = nullif(current_setting('app.principal_id', true), '')
+		)
+	);
+
+drop policy if exists chat_chats_worker on chat_chats;
+create policy chat_chats_worker on chat_chats
+	for select to nano_worker
+	using (true);
+
+drop policy if exists chat_messages_private on chat_messages;
+create policy chat_messages_private on chat_messages
+	for all to nano_app
+	using (
+		exists (
+			select 1 from chat_chats c
+			where c.id = chat_messages.chat_id
+			  and c.creator_user_id = nullif(current_setting('app.principal_id', true), '')
+		)
+	)
+	with check (
+		exists (
+			select 1 from chat_chats c
+			where c.id = chat_messages.chat_id
+			  and c.creator_user_id = nullif(current_setting('app.principal_id', true), '')
+		)
+	);
+
+drop policy if exists chat_messages_worker on chat_messages;
+create policy chat_messages_worker on chat_messages
+	for all to nano_worker
+	using (true)
+	with check (true);
+
+drop policy if exists agent_runs_private on agent_runs;
+create policy agent_runs_private on agent_runs
+	for all to nano_app
+	using (user_id = nullif(current_setting('app.principal_id', true), ''))
+	with check (user_id = nullif(current_setting('app.principal_id', true), ''));
+
+drop policy if exists agent_runs_worker on agent_runs;
+create policy agent_runs_worker on agent_runs
+	for all to nano_worker
+	using (true)
+	with check (true);
+
+drop policy if exists agent_jobs_private on agent_jobs;
+create policy agent_jobs_private on agent_jobs
+	for all to nano_app
+	using (
+		exists (
+			select 1 from agent_runs r
+			where r.id = agent_jobs.run_id
+			  and r.user_id = nullif(current_setting('app.principal_id', true), '')
+		)
+	)
+	with check (
+		exists (
+			select 1 from agent_runs r
+			where r.id = agent_jobs.run_id
+			  and r.user_id = nullif(current_setting('app.principal_id', true), '')
+		)
+	);
+
+drop policy if exists agent_jobs_worker on agent_jobs;
+create policy agent_jobs_worker on agent_jobs
+	for all to nano_worker
+	using (true)
+	with check (true);
 `

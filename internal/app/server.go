@@ -11,14 +11,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/huangxinxinyu/nano-notebook/internal/agent"
+	"github.com/huangxinxinyu/nano-notebook/internal/chat"
 	"github.com/huangxinxinyu/nano-notebook/internal/identity"
+	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/notebook"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type Config struct {
 	CookieSecure bool
 	Version      string
+	DefaultModel string
 }
 
 type Server struct {
@@ -27,13 +33,17 @@ type Server struct {
 	identity      *identity.Store
 	notebookStore *notebook.Store
 	mux           *http.ServeMux
+	runHub        *runHub
 }
 
 func NewServer(cfg Config, db *DB) *Server {
 	if cfg.Version == "" {
 		cfg.Version = "dev"
 	}
-	s := &Server{cfg: cfg, db: db, identity: identity.NewStore(db.Pool()), notebookStore: notebook.NewStore(db.Pool()), mux: http.NewServeMux()}
+	if cfg.DefaultModel == "" {
+		cfg.DefaultModel = "aliyun/qwen-flash"
+	}
+	s := &Server{cfg: cfg, db: db, identity: identity.NewStore(db.Pool()), notebookStore: notebook.NewStore(db.Pool()), mux: http.NewServeMux(), runHub: newRunHub()}
 	s.routes()
 	return s
 }
@@ -52,6 +62,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/auth/sign-out", s.signOut)
 	s.mux.HandleFunc("/api/v1/notebooks", s.notebooks)
 	s.mux.HandleFunc("/api/v1/notebooks/", s.notebookByID)
+	s.mux.HandleFunc("/api/v1/chats/", s.chatByID)
+	s.mux.HandleFunc("/api/v1/agent-runs/", s.agentRunByID)
+}
+
+func (s *Server) NotifyRun(runID string) {
+	if s != nil && s.runHub != nil {
+		s.runHub.notify(runID)
+	}
 }
 
 func (s *Server) healthLive(w http.ResponseWriter, r *http.Request) {
@@ -311,11 +329,17 @@ func (s *Server) notebookByID(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, "unauthorized", "error.session_expired")
 		return
 	}
-	if r.Method != http.MethodGet {
+	remainder := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/notebooks/"), "/")
+	parts := strings.Split(remainder, "/")
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "chats" {
+		s.notebookChats(w, r, user.ID, parts[0])
+		return
+	}
+	if r.Method != http.MethodGet || len(parts) != 1 || parts[0] == "" {
 		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
 		return
 	}
-	id := strings.TrimPrefix(r.URL.Path, "/api/v1/notebooks/")
+	id := parts[0]
 	var notebookResult notebook.Notebook
 	err := s.withRequestPrincipal(r.Context(), user.ID, func(_ *identity.Store, notebookStore *notebook.Store) error {
 		var err error
@@ -327,6 +351,312 @@ func (s *Server) notebookByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"notebook": notebookResult})
+}
+
+func (s *Server) notebookChats(w http.ResponseWriter, r *http.Request, userID, notebookID string) {
+	switch r.Method {
+	case http.MethodGet:
+		var chats []chat.Chat
+		err := s.withChatPrincipal(r.Context(), userID, func(store *chat.Store) error {
+			var err error
+			chats, err = store.ListPrivate(r.Context(), userID, notebookID)
+			return err
+		})
+		if errors.Is(err, chat.ErrNotFound) {
+			writeError(w, r, http.StatusNotFound, "not_found", "error.notebook_not_found")
+			return
+		}
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"chats": chats})
+	case http.MethodPost:
+		if !validCSRF(r) {
+			writeError(w, r, http.StatusForbidden, "csrf_required", "error.csrf_required")
+			return
+		}
+		key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+		if key == "" {
+			writeError(w, r, http.StatusBadRequest, "idempotency_required", "error.idempotency_required")
+			return
+		}
+		chatID, err := newOpaqueID("chat")
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+			return
+		}
+		const title = "New chat"
+		hash := requestHash([]byte(notebookID + "\x00" + title))
+		var created chat.Chat
+		var reused bool
+		err = s.withChatPrincipal(r.Context(), userID, func(store *chat.Store) error {
+			var err error
+			created, reused, err = store.CreatePrivate(r.Context(), userID, notebookID, key, hash, chatID, title)
+			return err
+		})
+		if errors.Is(err, chat.ErrIdempotencyMismatch) {
+			writeError(w, r, http.StatusConflict, "idempotency_mismatch", "error.idempotency_mismatch")
+			return
+		}
+		if errors.Is(err, chat.ErrNotFound) {
+			writeError(w, r, http.StatusNotFound, "not_found", "error.notebook_not_found")
+			return
+		}
+		if err != nil {
+			writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+			return
+		}
+		status := http.StatusCreated
+		if reused {
+			status = http.StatusOK
+		}
+		writeJSON(w, status, map[string]any{"chat": created})
+	default:
+		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
+	}
+}
+
+func (s *Server) chatByID(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, r, http.StatusUnauthorized, "unauthorized", "error.session_expired")
+		return
+	}
+	remainder := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/chats/"), "/")
+	parts := strings.Split(remainder, "/")
+	if len(parts) == 1 && parts[0] != "" && r.Method == http.MethodGet {
+		s.chatSnapshot(w, r, user.ID, parts[0])
+		return
+	}
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "messages" && r.Method == http.MethodPost {
+		s.admitMessage(w, r, user.ID, parts[0])
+		return
+	}
+	writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
+}
+
+func (s *Server) chatSnapshot(w http.ResponseWriter, r *http.Request, userID, chatID string) {
+	var chatResult chat.Chat
+	var messages []chat.Message
+	var activeRun *agent.RunSnapshot
+	err := s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
+		chatStore := chat.NewStore(tx)
+		var err error
+		chatResult, err = chatStore.GetPrivate(r.Context(), userID, chatID)
+		if err != nil {
+			return err
+		}
+		messages, err = chatStore.ListMessages(r.Context(), chatID)
+		if err != nil {
+			return err
+		}
+		run, found, err := agent.NewStore(tx).ActiveForChat(r.Context(), userID, chatID)
+		if err != nil {
+			return err
+		}
+		if found {
+			activeRun = &run
+		}
+		return nil
+	})
+	if errors.Is(err, chat.ErrNotFound) {
+		writeError(w, r, http.StatusNotFound, "not_found", "error.chat_not_found")
+		return
+	}
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"chat": chatResult, "messages": messages, "active_run": activeRun})
+}
+
+func (s *Server) agentRunByID(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, r, http.StatusUnauthorized, "unauthorized", "error.session_expired")
+		return
+	}
+	remainder := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/agent-runs/"), "/")
+	parts := strings.Split(remainder, "/")
+	if r.Method != http.MethodGet || len(parts) != 2 || parts[0] == "" || parts[1] != "events" {
+		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
+		return
+	}
+	s.streamRun(w, r, user.ID, parts[0])
+}
+
+func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, userID, runID string) {
+	if _, err := s.runProjection(r.Context(), userID, runID); err != nil {
+		if errors.Is(err, agent.ErrRunNotFound) {
+			writeError(w, r, http.StatusNotFound, "not_found", "error.run_not_found")
+		} else {
+			writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		}
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, r, http.StatusInternalServerError, "stream_unsupported", "error.internal")
+		return
+	}
+	wake, unsubscribe := s.runHub.subscribe(runID)
+	defer unsubscribe()
+	projection, err := s.runProjection(r.Context(), userID, runID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	if err := writeRunEvent(w, projection); err != nil {
+		return
+	}
+	flusher.Flush()
+	if terminalRun(projection.Run.Status) {
+		return
+	}
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-heartbeat.C:
+			if _, err := io.WriteString(w, ": heartbeat\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-wake:
+			projection, err := s.runProjection(r.Context(), userID, runID)
+			if err != nil {
+				return
+			}
+			if err := writeRunEvent(w, projection); err != nil {
+				return
+			}
+			flusher.Flush()
+			if terminalRun(projection.Run.Status) {
+				return
+			}
+		}
+	}
+}
+
+func (s *Server) runProjection(ctx context.Context, userID, runID string) (agent.RunProjection, error) {
+	var projection agent.RunProjection
+	err := s.db.WithRequestPrincipal(ctx, userID, func(tx pgx.Tx) error {
+		var err error
+		projection, err = agent.NewStore(tx).ProjectionForUser(ctx, userID, runID)
+		return err
+	})
+	return projection, err
+}
+
+func writeRunEvent(w io.Writer, projection agent.RunProjection) error {
+	payload, err := json.Marshal(projection)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "event: run\ndata: %s\n\n", payload)
+	return err
+}
+
+func terminalRun(status string) bool {
+	return status == "completed" || status == "failed"
+}
+
+func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, chatID string) {
+	if !validCSRF(r) {
+		writeError(w, r, http.StatusForbidden, "csrf_required", "error.csrf_required")
+		return
+	}
+	var req struct {
+		ID      string `json:"id"`
+		Content string `json:"content"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if _, err := uuid.Parse(req.ID); err != nil || len(req.ID) != 36 || strings.TrimSpace(req.Content) == "" || len([]rune(req.Content)) > 8000 {
+		writeError(w, r, http.StatusBadRequest, "validation_failed", "error.message_invalid")
+		return
+	}
+	runID, err := newOpaqueID("run")
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	jobID, err := newOpaqueID("job")
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	status := "queued"
+	err = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtextextended($1, 0))`, "admit_agent_run:"+userID); err != nil {
+			return err
+		}
+		chatStore := chat.NewStore(tx)
+		if _, err := chatStore.GetPrivate(r.Context(), userID, chatID); err != nil {
+			return err
+		}
+		existing, found, err := chatStore.MessageByID(r.Context(), req.ID)
+		if err != nil {
+			return err
+		}
+		if found {
+			if existing.ChatID != chatID || existing.Role != "user" || existing.Content != req.Content {
+				return chat.ErrMessageConflict
+			}
+			run, err := agent.NewStore(tx).ByInputMessage(r.Context(), req.ID)
+			if err != nil {
+				return err
+			}
+			runID = run.ID
+			status = run.Status
+			return nil
+		}
+		if _, active, err := agent.NewStore(tx).ActiveByUser(r.Context(), userID); err != nil {
+			return err
+		} else if active {
+			return agent.ErrActiveRun
+		}
+		if err := chatStore.InsertUserMessage(r.Context(), req.ID, chatID, req.Content); err != nil {
+			return err
+		}
+		if err := agent.NewStore(tx).CreateQueued(r.Context(), runID, userID, chatID, req.ID, s.cfg.DefaultModel, "agent-bare-v1"); err != nil {
+			return err
+		}
+		if err := jobs.NewStore(tx).CreateAgentRun(r.Context(), jobID, runID); err != nil {
+			return err
+		}
+		_, err = tx.Exec(r.Context(), `select pg_notify('nano_agent_jobs', $1)`, jobID)
+		return err
+	})
+	if errors.Is(err, chat.ErrNotFound) {
+		writeError(w, r, http.StatusNotFound, "not_found", "error.chat_not_found")
+		return
+	}
+	if errors.Is(err, chat.ErrMessageConflict) || isUniqueViolation(err, "chat_messages_pkey") {
+		writeError(w, r, http.StatusConflict, "message_id_conflict", "error.message_id_conflict")
+		return
+	}
+	if errors.Is(err, agent.ErrActiveRun) || isUniqueViolation(err, "agent_runs_one_active_per_user_idx") {
+		writeError(w, r, http.StatusConflict, "active_run_conflict", "error.active_run_conflict")
+		return
+	}
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"message_id": req.ID, "run_id": runID, "status": status})
+}
+
+func isUniqueViolation(err error, constraint string) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == constraint
 }
 
 func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, userID string) bool {
@@ -384,6 +714,12 @@ func (s *Server) withRequestPrincipal(ctx context.Context, userID string, fn fun
 		identityStore := identity.NewStore(tx)
 		notebookStore := notebook.NewStore(tx)
 		return fn(identityStore, notebookStore)
+	})
+}
+
+func (s *Server) withChatPrincipal(ctx context.Context, userID string, fn func(*chat.Store) error) error {
+	return s.db.WithRequestPrincipal(ctx, userID, func(tx pgx.Tx) error {
+		return fn(chat.NewStore(tx))
 	})
 }
 
