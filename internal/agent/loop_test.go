@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -40,6 +42,38 @@ func TestLoopExecutesOneFixedModelPassAndPublishes(t *testing.T) {
 	}
 }
 
+func TestLoopTreatsLeaseLossDuringModelCallAsControlFlow(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(ErrLeaseLost)
+	publisher := &recordingPublisher{}
+	loop := NewLoop(
+		loaderFunc(func(context.Context, Attempt) (Execution, error) {
+			return Execution{Model: "aliyun/qwen-flash"}, nil
+		}),
+		builderFunc(func(context.Context, Execution) (models.ChatRequest, error) {
+			return models.ChatRequest{Model: "aliyun/qwen-flash"}, nil
+		}),
+		runnerFunc(func(context.Context, models.ChatRequest) (models.ChatResult, error) {
+			return models.ChatResult{}, &models.ModelError{
+				Kind: models.ErrorUnavailable,
+				Err:  fmt.Errorf("Post model endpoint: %w", ErrLeaseLost),
+			}
+		}),
+		publisher,
+	)
+
+	err := loop.Execute(ctx, Attempt{JobID: "job_one", RunID: "run_one", LeaseToken: "lease_one"})
+	if err != ErrLeaseLost {
+		t.Fatalf("error = %v, want canonical ErrLeaseLost", err)
+	}
+	if publisher.failCalls != 0 {
+		t.Fatalf("failure publications = %d, want none", publisher.failCalls)
+	}
+	if !errors.Is(context.Cause(ctx), ErrLeaseLost) {
+		t.Fatalf("context cause = %v, want ErrLeaseLost", context.Cause(ctx))
+	}
+}
+
 type loaderFunc func(context.Context, Attempt) (Execution, error)
 
 func (fn loaderFunc) Load(ctx context.Context, attempt Attempt) (Execution, error) {
@@ -59,18 +93,22 @@ func (fn runnerFunc) Run(ctx context.Context, request models.ChatRequest) (model
 }
 
 type recordingPublisher struct {
-	steps  *[]string
-	runID  string
-	result models.ChatResult
+	steps     *[]string
+	runID     string
+	result    models.ChatResult
+	failCalls int
 }
 
 func (p *recordingPublisher) Publish(_ context.Context, attempt Attempt, result models.ChatResult) error {
-	*p.steps = append(*p.steps, "publish")
+	if p.steps != nil {
+		*p.steps = append(*p.steps, "publish")
+	}
 	p.runID = attempt.RunID
 	p.result = result
 	return nil
 }
 
 func (p *recordingPublisher) Fail(context.Context, Attempt, string) error {
+	p.failCalls++
 	return nil
 }

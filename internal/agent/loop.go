@@ -67,6 +67,9 @@ func (l *Loop) Execute(ctx context.Context, attempt Attempt) error {
 	}
 	result, err := l.runner.Run(ctx, request)
 	if err != nil {
+		if errors.Is(context.Cause(ctx), ErrLeaseLost) {
+			return ErrLeaseLost
+		}
 		if errors.Is(err, context.Canceled) {
 			return err
 		}

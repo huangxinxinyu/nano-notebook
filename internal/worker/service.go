@@ -118,6 +118,9 @@ func (s *Service) executeClaim(ctx context.Context, job jobs.ClaimedJob) error {
 			slog.Warn("agent Job lease release failed; natural expiry will recover it", "job_id", job.ID, "error", releaseErr)
 		}
 	}
+	if errors.Is(heartbeatErr, agent.ErrLeaseLost) {
+		return nil
+	}
 	return errors.Join(executeErr, heartbeatErr)
 }
 

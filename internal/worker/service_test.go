@@ -36,8 +36,8 @@ func TestHeartbeatLeaseLossCancelsTheInFlightExecution(t *testing.T) {
 	service.heartbeatInterval = time.Millisecond
 
 	processed, err := service.ProcessAvailable(context.Background())
-	if processed != 1 || !errors.Is(err, context.Canceled) {
-		t.Fatalf("processed=%d err=%v, want cancelled execution", processed, err)
+	if processed != 1 || err != nil {
+		t.Fatalf("processed=%d err=%v, want normal obsolete-attempt completion", processed, err)
 	}
 	if queue.heartbeats != 1 {
 		t.Fatalf("heartbeats=%d, want one lease-loss heartbeat", queue.heartbeats)
