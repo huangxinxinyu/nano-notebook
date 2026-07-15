@@ -46,8 +46,11 @@ func main() {
 	runtime := agent.NewPostgresRuntime(db.Pool(), agent.BareSystemPrompt, nil)
 	loop := agent.NewLoop(runtime, runtime, agent.NewModelRunner(modelClient), runtime)
 	workerService := agentworker.NewService(db.Pool(), jobs.NewQueue(db.Pool()), loop, 5*time.Second, 210*time.Second)
+	workerDone := make(chan error, 1)
 	go func() {
-		if err := workerService.Run(ctx); err != nil && ctx.Err() == nil {
+		err := workerService.Run(ctx)
+		workerDone <- err
+		if err != nil && ctx.Err() == nil {
 			slog.Error("agent worker failed", "error", err)
 			stop()
 		}
@@ -81,6 +84,16 @@ func main() {
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		slog.Error("worker shutdown failed", "error", err)
+		os.Exit(1)
+	}
+	select {
+	case err := <-workerDone:
+		if err != nil {
+			slog.Error("agent worker shutdown failed", "error", err)
+			os.Exit(1)
+		}
+	case <-shutdownCtx.Done():
+		slog.Error("agent worker did not release its lease before shutdown", "error", shutdownCtx.Err())
 		os.Exit(1)
 	}
 	slog.Info("worker stopped")

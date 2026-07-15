@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -113,6 +114,58 @@ func TestGracefulLeaseReleaseMakesTheJobImmediatelyReclaimable(t *testing.T) {
 	second, ok, err := queue.ClaimNext(ctx)
 	if err != nil || !ok || second.ID != first.ID || second.AttemptNo != 2 || second.LeaseToken == first.LeaseToken {
 		t.Fatalf("immediate reclaim = %+v ok=%v err=%v after %+v", second, ok, err, first)
+	}
+}
+
+func TestConcurrentWorkersReclaimAnExpiredLeaseExactlyOnce(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "lease-concurrent-reclaim@example.com")
+	admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c027")
+	ctx := context.Background()
+	queue := jobs.NewQueue(api.db.Pool())
+	first, ok, err := queue.ClaimNext(ctx)
+	if err != nil || !ok {
+		t.Fatalf("first claim = %+v ok=%v err=%v", first, ok, err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `update agent_jobs set lease_expires_at=now()-interval '1 second' where id=$1`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	results := make(chan struct {
+		job jobs.ClaimedJob
+		ok  bool
+		err error
+	}, 2)
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			job, ok, err := queue.ClaimNext(ctx)
+			results <- struct {
+				job jobs.ClaimedJob
+				ok  bool
+				err error
+			}{job: job, ok: ok, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	claimed := 0
+	for result := range results {
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if result.ok {
+			claimed++
+			if result.job.ID != first.ID || result.job.AttemptNo != 2 || result.job.LeaseToken == first.LeaseToken {
+				t.Fatalf("concurrent reclaim = %+v after %+v", result.job, first)
+			}
+		}
+	}
+	if claimed != 1 {
+		t.Fatalf("successful concurrent reclaims = %d, want exactly one", claimed)
 	}
 }
 
