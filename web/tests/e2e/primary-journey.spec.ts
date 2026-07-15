@@ -145,7 +145,8 @@ test("desktop workspace shows sources, chat, and Studio as simultaneous panels",
   await expect(chatPanel).toBeVisible();
   await expect(studioPanel).toBeVisible();
   await expect(sourcesPanel).toContainText("Sources are not available in Sprint 1.");
-  await expect(chatPanel).toContainText("Chat is intentionally empty until source processing and retrieval exist.");
+  await expect(chatPanel).toContainText("Ask from model knowledge now.");
+  await expect(chatPanel.getByRole("textbox", { name: "Message Nano Notebook" })).toBeEnabled();
   await expect(studioPanel).toContainText("Studio output will be saved here");
   await expect(page.getByRole("tablist", { name: "Notebook panels" })).toBeHidden();
 
@@ -176,7 +177,7 @@ test("compact workspace keeps one-panel tab navigation without horizontal overfl
 
   const compactWorkspace = page.locator(".workspace-compact-tabs");
   const sourcesPanel = compactWorkspace.locator('[role="tabpanel"]').filter({ hasText: "Sources are not available in Sprint 1." });
-  const chatPanel = compactWorkspace.locator('[role="tabpanel"]').filter({ hasText: "Chat is intentionally empty until source processing and retrieval exist." });
+  const chatPanel = compactWorkspace.locator('[role="tabpanel"]').filter({ hasText: "Ask from model knowledge now." });
   const studioPanel = compactWorkspace.locator('[role="tabpanel"]').filter({ hasText: "Studio output will be saved here" });
   await expect(sourcesPanel).toBeVisible();
   await expect(chatPanel).toBeHidden();
@@ -185,6 +186,7 @@ test("compact workspace keeps one-panel tab navigation without horizontal overfl
   await page.getByRole("tab", { name: "Chat" }).click();
   await expect(sourcesPanel).toBeHidden();
   await expect(chatPanel).toBeVisible();
+  await expect(chatPanel.getByRole("textbox", { name: "Message Nano Notebook" })).toBeEnabled();
   await expect(studioPanel).toBeHidden();
 
   await page.getByRole("tab", { name: "Studio" }).click();

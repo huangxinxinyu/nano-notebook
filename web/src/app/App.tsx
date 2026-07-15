@@ -108,10 +108,16 @@ const strings = {
     fastResearch: "Fast Research",
     sourcesEmptyTitle: "Saved sources will appear here",
     collapsePanel: "Collapse panel",
-    chatUnavailable: "Chat is not available yet",
+    unavailableLabel: "Chat is temporarily unavailable.",
     chatEmptyTitle: "Chat will start here",
-    chatEmptyBody: "Chat is intentionally empty until source processing and retrieval exist.",
-    chatComposer: "Add sources to start chatting",
+    chatEmptyBody: "Ask from model knowledge now. Sources can make later answers grounded in your material.",
+    composerPlaceholder: "Ask anything…",
+    composerLabel: "Message Nano Notebook",
+    sendLabel: "Send message",
+    waitingLabel: "Waiting to start…",
+    generatingLabel: "Generating answer…",
+    knowledgeLabel: "Based on model knowledge",
+    failedLabel: "The answer could not be generated. Try again.",
     beta: "Beta",
     studioEmptyTitle: "Studio output will be saved here",
     studioEmptyBody: "Add sources, then choose an output above when generation becomes available.",
@@ -209,10 +215,16 @@ const strings = {
     fastResearch: "快速研究",
     sourcesEmptyTitle: "已保存的来源将显示在此处",
     collapsePanel: "收起面板",
-    chatUnavailable: "聊天功能尚未开放",
+    unavailableLabel: "聊天暂时不可用。",
     chatEmptyTitle: "对话将在这里开始",
-    chatEmptyBody: "在资料处理和检索完成前，对话区域保持为空。",
-    chatComposer: "添加来源后即可开始对话",
+    chatEmptyBody: "现在可以基于模型知识提问；后续添加来源可让回答基于你的资料。",
+    composerPlaceholder: "输入任何问题…",
+    composerLabel: "向 Nano Notebook 发送消息",
+    sendLabel: "发送消息",
+    waitingLabel: "正在等待开始…",
+    generatingLabel: "正在生成回答…",
+    knowledgeLabel: "基于模型知识",
+    failedLabel: "回答生成失败，请重试。",
     beta: "Beta 版",
     studioEmptyTitle: "Studio 输出将保存在此处",
     studioEmptyBody: "添加来源后，生成能力开放时即可从上方选择输出。",
@@ -307,12 +319,12 @@ function AppShell() {
     shell = <AuthScreen t={t} locale={locale} sessionNotice={sessionNotice} onLocale={switchLocale} onAuthed={setUser} />;
   } else if (notebookID) {
     shell = <Workspace t={t} onLocale={switchLocale} user={activeUser} notebookID={notebookID} onLibrary={() => navigate("/")} onOpen={(id) => navigate(`/notebooks/${id}`)} onSignedOut={() => {
-      queryClient.setQueryData(["session"], { status: "anonymous" } satisfies SessionState);
+      clearAuthenticatedQueries();
       setUser(null);
     }} />;
   } else {
     shell = <LibraryScreen t={t} locale={locale} onLocale={switchLocale} user={activeUser} onOpen={(id) => navigate(`/notebooks/${id}`)} onSignedOut={() => {
-      queryClient.setQueryData(["session"], { status: "anonymous" } satisfies SessionState);
+      clearAuthenticatedQueries();
       setUser(null);
     }} />;
   }
@@ -323,6 +335,11 @@ function AppShell() {
       <Toaster richColors containerAriaLabel={t.notificationsLabel} />
     </>
   );
+}
+
+function clearAuthenticatedQueries() {
+  queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== "session" });
+  queryClient.setQueryData(["session"], { status: "anonymous" } satisfies SessionState);
 }
 
 function AuthScreen({ t, locale, sessionNotice, onLocale, onAuthed }: { t: typeof strings.en; locale: Locale; sessionNotice: string | null; onLocale: () => void; onAuthed: (user: User) => void }) {
@@ -609,10 +626,17 @@ function Workspace({ t, user, notebookID, onLocale, onLibrary, onOpen, onSignedO
     sourcesEmptyBody: t.sourcesEmpty,
     collapsePanel: t.collapsePanel,
     comingSoon: t.comingSoon,
-    chatUnavailable: t.chatUnavailable,
-    chatEmptyTitle: t.chatEmptyTitle,
-    chatEmptyBody: t.chatEmptyBody,
-    chatComposer: t.chatComposer,
+    title: t.chat,
+    emptyTitle: t.chatEmptyTitle,
+    emptyBody: t.chatEmptyBody,
+    composerPlaceholder: t.composerPlaceholder,
+    composerLabel: t.composerLabel,
+    sendLabel: t.sendLabel,
+    waitingLabel: t.waitingLabel,
+    generatingLabel: t.generatingLabel,
+    knowledgeLabel: t.knowledgeLabel,
+    failedLabel: t.failedLabel,
+    unavailableLabel: t.unavailableLabel,
     beta: t.beta,
     studioEmptyTitle: t.studioEmptyTitle,
     studioEmptyBody: t.studioEmptyBody,
@@ -637,7 +661,7 @@ function Workspace({ t, user, notebookID, onLocale, onLibrary, onOpen, onSignedO
       {notebook.data ? (
         <>
           <WorkspaceHeader title={notebook.data.title} backLabel={t.back} createAction={createAction} analyzeLabel={t.analyze} shareLabel={t.share} settingsLabel={t.settings} appsLabel={t.apps} email={user.email} openUserMenuLabel={t.openUserMenu} languageLabel={t.languageSwitch} signOutLabel={t.signOut} signingOutLabel={t.signingOut} signingOut={signingOut} comingSoonMessage={t.comingSoon} onBack={onLibrary} onLanguage={onLocale} onSignOut={() => void signOut()} />
-          <NotebookWorkspace copy={workspaceCopy} />
+          <NotebookWorkspace notebookID={notebookID} copy={workspaceCopy} />
         </>
       ) : null}
     </main>

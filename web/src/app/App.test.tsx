@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 import { App } from "./App";
@@ -6,12 +6,46 @@ import { queryClient } from "./queryClient";
 
 let fetchHandler: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
+class FakeEventSource {
+  static instances: FakeEventSource[] = [];
+
+  readonly url: string;
+  readonly listeners = new Map<string, Set<EventListener>>();
+  closed = false;
+
+  constructor(url: string | URL) {
+    this.url = String(url);
+    FakeEventSource.instances.push(this);
+  }
+
+  addEventListener(type: string, listener: EventListener) {
+    const listeners = this.listeners.get(type) ?? new Set<EventListener>();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type: string, listener: EventListener) {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  close() {
+    this.closed = true;
+  }
+
+  emit(type: string, data: unknown) {
+    const event = new MessageEvent(type, { data: JSON.stringify(data) });
+    for (const listener of this.listeners.get(type) ?? []) listener(event);
+  }
+}
+
 beforeEach(() => {
   localStorage.clear();
   window.history.pushState(null, "", "/");
   document.documentElement.lang = "en";
   queryClient.clear();
   document.cookie = "nn_csrf=test-token";
+  FakeEventSource.instances = [];
+  HTMLElement.prototype.scrollTo = vi.fn();
   Object.defineProperty(window.navigator, "language", { value: "en-US", configurable: true });
   fetchHandler = async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -37,6 +71,7 @@ beforeEach(() => {
     return json({ error: { code: "not_found" } }, 404);
   };
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => fetchHandler(input, init)));
+  vi.stubGlobal("EventSource", FakeEventSource);
 });
 
 test("completes the first notebook journey in English", async () => {
@@ -59,7 +94,7 @@ test("completes the first notebook journey in English", async () => {
   expect(screen.getByRole("tab", { name: "Studio" })).toBeInTheDocument();
 });
 
-test("renders a truthful static workspace shell without starting a chat runtime", async () => {
+test("restores the private Chat and enables the composer", async () => {
   window.history.pushState(null, "", "/notebooks/nb_test");
   fetchHandler = authenticatedWorkspaceHandler();
 
@@ -70,14 +105,187 @@ test("renders a truthful static workspace shell without starting a chat runtime"
   const sources = screen.getByRole("region", { name: "Sources" });
   expect(sources).toBeInTheDocument();
   const chat = screen.getByRole("region", { name: "Chat" });
-  expect(chat).toHaveAttribute("data-placeholder", "true");
   expect(chat).toHaveAttribute("data-chat-framework", "@assistant-ui/react");
-  expect(within(chat).getByRole("textbox", { name: "Chat is not available yet" })).toBeDisabled();
+  expect(await within(chat).findByRole("textbox", { name: "Message Nano Notebook" })).toBeEnabled();
+  expect(within(chat).getByText("Chat will start here")).toBeInTheDocument();
   expect(screen.getByRole("region", { name: "Studio" })).toBeInTheDocument();
 
   await user.click(within(sources).getByRole("button", { name: "Add sources" }));
   expect(await screen.findByText("This feature is coming soon.")).toBeInTheDocument();
-  expect(vi.mocked(fetch).mock.calls.every(([input]) => !String(input).includes("/chat"))).toBe(true);
+  expect(fetch).toHaveBeenCalledWith("/api/v1/notebooks/nb_test/chats", expect.anything());
+  expect(fetch).toHaveBeenCalledWith("/api/v1/chats/chat_test", expect.anything());
+});
+
+test("submits one durable Message and projects the final answer from Run SSE", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  let admittedMessageID = "";
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], active_run: null });
+    if (url.endsWith("/api/v1/chats/chat_test/messages") && method === "POST") {
+      const body = JSON.parse(String(init?.body)) as { id: string; content: string };
+      admittedMessageID = body.id;
+      expect(body.id).toMatch(/^[0-9a-f-]{36}$/);
+      expect(body.content).toBe("Why does a KV cache help?");
+      expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("test-token");
+      return json({ message_id: body.id, run_id: "run_test", status: "queued" }, 202);
+    }
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  const chat = await screen.findByRole("region", { name: "Chat" });
+  const composer = await within(chat).findByRole("textbox", { name: "Message Nano Notebook" });
+  await user.type(composer, "Why does a KV cache help?");
+  await user.click(within(chat).getByRole("button", { name: "Send message" }));
+
+  expect(await within(chat).findByText("Why does a KV cache help?")).toBeInTheDocument();
+  expect(within(chat).getByRole("status")).toHaveTextContent("Waiting to start…");
+  await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+  expect(FakeEventSource.instances[0]?.url).toBe("/api/v1/agent-runs/run_test/events");
+
+  act(() => {
+    FakeEventSource.instances[0]?.emit("run", {
+      run: { id: "run_test", status: "running", error_code: null },
+      message: null
+    });
+  });
+  await waitFor(() => expect(within(chat).getByRole("status")).toHaveTextContent("Generating answer…"));
+
+  act(() => {
+    FakeEventSource.instances[0]?.emit("run", {
+      run: { id: "run_test", status: "completed", error_code: null },
+      message: {
+        id: "msg_answer",
+        role: "assistant",
+        content: "It reuses the keys and values already computed for earlier tokens.",
+        answer_mode: "model_knowledge",
+        created_at: "2026-07-14T12:00:00Z"
+      }
+    });
+  });
+
+  expect(await within(chat).findByText("It reuses the keys and values already computed for earlier tokens.")).toBeInTheDocument();
+  expect(within(chat).getByText("Based on model knowledge")).toBeInTheDocument();
+  expect(within(chat).queryByRole("status")).not.toBeInTheDocument();
+  expect(FakeEventSource.instances[0]?.closed).toBe(true);
+  expect(admittedMessageID).not.toBe("");
+});
+
+test("creates the first private Chat with one bootstrap idempotency key", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  let bootstrapKey = "";
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "POST") {
+      bootstrapKey = new Headers(init?.headers).get("Idempotency-Key") ?? "";
+      expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("test-token");
+      return json({ chat: { id: "chat_created", notebook_id: "nb_test", title: "New chat" } }, 201);
+    }
+    if (url.endsWith("/api/v1/chats/chat_created")) return json({ chat: { id: "chat_created", notebook_id: "nb_test", title: "New chat" }, messages: [], active_run: null });
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+
+  const chat = await screen.findByRole("region", { name: "Chat" });
+  expect(await within(chat).findByRole("textbox", { name: "Message Nano Notebook" })).toBeEnabled();
+  expect(bootstrapKey).toMatch(/^[0-9a-f-]{36}$/);
+  expect(fetch).toHaveBeenCalledWith("/api/v1/notebooks/nb_test/chats", expect.objectContaining({ method: "POST" }));
+});
+
+test("reconnects an active Run after refresh and shows terminal failure without an Assistant Message", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  fetchHandler = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/chats")) return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
+    if (url.endsWith("/api/v1/chats/chat_test")) return json({
+      chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" },
+      messages: [{ id: "msg_question", chat_id: "chat_test", role: "user", content: "Will this work?", answer_mode: null, created_at: "2026-07-14T12:00:00Z" }],
+      active_run: { id: "run_active", status: "queued", error_code: null }
+    });
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const chat = await screen.findByRole("region", { name: "Chat" });
+  expect(await within(chat).findByText("Will this work?")).toBeInTheDocument();
+  await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+
+  act(() => {
+    FakeEventSource.instances[0]?.emit("run", {
+      run: { id: "run_active", status: "failed", error_code: "model_unavailable" },
+      message: null
+    });
+  });
+
+  expect(await within(chat).findByRole("alert")).toHaveTextContent("The answer could not be generated. Try again.");
+  expect(within(chat).queryByText("Based on model knowledge")).not.toBeInTheDocument();
+  expect(within(chat).getByRole("textbox", { name: "Message Nano Notebook" })).toBeEnabled();
+  expect(FakeEventSource.instances[0]?.closed).toBe(true);
+});
+
+test("reuses the User Message UUID when admission must be retried", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  const attemptedIDs: string[] = [];
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], active_run: null });
+    if (url.endsWith("/api/v1/chats/chat_test/messages") && method === "POST") {
+      const body = JSON.parse(String(init?.body)) as { id: string; content: string };
+      attemptedIDs.push(body.id);
+      if (attemptedIDs.length === 1) return json({ error: { code: "active_run_conflict" } }, 409);
+      return json({ message_id: body.id, run_id: "run_retry", status: "queued" }, 202);
+    }
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  const chat = await screen.findByRole("region", { name: "Chat" });
+  const composer = await within(chat).findByRole("textbox", { name: "Message Nano Notebook" });
+  await user.type(composer, "Retry this safely");
+  await user.click(within(chat).getByRole("button", { name: "Send message" }));
+
+  expect(await within(chat).findByRole("alert")).toHaveTextContent("Waiting to start…");
+  expect(composer).toHaveValue("Retry this safely");
+  await user.click(within(chat).getByRole("button", { name: "Send message" }));
+
+  expect(await within(chat).findByText("Retry this safely")).toBeInTheDocument();
+  expect(attemptedIDs).toHaveLength(2);
+  expect(attemptedIDs[1]).toBe(attemptedIDs[0]);
+});
+
+test("clears the private Chat projection after successful sign-out", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  fetchHandler = authenticatedWorkspaceHandler();
+
+  render(<App />);
+  const user = userEvent.setup();
+  const chat = await screen.findByRole("region", { name: "Chat" });
+  await within(chat).findByRole("textbox", { name: "Message Nano Notebook" });
+  expect(queryClient.getQueryData(["private-chat", "nb_test"])).toBeDefined();
+
+  await user.click(screen.getByRole("button", { name: "Open user menu" }));
+  await user.click(screen.getByRole("menuitem", { name: "Sign out" }));
+
+  expect(await screen.findByRole("button", { name: "Create account" })).toBeInTheDocument();
+  expect(queryClient.getQueryData(["private-chat", "nb_test"])).toBeUndefined();
 });
 
 test("exposes compact Sources, Chat, and Studio navigation", async () => {
@@ -359,10 +567,14 @@ function authenticatedLibraryHandler(notebooks: Array<{ id: string; title: strin
 }
 
 function authenticatedWorkspaceHandler() {
-  return async (input: RequestInfo | URL) => {
+  return async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    const method = init?.method ?? "GET";
     if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
     if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], active_run: null });
+    if (url.endsWith("/api/v1/auth/sign-out") && method === "POST") return new Response(null, { status: 204 });
     return json({ error: { code: "not_found" } }, 404);
   };
 }

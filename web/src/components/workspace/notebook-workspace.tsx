@@ -1,10 +1,11 @@
 import type { ComponentProps, ReactNode } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
-import { ChatPlaceholderPanelContent } from "./chat-placeholder-panel";
+import { ChatPanelContent, type ChatPanelCopy } from "./chat-placeholder-panel";
+import { usePrivateChat } from "./private-chat";
 import { SourcePanelContent } from "./source-panel";
 import { StudioPanelContent } from "./studio-panel";
 
-type WorkspacePanelCopy = {
+type WorkspacePanelCopy = ChatPanelCopy & {
   panelsLabel: string;
   sources: string;
   chat: string;
@@ -17,10 +18,6 @@ type WorkspacePanelCopy = {
   sourcesEmptyBody: string;
   collapsePanel: string;
   comingSoon: string;
-  chatUnavailable: string;
-  chatEmptyTitle: string;
-  chatEmptyBody: string;
-  chatComposer: string;
   beta: string;
   studioEmptyTitle: string;
   studioEmptyBody: string;
@@ -28,10 +25,11 @@ type WorkspacePanelCopy = {
   studioActions: ComponentProps<typeof StudioPanelContent>["actions"];
 };
 
-export function NotebookWorkspace({ copy }: { copy: WorkspacePanelCopy }) {
+export function NotebookWorkspace({ notebookID, copy }: { notebookID: string; copy: WorkspacePanelCopy }) {
+  const chatController = usePrivateChat(notebookID, copy);
   const panels = {
     sources: <SourcePanelContent title={copy.sources} addSourcesLabel={copy.addSources} searchWebLabel={copy.searchWeb} webLabel={copy.web} fastResearchLabel={copy.fastResearch} emptyTitle={copy.sourcesEmptyTitle} emptyBody={copy.sourcesEmptyBody} collapseLabel={copy.collapsePanel} comingSoonMessage={copy.comingSoon} />,
-    chat: <ChatPlaceholderPanelContent title={copy.chat} unavailableLabel={copy.chatUnavailable} emptyTitle={copy.chatEmptyTitle} emptyBody={copy.chatEmptyBody} composerPlaceholder={copy.chatComposer} />,
+    chat: <ChatPanelContent copy={copy} controller={chatController} />,
     studio: <StudioPanelContent title={copy.studio} actions={copy.studioActions} betaLabel={copy.beta} emptyTitle={copy.studioEmptyTitle} emptyBody={copy.studioEmptyBody} addNoteLabel={copy.addNote} collapseLabel={copy.collapsePanel} comingSoonMessage={copy.comingSoon} />
   };
 
@@ -39,7 +37,7 @@ export function NotebookWorkspace({ copy }: { copy: WorkspacePanelCopy }) {
     <>
       <div className="workspace-panels" aria-label={copy.panelsLabel}>
         <WorkspaceRegion id="sources" title={copy.sources}>{panels.sources}</WorkspaceRegion>
-        <WorkspaceRegion id="chat" title={copy.chat} placeholder>{panels.chat}</WorkspaceRegion>
+        <WorkspaceRegion id="chat" title={copy.chat} chatFramework>{panels.chat}</WorkspaceRegion>
         <WorkspaceRegion id="studio" title={copy.studio}>{panels.studio}</WorkspaceRegion>
       </div>
       <Tabs defaultValue="sources" className="workspace-compact-tabs">
@@ -56,10 +54,10 @@ export function NotebookWorkspace({ copy }: { copy: WorkspacePanelCopy }) {
   );
 }
 
-function WorkspaceRegion({ id, title, placeholder = false, children }: { id: string; title: string; placeholder?: boolean; children: ReactNode }) {
+function WorkspaceRegion({ id, title, chatFramework = false, children }: { id: string; title: string; chatFramework?: boolean; children: ReactNode }) {
   const titleID = `workspace-${id}-title`;
   return (
-    <section className={`workspace-panel workspace-panel--${id}`} role="region" aria-labelledby={titleID} data-placeholder={placeholder || undefined} data-chat-framework={placeholder ? "@assistant-ui/react" : undefined}>
+    <section className={`workspace-panel workspace-panel--${id}`} role="region" aria-labelledby={titleID} data-chat-framework={chatFramework ? "@assistant-ui/react" : undefined}>
       <span className="sr-only" id={titleID}>{title}</span>
       {children}
     </section>
