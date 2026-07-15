@@ -16,6 +16,7 @@ var (
 
 type DBTX interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	Query(context.Context, string, ...any) (pgx.Rows, error)
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
@@ -25,9 +26,10 @@ type RunRef struct {
 }
 
 type RunSnapshot struct {
-	ID        string  `json:"id"`
-	Status    string  `json:"status"`
-	ErrorCode *string `json:"error_code"`
+	ID             string  `json:"id"`
+	InputMessageID string  `json:"input_message_id"`
+	Status         string  `json:"status"`
+	ErrorCode      *string `json:"error_code"`
 }
 
 type AssistantMessageSnapshot struct {
@@ -45,7 +47,12 @@ type RunProjection struct {
 
 func (s *Store) ByInputMessage(ctx context.Context, messageID string) (RunRef, error) {
 	var run RunRef
-	err := s.db.QueryRow(ctx, `select id, status from agent_runs where input_message_id = $1`, messageID).Scan(&run.ID, &run.Status)
+	err := s.db.QueryRow(ctx, `
+		select id, status
+		from agent_runs
+		where input_message_id = $1
+		order by created_at, id
+		limit 1`, messageID).Scan(&run.ID, &run.Status)
 	return run, err
 }
 
@@ -67,10 +74,10 @@ func (s *Store) ActiveByUser(ctx context.Context, userID string) (RunRef, bool, 
 func (s *Store) ActiveForChat(ctx context.Context, userID, chatID string) (RunSnapshot, bool, error) {
 	var run RunSnapshot
 	err := s.db.QueryRow(ctx, `
-		select id, status, error_code
+		select id, input_message_id, status, error_code
 		from agent_runs
 		where user_id = $1 and chat_id = $2 and status in ('queued', 'running')`, userID, chatID).
-		Scan(&run.ID, &run.Status, &run.ErrorCode)
+		Scan(&run.ID, &run.InputMessageID, &run.Status, &run.ErrorCode)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RunSnapshot{}, false, nil
 	}
@@ -84,10 +91,10 @@ func (s *Store) ProjectionForUser(ctx context.Context, userID, runID string) (Ru
 	var projection RunProjection
 	var outputMessageID *string
 	err := s.db.QueryRow(ctx, `
-		select id, status, error_code, output_message_id
+		select id, input_message_id, status, error_code, output_message_id
 		from agent_runs
 		where id = $1 and user_id = $2`, runID, userID).
-		Scan(&projection.Run.ID, &projection.Run.Status, &projection.Run.ErrorCode, &outputMessageID)
+		Scan(&projection.Run.ID, &projection.Run.InputMessageID, &projection.Run.Status, &projection.Run.ErrorCode, &outputMessageID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RunProjection{}, ErrRunNotFound
 	}
@@ -108,6 +115,27 @@ func (s *Store) ProjectionForUser(ctx context.Context, userID, runID string) (Ru
 	}
 	projection.Message = &message
 	return projection, nil
+}
+
+func (s *Store) LatestForChat(ctx context.Context, userID, chatID string) ([]RunSnapshot, error) {
+	rows, err := s.db.Query(ctx, `
+		select distinct on (input_message_id) id, input_message_id, status, error_code
+		from agent_runs
+		where user_id = $1 and chat_id = $2
+		order by input_message_id, created_at desc, id desc`, userID, chatID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	runs := make([]RunSnapshot, 0)
+	for rows.Next() {
+		var run RunSnapshot
+		if err := rows.Scan(&run.ID, &run.InputMessageID, &run.Status, &run.ErrorCode); err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
 }
 
 type Store struct {

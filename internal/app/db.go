@@ -192,9 +192,9 @@ create table if not exists agent_runs (
 	id text primary key,
 	user_id text not null references identity_users(id) on delete cascade,
 	chat_id text not null references chat_chats(id) on delete cascade,
-	input_message_id text not null unique references chat_messages(id) on delete restrict,
+	input_message_id text not null references chat_messages(id) on delete restrict,
 	output_message_id text unique references chat_messages(id) on delete restrict,
-	status text not null check (status in ('queued', 'running', 'completed', 'failed')),
+	status text not null check (status in ('queued', 'running', 'completed', 'failed', 'cancelled')),
 	model text not null,
 	prompt_version text not null,
 	iteration_count integer not null default 0 check (iteration_count between 0 and 1),
@@ -213,6 +213,14 @@ create unique index if not exists agent_runs_one_active_per_user_idx
 	on agent_runs(user_id)
 	where status in ('queued', 'running');
 
+create unique index if not exists agent_runs_one_active_per_input_idx
+	on agent_runs(input_message_id)
+	where status in ('queued', 'running');
+
+create unique index if not exists agent_runs_one_completed_per_input_idx
+	on agent_runs(input_message_id)
+	where status = 'completed';
+
 create index if not exists agent_runs_chat_recent_idx
 	on agent_runs(chat_id, created_at desc, id desc);
 
@@ -220,7 +228,10 @@ create table if not exists agent_jobs (
 	id text primary key,
 	kind text not null check (kind = 'agent_run'),
 	run_id text not null unique references agent_runs(id) on delete cascade,
-	status text not null check (status in ('queued', 'running', 'succeeded', 'failed')),
+	status text not null check (status in ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
+	attempt_no integer not null default 0,
+	lease_token uuid,
+	lease_expires_at timestamptz,
 	created_at timestamptz not null default now(),
 	started_at timestamptz,
 	finished_at timestamptz,
@@ -230,6 +241,32 @@ create table if not exists agent_jobs (
 create index if not exists agent_jobs_queued_idx
 	on agent_jobs(created_at, id)
 	where status = 'queued';
+
+create index if not exists agent_jobs_expired_lease_idx
+	on agent_jobs(lease_expires_at, created_at, id)
+	where status = 'running';
+
+-- Upgrade Sprint 2A databases in place. A process restart may leave an old
+-- running row without a lease, so make that work claimable by lease-aware
+-- workers.
+alter table agent_runs drop constraint if exists agent_runs_input_message_id_key;
+alter table agent_runs drop constraint if exists agent_runs_status_check;
+alter table agent_runs add constraint agent_runs_status_check
+	check (status in ('queued', 'running', 'completed', 'failed', 'cancelled'));
+
+alter table agent_jobs add column if not exists attempt_no integer not null default 0;
+alter table agent_jobs add column if not exists lease_token uuid;
+alter table agent_jobs add column if not exists lease_expires_at timestamptz;
+alter table agent_jobs drop constraint if exists agent_jobs_status_check;
+update agent_runs r
+	set status = 'queued', started_at = null, updated_at = now()
+	from agent_jobs j
+	where j.run_id = r.id and j.status = 'running' and j.lease_token is null and r.status = 'running';
+update agent_jobs
+	set status = 'queued', attempt_no = 0, started_at = null, updated_at = now()
+	where status = 'running' and lease_token is null;
+alter table agent_jobs add constraint agent_jobs_status_check
+	check (status in ('queued', 'running', 'succeeded', 'failed', 'cancelled'));
 
 alter table identity_users enable row level security;
 alter table identity_local_credentials enable row level security;

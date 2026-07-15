@@ -1,11 +1,12 @@
 package app_test
 
 import (
+	"context"
 	"net/http"
 	"testing"
 )
 
-func TestChatSnapshotRestoresDurableMessagesAndTheActiveRun(t *testing.T) {
+func TestChatSnapshotRestoresDurableMessagesAndTheNewestRunForEachInput(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "chat-snapshot@example.com")
 	const messageID = "0190cdd2-5f2d-7ad8-b3f5-1b588788c006"
 	admitted := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
@@ -20,6 +21,21 @@ func TestChatSnapshotRestoresDurableMessagesAndTheActiveRun(t *testing.T) {
 	}
 	decodeBody(t, admitted, &admittedBody)
 
+	ctx := context.Background()
+	if _, err := api.db.Pool().Exec(ctx, `
+		update agent_runs
+		set status = 'cancelled', finished_at = now(), updated_at = now()
+		where id = $1`, admittedBody.RunID); err != nil {
+		t.Fatal(err)
+	}
+	const retryRunID = "run_snapshot_retry"
+	if _, err := api.db.Pool().Exec(ctx, `
+		insert into agent_runs(id, user_id, chat_id, input_message_id, status, model, prompt_version, created_at)
+		select $1, user_id, chat_id, input_message_id, 'queued', model, prompt_version, created_at + interval '1 second'
+		from agent_runs where id = $2`, retryRunID, admittedBody.RunID); err != nil {
+		t.Fatal(err)
+	}
+
 	snapshot := api.getWithCookie(t, "/api/v1/chats/"+chatID, sessionCookie)
 	if snapshot.Code != http.StatusOK {
 		t.Fatalf("chat snapshot status = %d, body = %s", snapshot.Code, snapshot.Body.String())
@@ -33,16 +49,17 @@ func TestChatSnapshotRestoresDurableMessagesAndTheActiveRun(t *testing.T) {
 			Role    string `json:"role"`
 			Content string `json:"content"`
 		} `json:"messages"`
-		ActiveRun *struct {
-			ID     string `json:"id"`
-			Status string `json:"status"`
-		} `json:"active_run"`
+		Runs []struct {
+			ID             string `json:"id"`
+			InputMessageID string `json:"input_message_id"`
+			Status         string `json:"status"`
+		} `json:"runs"`
 	}
 	decodeBody(t, snapshot, &body)
 	if body.Chat.ID != chatID || len(body.Messages) != 1 || body.Messages[0].ID != messageID || body.Messages[0].Role != "user" || body.Messages[0].Content != "Restore this durable message." {
 		t.Fatalf("unexpected durable snapshot: %+v", body)
 	}
-	if body.ActiveRun == nil || body.ActiveRun.ID != admittedBody.RunID || body.ActiveRun.Status != "queued" {
-		t.Fatalf("active Run = %+v, want queued %q", body.ActiveRun, admittedBody.RunID)
+	if len(body.Runs) != 1 || body.Runs[0].ID != retryRunID || body.Runs[0].InputMessageID != messageID || body.Runs[0].Status != "queued" {
+		t.Fatalf("Run projections = %+v, want newest queued Run %q for input %q", body.Runs, retryRunID, messageID)
 	}
 }

@@ -439,7 +439,7 @@ func (s *Server) chatByID(w http.ResponseWriter, r *http.Request) {
 func (s *Server) chatSnapshot(w http.ResponseWriter, r *http.Request, userID, chatID string) {
 	var chatResult chat.Chat
 	var messages []chat.Message
-	var activeRun *agent.RunSnapshot
+	var runs []agent.RunSnapshot
 	err := s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
 		chatStore := chat.NewStore(tx)
 		var err error
@@ -451,14 +451,8 @@ func (s *Server) chatSnapshot(w http.ResponseWriter, r *http.Request, userID, ch
 		if err != nil {
 			return err
 		}
-		run, found, err := agent.NewStore(tx).ActiveForChat(r.Context(), userID, chatID)
-		if err != nil {
-			return err
-		}
-		if found {
-			activeRun = &run
-		}
-		return nil
+		runs, err = agent.NewStore(tx).LatestForChat(r.Context(), userID, chatID)
+		return err
 	})
 	if errors.Is(err, chat.ErrNotFound) {
 		writeError(w, r, http.StatusNotFound, "not_found", "error.chat_not_found")
@@ -468,7 +462,7 @@ func (s *Server) chatSnapshot(w http.ResponseWriter, r *http.Request, userID, ch
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"chat": chatResult, "messages": messages, "active_run": activeRun})
+	writeJSON(w, http.StatusOK, map[string]any{"chat": chatResult, "messages": messages, "runs": runs})
 }
 
 func (s *Server) agentRunByID(w http.ResponseWriter, r *http.Request) {
