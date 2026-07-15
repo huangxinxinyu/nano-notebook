@@ -1,6 +1,6 @@
 import type { AppendMessage } from "@assistant-ui/react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChatPanelCopy } from "./chat-placeholder-panel";
 
 type Chat = {
@@ -18,16 +18,17 @@ export type ChatMessage = {
   created_at: string;
 };
 
-type AgentRun = {
+export type AgentRun = {
   id: string;
-  status: "queued" | "running" | "completed" | "failed";
+  input_message_id: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
   error_code?: string | null;
 };
 
-type ChatSnapshot = {
+export type ChatSnapshot = {
   chat: Chat;
   messages: ChatMessage[];
-  active_run: AgentRun | null;
+  runs: AgentRun[];
 };
 
 export type ChatController = {
@@ -35,12 +36,15 @@ export type ChatController = {
   isLoading: boolean;
   error: string | null;
   send: (message: AppendMessage) => Promise<boolean>;
+  stop: (runID: string) => Promise<boolean>;
+  retry: (runID: string) => Promise<boolean>;
 };
 
 export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatController {
   const queryClient = useQueryClient();
   const [bootstrapKey] = useState(() => crypto.randomUUID());
   const [command, setCommand] = useState<{ id: string; content: string } | null>(null);
+  const retryCommand = useRef<{ sourceRunID: string; key: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const queryKey = useMemo(() => ["private-chat", notebookID] as const, [notebookID]);
   const snapshotQuery = useQuery({
@@ -65,7 +69,7 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
     retry: false
   });
 
-  const run = snapshotQuery.data?.active_run;
+  const run = snapshotQuery.data?.runs.find((item) => item.status === "queued" || item.status === "running");
   const activeRunID = run?.status === "queued" || run?.status === "running" ? run.id : null;
   useEffect(() => {
     if (!activeRunID) return;
@@ -83,17 +87,16 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
         const messages = projection.message
           ? upsertMessage(current.messages, projection.message)
           : current.messages;
-        return { ...current, messages, active_run: projection.run };
+        return { ...current, messages, runs: upsertRun(current.runs, projection.run) };
       });
-      if (projection.run.status === "failed") setError(copy.failedLabel);
-      if (projection.run.status === "completed" || projection.run.status === "failed") source.close();
+      if (projection.run.status === "completed" || projection.run.status === "failed" || projection.run.status === "cancelled") source.close();
     };
     source.addEventListener("run", onRun);
     return () => {
       source.removeEventListener("run", onRun);
       source.close();
     };
-  }, [activeRunID, copy.failedLabel, queryClient, queryKey]);
+  }, [activeRunID, queryClient, queryKey]);
 
   async function send(message: AppendMessage) {
     const content = message.role === "user" ? appendMessageText(message).trim() : "";
@@ -127,12 +130,52 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
       return {
         ...current,
         messages: upsertMessage(current.messages, userMessage),
-        active_run: { id: admitted.run_id, status: admitted.status }
+        runs: upsertRun(current.runs, { id: admitted.run_id, input_message_id: admitted.message_id, status: admitted.status })
       };
     });
-    if (admitted.status === "completed" || admitted.status === "failed") {
+    if (admitted.status === "completed" || admitted.status === "failed" || admitted.status === "cancelled") {
       await snapshotQuery.refetch();
     }
+    return true;
+  }
+
+  async function stop(runID: string) {
+    setError(null);
+    const response = await api(`/api/v1/agent-runs/${runID}/cancel`, {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken() }
+    });
+    if (!response.ok) {
+      if (response.status === 409) await snapshotQuery.refetch();
+      else setError(copy.unavailableLabel);
+      return false;
+    }
+    const body = (await response.json()) as { run: AgentRun };
+    queryClient.setQueryData<ChatSnapshot>(queryKey, (current) => current
+      ? { ...current, runs: upsertRun(current.runs, body.run) }
+      : current);
+    return true;
+  }
+
+  async function retry(runID: string) {
+    const pending = retryCommand.current?.sourceRunID === runID
+      ? retryCommand.current
+      : { sourceRunID: runID, key: crypto.randomUUID() };
+    retryCommand.current = pending;
+    setError(null);
+    const response = await api(`/api/v1/agent-runs/${runID}/retry`, {
+      method: "POST",
+      headers: { "Idempotency-Key": pending.key, "X-CSRF-Token": csrfToken() }
+    });
+    if (!response.ok) {
+      setError(copy.unavailableLabel);
+      return false;
+    }
+    const body = (await response.json()) as { run: AgentRun };
+    retryCommand.current = null;
+    queryClient.setQueryData<ChatSnapshot>(queryKey, (current) => current
+      ? { ...current, runs: upsertRun(current.runs, body.run) }
+      : current);
     return true;
   }
 
@@ -140,7 +183,9 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
     snapshot: snapshotQuery.data,
     isLoading: snapshotQuery.isLoading,
     error: error ?? (snapshotQuery.isError ? copy.unavailableLabel : null),
-    send
+    send,
+    stop,
+    retry
   };
 }
 
@@ -154,6 +199,12 @@ function upsertMessage(messages: ChatMessage[], message: ChatMessage) {
   const existing = messages.findIndex((item) => item.id === message.id);
   if (existing < 0) return [...messages, message];
   return messages.map((item, index) => index === existing ? message : item);
+}
+
+function upsertRun(runs: AgentRun[], run: AgentRun) {
+  const existing = runs.findIndex((item) => item.id === run.id || item.input_message_id === run.input_message_id);
+  if (existing < 0) return [...runs, run];
+  return runs.map((item, index) => index === existing ? run : item);
 }
 
 async function safeAdmissionError(response: Response, copy: ChatPanelCopy) {

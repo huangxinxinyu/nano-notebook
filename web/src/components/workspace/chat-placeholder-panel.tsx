@@ -3,11 +3,13 @@ import {
   ComposerPrimitive,
   MessagePrimitive,
   ThreadPrimitive,
+  useAuiState,
   useExternalStoreRuntime,
   type AssistantRuntime
 } from "@assistant-ui/react";
 import { useEffect, useRef } from "react";
 import { MaterialSymbol } from "../icons/material-symbol";
+import { Button } from "../ui/button";
 import { appendMessageText, type ChatController, type ChatMessage } from "./private-chat";
 
 export type ChatPanelCopy = {
@@ -21,13 +23,18 @@ export type ChatPanelCopy = {
   generatingLabel: string;
   knowledgeLabel: string;
   failedLabel: string;
+  stoppedLabel: string;
+  stopLabel: string;
+  retryLabel: string;
   unavailableLabel: string;
 };
 
 export function ChatPanelContent({ copy, controller }: { copy: ChatPanelCopy; controller: ChatController }) {
   const messages = controller.snapshot?.messages ?? [];
-  const run = controller.snapshot?.active_run;
+  const runs = controller.snapshot?.runs ?? [];
+  const run = runs.find((item) => item.status === "queued" || item.status === "running");
   const isRunning = run?.status === "queued" || run?.status === "running";
+  const latestMessageID = messages.at(-1)?.id;
   const runtimeRef = useRef<AssistantRuntime | null>(null);
   const runtime = useExternalStoreRuntime<ChatMessage>({
     messages,
@@ -72,10 +79,17 @@ export function ChatPanelContent({ copy, controller }: { copy: ChatPanelCopy; co
               </div>
             </ThreadPrimitive.Empty>
             <div className="chat-message-list">
-              <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage: () => <AssistantMessage knowledgeLabel={copy.knowledgeLabel} /> }} />
+              <ThreadPrimitive.Messages components={{
+                UserMessage: () => <UserMessage controller={controller} copy={copy} latestMessageID={latestMessageID} />,
+                AssistantMessage: () => <AssistantMessage knowledgeLabel={copy.knowledgeLabel} />
+              }} />
             </div>
-            {run?.status === "queued" ? <div className="chat-activity" role="status">{copy.waitingLabel}</div> : null}
-            {run?.status === "running" ? <div className="chat-activity" role="status">{copy.generatingLabel}</div> : null}
+            {run ? (
+              <div className="chat-activity" role="status">
+                <span>{run.status === "queued" ? copy.waitingLabel : copy.generatingLabel}</span>
+                <Button variant="ghost" size="sm" onClick={() => void controller.stop(run.id)}>{copy.stopLabel}</Button>
+              </div>
+            ) : null}
             {controller.error ? <div className="chat-error" role="alert">{controller.error}</div> : null}
           </ThreadPrimitive.Viewport>
           <ComposerPrimitive.Root className="chat-composer">
@@ -90,8 +104,21 @@ export function ChatPanelContent({ copy, controller }: { copy: ChatPanelCopy; co
   );
 }
 
-function UserMessage() {
-  return <MessagePrimitive.Root className="chat-message chat-message--user"><MessagePrimitive.Parts /></MessagePrimitive.Root>;
+function UserMessage({ controller, copy, latestMessageID }: { controller: ChatController; copy: ChatPanelCopy; latestMessageID?: string }) {
+  const messageID = useAuiState((state) => state.message.id);
+  const run = controller.snapshot?.runs.find((item) => item.input_message_id === messageID);
+  const canRetry = messageID === latestMessageID && (run?.status === "failed" || run?.status === "cancelled");
+  return (
+    <MessagePrimitive.Root className="chat-message chat-message--user">
+      <MessagePrimitive.Parts />
+      {run?.status === "failed" || run?.status === "cancelled" ? (
+        <span className="chat-run-terminal">
+          {run.status === "failed" ? copy.failedLabel : copy.stoppedLabel}
+          {canRetry ? <Button variant="ghost" size="sm" onClick={() => void controller.retry(run.id)}>{copy.retryLabel}</Button> : null}
+        </span>
+      ) : null}
+    </MessagePrimitive.Root>
+  );
 }
 
 function AssistantMessage({ knowledgeLabel }: { knowledgeLabel: string }) {

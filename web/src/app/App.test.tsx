@@ -125,7 +125,7 @@ test("submits one durable Message and projects the final answer from Run SSE", a
     if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
     if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
     if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
-    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], active_run: null });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [] });
     if (url.endsWith("/api/v1/chats/chat_test/messages") && method === "POST") {
       const body = JSON.parse(String(init?.body)) as { id: string; content: string };
       admittedMessageID = body.id;
@@ -151,7 +151,7 @@ test("submits one durable Message and projects the final answer from Run SSE", a
 
   act(() => {
     FakeEventSource.instances[0]?.emit("run", {
-      run: { id: "run_test", status: "running", error_code: null },
+      run: { id: "run_test", input_message_id: admittedMessageID, status: "running", error_code: null },
       message: null
     });
   });
@@ -159,7 +159,7 @@ test("submits one durable Message and projects the final answer from Run SSE", a
 
   act(() => {
     FakeEventSource.instances[0]?.emit("run", {
-      run: { id: "run_test", status: "completed", error_code: null },
+      run: { id: "run_test", input_message_id: admittedMessageID, status: "completed", error_code: null },
       message: {
         id: "msg_answer",
         role: "assistant",
@@ -191,7 +191,7 @@ test("creates the first private Chat with one bootstrap idempotency key", async 
       expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("test-token");
       return json({ chat: { id: "chat_created", notebook_id: "nb_test", title: "New chat" } }, 201);
     }
-    if (url.endsWith("/api/v1/chats/chat_created")) return json({ chat: { id: "chat_created", notebook_id: "nb_test", title: "New chat" }, messages: [], active_run: null });
+    if (url.endsWith("/api/v1/chats/chat_created")) return json({ chat: { id: "chat_created", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [] });
     return json({ error: { code: "not_found" } }, 404);
   };
 
@@ -213,7 +213,7 @@ test("reconnects an active Run after refresh and shows terminal failure without 
     if (url.endsWith("/api/v1/chats/chat_test")) return json({
       chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" },
       messages: [{ id: "msg_question", chat_id: "chat_test", role: "user", content: "Will this work?", answer_mode: null, created_at: "2026-07-14T12:00:00Z" }],
-      active_run: { id: "run_active", status: "queued", error_code: null }
+      runs: [{ id: "run_active", input_message_id: "msg_question", status: "queued", error_code: null }]
     });
     return json({ error: { code: "not_found" } }, 404);
   };
@@ -225,15 +225,59 @@ test("reconnects an active Run after refresh and shows terminal failure without 
 
   act(() => {
     FakeEventSource.instances[0]?.emit("run", {
-      run: { id: "run_active", status: "failed", error_code: "model_unavailable" },
+      run: { id: "run_active", input_message_id: "msg_question", status: "failed", error_code: "model_unavailable" },
       message: null
     });
   });
 
-  expect(await within(chat).findByRole("alert")).toHaveTextContent("The answer could not be generated. Try again.");
+  expect(await within(chat).findByText("The answer could not be generated. Try again.")).toBeInTheDocument();
+  expect(within(chat).getByRole("button", { name: "Retry" })).toBeInTheDocument();
   expect(within(chat).queryByText("Based on model knowledge")).not.toBeInTheDocument();
   expect(within(chat).getByRole("textbox", { name: "Message Nano Notebook" })).toBeEnabled();
   expect(FakeEventSource.instances[0]?.closed).toBe(true);
+});
+
+test("stops an active Run and retries the same User Message with one idempotency key", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  let retryKey = "";
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/chats")) return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
+    if (url.endsWith("/api/v1/chats/chat_test")) return json({
+      chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" },
+      messages: [{ id: "msg_question", chat_id: "chat_test", role: "user", content: "Stop and retry this", answer_mode: null, created_at: "2026-07-14T12:00:00Z" }],
+      runs: [{ id: "run_active", input_message_id: "msg_question", status: "running", error_code: null }]
+    });
+    if (url.endsWith("/api/v1/agent-runs/run_active/cancel") && method === "POST") {
+      expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("test-token");
+      return json({ run: { id: "run_active", input_message_id: "msg_question", status: "cancelled", error_code: null } });
+    }
+    if (url.endsWith("/api/v1/agent-runs/run_active/retry") && method === "POST") {
+      retryKey = new Headers(init?.headers).get("Idempotency-Key") ?? "";
+      expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("test-token");
+      return json({ run: { id: "run_retry", input_message_id: "msg_question", status: "queued", error_code: null } }, 202);
+    }
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  const chat = await screen.findByRole("region", { name: "Chat" });
+  await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+  const composer = within(chat).getByRole("textbox", { name: "Message Nano Notebook" });
+  await user.click(within(chat).getByRole("button", { name: "Stop" }));
+  expect(await within(chat).findByText("Stopped")).toBeInTheDocument();
+  expect(composer).toBeEnabled();
+  expect(FakeEventSource.instances[0]?.closed).toBe(true);
+
+  await user.click(within(chat).getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(FakeEventSource.instances).toHaveLength(2));
+  expect(FakeEventSource.instances[1]?.url).toBe("/api/v1/agent-runs/run_retry/events");
+  expect(retryKey).toMatch(/^[0-9a-f-]{36}$/);
+  expect(within(chat).getAllByText("Stop and retry this")).toHaveLength(1);
 });
 
 test("reuses the User Message UUID when admission must be retried", async () => {
@@ -245,7 +289,7 @@ test("reuses the User Message UUID when admission must be retried", async () => 
     if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
     if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
     if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
-    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], active_run: null });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [] });
     if (url.endsWith("/api/v1/chats/chat_test/messages") && method === "POST") {
       const body = JSON.parse(String(init?.body)) as { id: string; content: string };
       attemptedIDs.push(body.id);
@@ -573,7 +617,7 @@ function authenticatedWorkspaceHandler() {
     if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
     if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
     if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
-    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], active_run: null });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [] });
     if (url.endsWith("/api/v1/auth/sign-out") && method === "POST") return new Response(null, { status: 204 });
     return json({ error: { code: "not_found" } }, 404);
   };

@@ -1336,6 +1336,22 @@ h2 {
   font-size: 13px;
 }
 
+.chat-activity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chat-run-terminal {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 6px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
 .chat-error {
   color: var(--destructive);
 }
