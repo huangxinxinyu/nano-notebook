@@ -2,7 +2,7 @@
 
 ## Product Definition
 
-Nano Notebook is a source-grounded research workspace for individual researchers and deep learners. It helps a person collect trusted material inside a bounded Notebook, ask multi-step research questions, and verify every important conclusion against original evidence.
+Nano Notebook is a research workspace for individual researchers and deep learners. Its destination is source-grounded research: a person collects trusted material inside a bounded Notebook, asks multi-step questions, and verifies important conclusions against original evidence. Before Source and retrieval delivery, the product also supports a clearly disclosed model-knowledge Chat mode so the durable Agent interaction can be useful and exercised end to end.
 
 The initial product is not a general-purpose assistant, a team knowledge base, or a content-production suite. Its core loop is:
 
@@ -17,7 +17,7 @@ The initial product is not a general-purpose assistant, a team knowledge base, o
 | Area | Initial release | Committed follow-up | Not committed |
 | --- | --- | --- | --- |
 | Source entry | Documents, pasted text, known public web pages, YouTube, audio, images | Search discovery | Cloud drives and sync |
-| Research | Read-only multi-step Agent, strict grounding, Reasoning Trace | Search-assisted Source discovery | External actions, code, general assistant behavior |
+| Research | Disclosed model-knowledge Chat plus read-only multi-step Agent, strict grounded mode, Reasoning Trace | Search-assisted Source discovery | External actions, code, undisclosed evidence blending |
 | Evidence | Text, structure, tables, transcripts, OCR, visual evidence, passage-level Citations | None required | Mutable or silently refreshed evidence |
 | Collaboration | Email invites, Viewer/Editor/Owner, shared Sources, private Chats | None required | Public links, shared Chats, organizations |
 | Durable content | Private Chats | Reports, guides, maps, quizzes, slides, audio Outputs | Notes and shared drafts |
@@ -25,6 +25,12 @@ The initial product is not a general-purpose assistant, a team knowledge base, o
 | Commercial surface | None | None required | Billing, plans, enterprise administration |
 
 Anything absent from the initial-release column is outside initial acceptance unless this document is explicitly revised.
+
+### Foundation Delivery Sequence
+
+The model-knowledge Chat mode is a formal but deliberately narrow product capability introduced in Sprint 2A. It answers directly from the configured model without claiming to have read Sources, searched the web, or produced a Grounded Answer. The UI labels these Assistant Messages as based on model knowledge and may suggest useful Sources when they would materially improve accuracy, recency, depth, verification, or citation quality.
+
+This mode proves private Chat, durable Message/Run/Job admission, real model execution, publication, refresh, and failure behavior before RAG exists. It does not weaken the later grounded contract: once a Run is explicitly source-grounded, model knowledge must not silently fill evidence gaps and only Citation-backed output may be presented as a Grounded Answer.
 
 ## Initial Release
 
@@ -125,7 +131,7 @@ Documents include extracted text, document structure, readable tables, and usabl
 - A Member can include or exclude Sources before submitting the next question.
 - Selection changes affect subsequent answers only.
 - Sources added later do not silently enter existing Chats.
-- When no Source is selected, the Research Agent does not run and the interface explains that at least one Source is required.
+- When no Source is selected or Source support is not yet delivered, a question may run in disclosed model-knowledge mode. It cannot carry Citations or be presented as a Grounded Answer.
 
 ### Research Agent
 
@@ -138,9 +144,9 @@ The initial Research Agent cannot:
 - Execute arbitrary code
 - Call external services
 - Create durable Outputs
-- Answer from unselected Sources, model knowledge, or hidden internet context
+- Silently mix unselected Sources, model knowledge, or hidden internet context into a source-grounded answer
 
-If selected Sources do not support an answer, the Agent states that the evidence is insufficient instead of filling the gap with general knowledge.
+If selected Sources do not support a source-grounded answer, the Agent states that the evidence is insufficient instead of filling the gap with general knowledge. A separate model-knowledge answer is allowed only when its answer mode is explicit to the user.
 
 ### Agent Run Experience
 
@@ -232,7 +238,7 @@ These may be reconsidered but are not promised:
 ## Explicit Non-Goals For Initial Release
 
 - General web search or Deep Research
-- General model-knowledge answers
+- An unlabeled general-purpose assistant or undisclosed model-knowledge claims inside grounded answers
 - A global knowledge base spanning Notebooks
 - External tools, code execution, or automation
 - Durable generated Outputs

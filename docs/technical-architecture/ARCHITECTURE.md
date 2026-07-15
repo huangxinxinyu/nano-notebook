@@ -142,7 +142,11 @@ Gemini converts visual and structured inputs into region-linked normalized textu
 
 The bounded PostgreSQL Durable Runtime supports fixed product Job types, not arbitrary workflows. The Agent Controller advances a Run through fixed outer stages such as planning, research, retrieval, inspection, comparison, refinement, verification, composition, and terminal states. The model may propose only typed, read-only research actions; Go validates scope, budgets, stage preconditions, and permissions.
 
-Jobs use at-least-once leases, attempts, heartbeats, and idempotent effect boundaries. Fixed interactive Agent, Source Processing, and offline Eval/Reindex Workload Classes reserve capacity so background work cannot starve user-facing Runs. PostgreSQL `LISTEN/NOTIFY` may reduce wake-up latency but is never queue truth.
+Sprint 2A establishes the first production-shaped slice with one fixed pass: `LoadRun -> BuildContext -> InvokeModel -> PublishAnswer`. A request transaction commits the User Message, product-facing Agent Run, and internal Agent Job atomically. The independent Worker claims the Job from PostgreSQL, builds one in-memory request from the system prompt and latest 20 durable Messages, calls Bifrost without provider token streaming, and publishes the complete Assistant Message through one transaction. This is intentionally a fixed Agent Loop with no tool-call iteration, Retrieval, MCP, checkpoint, or generic workflow abstraction.
+
+Sprint 2A Jobs have only `queued`, `running`, and terminal delivery state. PostgreSQL `LISTEN/NOTIFY` reduces wake-up latency and a five-second indexed scan recovers lost notifications; the Job row is always queue truth. Attempts, leases, heartbeats, fencing, process-loss recovery, and safe re-execution are Sprint 2C work and must be added before claiming at-least-once recovery semantics.
+
+The completed durable runtime will use at-least-once leases, attempts, heartbeats, and idempotent effect boundaries. Fixed interactive Agent, Source Processing, and offline Eval/Reindex Workload Classes reserve capacity so background work cannot starve user-facing Runs.
 
 Checkpoint representation, Run Working State schema, exact recovery algorithm, lease values, retry values, and context-manifest format are deferred to the Runtime detailed-design grill. Overall architecture requires only that a Run survive process loss and that the Context Builder can construct the next bounded model input from persistent Chat, accepted actions, Evidence, and versioned configuration.
 
@@ -160,15 +164,19 @@ Streaming text is provisional. A draft becomes a durable Assistant Message and C
 - Citation resolution and grounded-answer validation;
 - absence of cancellation or invalidation.
 
+The Sprint 2A model-knowledge path has no Citations or Run Evidence Set. Its publication transaction still revalidates private Chat creator ownership and current Notebook membership, then inserts exactly one Assistant Message marked `model_knowledge` while completing the Run and Job. Failed Runs publish no Assistant Message. Source availability and Citation validation join the same barrier when grounded answering is implemented.
+
 Stopped, failed, or invalidated work retains the User Message and Run status but never presents an incomplete response as a completed Grounded Answer.
 
 ## 10. Chat And Browser Interfaces
 
-The Web Client is a React and TypeScript SPA built with Vite. It consumes JSON REST commands and queries from the Go Control Plane and uses resumable SSE for Source, Job, Agent-stage, and answer projections. SSE event identifiers support reconnection, but the client first reads the latest durable snapshot; SSE is not authoritative state.
+The Web Client is a React and TypeScript SPA built with Vite. It consumes JSON REST commands and queries from the Go Control Plane and uses SSE for asynchronous projections. The client first reads the latest durable snapshot; SSE is never authoritative state.
 
-The selected browser UI baseline is React 19, TypeScript, Vite, Tailwind CSS 4, shadcn/ui New York-style primitives on Radix UI, TanStack Query, TanStack Table, React Hook Form, Zod, Sonner, and locally hosted Material Symbols. `@assistant-ui/react` is the selected future Chat presentation framework. It is deliberately dependency-only in the current shell: no Assistant UI runtime, message transport, streaming adapter, or synthetic reply behavior is mounted until the Chat and Agent contracts exist. A later Chat implementation may connect Assistant UI's local runtime boundary to the Control Plane, but durable messages, Runs, authorization, and publication remain server-owned.
+The selected browser UI baseline is React 19, TypeScript, Vite, Tailwind CSS 4, shadcn/ui New York-style primitives on Radix UI, TanStack Query, TanStack Table, React Hook Form, Zod, Sonner, and locally hosted Material Symbols. Sprint 2A mounts `@assistant-ui/react` through its external-store boundary: PostgreSQL-backed Messages and Run state remain server-owned, while Assistant UI supplies accessible thread and composer interaction. The browser assigns the User Message UUID, submits one command, and projects queued/running/terminal state from a per-Run EventSource.
 
-Each Chat belongs to one creator and remains private even from the Notebook Owner. Source-selection changes apply only to later Runs. A submitted User Message creates a Run with a fixed Run Evidence Set. Only the Publication Barrier can add the corresponding Assistant Message. Failed or stopped Runs can be retried as new Runs without editing history.
+Sprint 2A SSE sends complete current Run snapshots rather than provider token deltas. The Control Plane owns one shared PostgreSQL Run listener and fans wake-ups to in-process per-Run subscribers; each subscriber reloads authorized PostgreSQL state. Reconnect reads the latest snapshot, so this slice needs no durable event log, cursor, or `Last-Event-ID`. Those stronger replay contracts are added only when a later feature actually requires them.
+
+Each Chat belongs to one creator and remains private even from the Notebook Owner. In Sprint 2A, a submitted User Message creates a source-less model-knowledge Run. Later grounded Runs additionally pin a fixed Run Evidence Set, and Source-selection changes apply only to later Runs. Only the Publication Barrier can add the corresponding Assistant Message. Failed or stopped Runs can be retried as new Runs without editing history.
 
 ## 11. Model Gateway And Provider Portfolio
 

@@ -28,6 +28,14 @@ _Avoid_: Permission flag, endpoint role check
 A durable unit of asynchronous work whose state survives process failure and can be claimed, retried, cancelled, or completed by a Worker.
 _Avoid_: Goroutine, task when durability matters
 
+**Agent Run**:
+The user-visible durable lifecycle of one requested answer. It owns product status and the input/output Message relationship; it does not double as Worker delivery state.
+_Avoid_: Queue item, model request
+
+**Agent Job**:
+The internal durable delivery record that tells an Agent Worker which Run to execute. The browser never depends on Agent Job state; Sprint 2A keeps it separate even before attempts and leases are added.
+_Avoid_: Agent Run, frontend status
+
 **Job Lease**:
 An expiring claim that permits one Worker attempt to advance a Job while heartbeats continue. Lease expiry enables recovery and does not imply that the prior attempt produced no side effects.
 _Avoid_: Lock, exactly-once execution
@@ -71,6 +79,10 @@ _Avoid_: Current Sources, live Notebook contents
 **Agent Controller**:
 The Go component that advances an Agent Run through its fixed outer stages while validating and bounding model-selected, read-only research actions.
 _Avoid_: Workflow engine, autonomous agent loop
+
+**Fixed Agent Loop**:
+The Sprint 2A orchestration seam that executes exactly one `LoadRun -> BuildContext -> InvokeModel -> PublishAnswer` pass. It is named a loop for compatibility with later typed action iteration, but it contains no speculative loop or tool execution today.
+_Avoid_: Autonomous loop, generic workflow engine
 
 **Context Builder**:
 The component that constructs the bounded input for the next model call from authorized Chat content, the current Run checkpoint, accepted action results, selected Evidence Units, and versioned Agent configuration. Its output is a model-facing projection, not durable authority or a claim to capture model-internal memory.
