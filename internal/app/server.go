@@ -552,6 +552,10 @@ func (s *Server) retryRun(w http.ResponseWriter, r *http.Request, userID, source
 		writeError(w, r, http.StatusConflict, "run_not_retryable", "error.run_not_retryable")
 		return
 	}
+	if errors.Is(err, agent.ErrRetryNotLatest) {
+		writeError(w, r, http.StatusConflict, "retry_not_latest", "error.retry_not_latest")
+		return
+	}
 	if errors.Is(err, agent.ErrActiveRun) || isUniqueViolation(err, "agent_runs_one_active_per_user_idx") || isUniqueViolation(err, "agent_runs_one_active_per_input_idx") {
 		writeError(w, r, http.StatusConflict, "active_run_conflict", "error.active_run_conflict")
 		return

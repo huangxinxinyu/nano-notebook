@@ -16,6 +16,7 @@ var (
 	ErrRunNotFound         = errors.New("agent run not found")
 	ErrRunNotCancellable   = errors.New("agent run not cancellable")
 	ErrRunNotRetryable     = errors.New("agent run not retryable")
+	ErrRetryNotLatest      = errors.New("agent run input is not latest")
 	ErrIdempotencyMismatch = errors.New("idempotency mismatch")
 )
 
@@ -233,17 +234,21 @@ func (s *Store) RetryQueued(ctx context.Context, userID, sourceRunID, key, reque
 	if status != "failed" && status != "cancelled" {
 		return RunSnapshot{}, false, ErrRunNotRetryable
 	}
-	var retryable bool
+	var latestRunID, latestMessageID string
+	var completed bool
 	err = s.db.QueryRow(ctx, `
 		select
-			$1 = (select id from agent_runs where input_message_id = $2 order by created_at desc, id desc limit 1)
-			and not exists(select 1 from agent_runs where input_message_id = $2 and status = 'completed')
-			and $2 = (select id from chat_messages where chat_id = $3 order by created_at desc, id desc limit 1)`,
-		sourceRunID, inputMessageID, chatID).Scan(&retryable)
+			(select id from agent_runs where input_message_id = $1 order by created_at desc, id desc limit 1),
+			(select id from chat_messages where chat_id = $2 order by created_at desc, id desc limit 1),
+			exists(select 1 from agent_runs where input_message_id = $1 and status = 'completed')`,
+		inputMessageID, chatID).Scan(&latestRunID, &latestMessageID, &completed)
 	if err != nil {
 		return RunSnapshot{}, false, err
 	}
-	if !retryable {
+	if latestRunID != sourceRunID || latestMessageID != inputMessageID {
+		return RunSnapshot{}, false, ErrRetryNotLatest
+	}
+	if completed {
 		return RunSnapshot{}, false, ErrRunNotRetryable
 	}
 	if _, active, err := s.ActiveByUser(ctx, userID); err != nil {

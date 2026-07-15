@@ -88,6 +88,10 @@ func TestCompletedRunCannotBeCancelled(t *testing.T) {
 	if response.Code != http.StatusConflict || decodeError(t, response).Code != "run_not_cancellable" {
 		t.Fatalf("cancel completed status=%d body=%s", response.Code, response.Body.String())
 	}
+	retry := api.postJSONWithCookieAndCSRF(t, "/api/v1/agent-runs/"+runID+"/retry", map[string]any{}, sessionCookie, csrfCookie, csrfCookie.Value, "retry-completed")
+	if retry.Code != http.StatusConflict || decodeError(t, retry).Code != "run_not_retryable" {
+		t.Fatalf("retry completed status=%d body=%s", retry.Code, retry.Body.String())
+	}
 }
 
 func TestRetryCreatesANewRunForTheSameMessageAndReplaysByIdempotencyKey(t *testing.T) {
@@ -167,7 +171,7 @@ func TestCancelledRunSSEIsTerminalAndRetryRejectsHistoricalInput(t *testing.T) {
 		t.Fatalf("next admission=%d body=%s", next.Code, next.Body.String())
 	}
 	retry := api.postJSONWithCookieAndCSRF(t, "/api/v1/agent-runs/"+oldRunID+"/retry", map[string]any{}, sessionCookie, csrfCookie, csrfCookie.Value, "historical-retry")
-	if retry.Code != http.StatusConflict || decodeError(t, retry).Code != "run_not_retryable" {
+	if retry.Code != http.StatusConflict || decodeError(t, retry).Code != "retry_not_latest" {
 		t.Fatalf("historical retry status=%d body=%s", retry.Code, retry.Body.String())
 	}
 }
