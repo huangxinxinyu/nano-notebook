@@ -16,6 +16,10 @@ type currentTimeAction struct {
 	now func() time.Time
 }
 
+type currentTimeInput struct {
+	TimeZone *string `json:"time_zone"`
+}
+
 func NewCurrentTimeAction(now func() time.Time) Action {
 	if now == nil {
 		now = time.Now
@@ -31,20 +35,18 @@ func (currentTimeAction) Definition() models.ActionDefinition {
 	}
 }
 
+func (currentTimeAction) ValidateInput(raw json.RawMessage) error {
+	_, err := decodeCurrentTimeInput(raw)
+	return err
+}
+
 func (a currentTimeAction) Execute(ctx context.Context, request ActionRequest) (ActionResult, error) {
 	if err := ctx.Err(); err != nil {
 		return ActionResult{}, err
 	}
-	var input struct {
-		TimeZone *string `json:"time_zone"`
-	}
-	decoder := json.NewDecoder(bytes.NewReader(request.Input))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil {
-		return ActionResult{}, errors.New("invalid current_time input")
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return ActionResult{}, errors.New("invalid current_time input")
+	input, err := decodeCurrentTimeInput(request.Input)
+	if err != nil {
+		return ActionResult{}, err
 	}
 	timeZone := request.DefaultTimeZone
 	explicit := input.TimeZone != nil
@@ -80,4 +82,20 @@ func (a currentTimeAction) Execute(ctx context.Context, request ActionRequest) (
 		return ActionResult{}, err
 	}
 	return ActionResult{Status: ActionSucceeded, Output: output}, nil
+}
+
+func decodeCurrentTimeInput(raw json.RawMessage) (currentTimeInput, error) {
+	if len(raw) == 0 || len(raw) > 4*1024 {
+		return currentTimeInput{}, errors.New("invalid current_time input")
+	}
+	var input currentTimeInput
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		return currentTimeInput{}, errors.New("invalid current_time input")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return currentTimeInput{}, errors.New("invalid current_time input")
+	}
+	return input, nil
 }

@@ -48,6 +48,7 @@ func (r ActionResult) Validate() error {
 
 type Action interface {
 	Definition() models.ActionDefinition
+	ValidateInput(json.RawMessage) error
 	Execute(context.Context, ActionRequest) (ActionResult, error)
 }
 
@@ -118,4 +119,20 @@ func (r *ActionRegistry) Definitions(policy ActionPolicy) []models.ActionDefinit
 func (r *ActionRegistry) Resolve(name string) (Action, bool) {
 	action, ok := r.byName[name]
 	return action, ok
+}
+
+func (r *ActionRegistry) ValidateProposal(actions []models.ActionProposal) error {
+	if len(actions) == 0 {
+		return fmt.Errorf("Action proposal batch is empty")
+	}
+	for index, proposal := range actions {
+		action, ok := r.Resolve(proposal.Name)
+		if !ok {
+			return fmt.Errorf("Action proposal %d names unknown Action %q", index, proposal.Name)
+		}
+		if err := action.ValidateInput(proposal.Input); err != nil {
+			return fmt.Errorf("Action proposal %d input is invalid: %w", index, err)
+		}
+	}
+	return nil
 }

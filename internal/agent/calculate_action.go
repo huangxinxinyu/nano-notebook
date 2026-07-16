@@ -15,6 +15,11 @@ import (
 
 type calculateAction struct{}
 
+type calculateInput struct {
+	Operation string   `json:"operation"`
+	Operands  []string `json:"operands"`
+}
+
 var canonicalDecimalPattern = regexp.MustCompile(`^-?(0|[1-9][0-9]*)(\.[0-9]+)?$`)
 
 func NewCalculateAction() Action {
@@ -29,21 +34,18 @@ func (calculateAction) Definition() models.ActionDefinition {
 	}
 }
 
+func (calculateAction) ValidateInput(raw json.RawMessage) error {
+	_, err := decodeCalculateInput(raw)
+	return err
+}
+
 func (calculateAction) Execute(ctx context.Context, request ActionRequest) (ActionResult, error) {
 	if err := ctx.Err(); err != nil {
 		return ActionResult{}, err
 	}
-	var input struct {
-		Operation string   `json:"operation"`
-		Operands  []string `json:"operands"`
-	}
-	decoder := json.NewDecoder(bytes.NewReader(request.Input))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil {
-		return ActionResult{}, errors.New("invalid calculate input")
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return ActionResult{}, errors.New("invalid calculate input")
+	input, err := decodeCalculateInput(request.Input)
+	if err != nil {
+		return ActionResult{}, err
 	}
 	if len(input.Operands) != 2 {
 		return calculateDomainError("invalid_operand_count"), nil
@@ -86,6 +88,22 @@ func (calculateAction) Execute(ctx context.Context, request ActionRequest) (Acti
 		return ActionResult{}, err
 	}
 	return ActionResult{Status: ActionSucceeded, Output: output}, nil
+}
+
+func decodeCalculateInput(raw json.RawMessage) (calculateInput, error) {
+	if len(raw) == 0 || len(raw) > 4*1024 {
+		return calculateInput{}, errors.New("invalid calculate input")
+	}
+	var input calculateInput
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		return calculateInput{}, errors.New("invalid calculate input")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return calculateInput{}, errors.New("invalid calculate input")
+	}
+	return input, nil
 }
 
 func calculateDomainError(code string) ActionResult {
