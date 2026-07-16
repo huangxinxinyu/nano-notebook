@@ -594,8 +594,19 @@ func TestMigrationsInstallSprint3RunConfiguration(t *testing.T) {
 
 func TestMigrationsUpgradePopulatedSprint2BRunConfiguration(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "migration-sprint2b@example.com")
-	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c046")
 	ctx := context.Background()
+	terminalRunID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c046")
+	if _, err := api.db.Pool().Exec(ctx, `
+		update agent_runs set status = 'failed', error_code = 'model_unavailable', finished_at = now(), updated_at = now()
+		where id = $1`, terminalRunID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `
+		update agent_jobs set status = 'failed', finished_at = now(), updated_at = now()
+		where run_id = $1`, terminalRunID); err != nil {
+		t.Fatal(err)
+	}
+	activeRunID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c047")
 	if _, err := api.db.Pool().Exec(ctx, `
 		alter table agent_runs drop column time_zone;
 		alter table agent_runs drop column deadline_at;
@@ -621,7 +632,7 @@ func TestMigrationsUpgradePopulatedSprint2BRunConfiguration(t *testing.T) {
 			r.action_decision_limit, r.final_decision_limit, r.action_limit,
 			r.action_batch_limit, r.action_result_byte_limit, r.action_results_byte_limit
 		from agent_runs r join agent_jobs j on j.run_id = r.id
-		where r.id = $1`, runID).Scan(
+		where r.id = $1`, activeRunID).Scan(
 		&runStatus, &jobStatus, &timeZone, &deadlineAt,
 		&actionDecisionLimit, &finalDecisionLimit, &actionLimit,
 		&actionBatchLimit, &actionResultByteLimit, &actionResultsByteLimit,
@@ -637,12 +648,36 @@ func TestMigrationsUpgradePopulatedSprint2BRunConfiguration(t *testing.T) {
 	if deadlineAt.Before(migrationStarted.Add(9*time.Minute+50*time.Second)) || deadlineAt.After(migrationStarted.Add(10*time.Minute+10*time.Second)) {
 		t.Fatalf("upgraded deadline_at = %s, want approximately ten minutes after migration", deadlineAt)
 	}
+	var terminalRunStatus, terminalJobStatus, terminalTimeZone string
+	var terminalDeadline time.Time
+	var terminalActionDecisionLimit, terminalFinalDecisionLimit, terminalActionLimit, terminalActionBatchLimit int
+	var terminalResultByteLimit, terminalResultsByteLimit int
+	if err := api.db.Pool().QueryRow(ctx, `
+		select r.status, j.status, r.time_zone, r.deadline_at,
+			r.action_decision_limit, r.final_decision_limit, r.action_limit,
+			r.action_batch_limit, r.action_result_byte_limit, r.action_results_byte_limit
+		from agent_runs r join agent_jobs j on j.run_id = r.id
+		where r.id = $1`, terminalRunID).Scan(
+		&terminalRunStatus, &terminalJobStatus, &terminalTimeZone, &terminalDeadline,
+		&terminalActionDecisionLimit, &terminalFinalDecisionLimit, &terminalActionLimit,
+		&terminalActionBatchLimit, &terminalResultByteLimit, &terminalResultsByteLimit,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if terminalRunStatus != "failed" || terminalJobStatus != "failed" || terminalTimeZone != "UTC" ||
+		terminalActionDecisionLimit != 4 || terminalFinalDecisionLimit != 1 || terminalActionLimit != 8 || terminalActionBatchLimit != 4 ||
+		terminalResultByteLimit != 16*1024 || terminalResultsByteLimit != 64*1024 || terminalDeadline.IsZero() {
+		t.Fatalf("upgraded terminal state=%s/%s zone=%q deadline=%s budgets=%d+%d/%d/%d/%d/%d",
+			terminalRunStatus, terminalJobStatus, terminalTimeZone, terminalDeadline,
+			terminalActionDecisionLimit, terminalFinalDecisionLimit, terminalActionLimit, terminalActionBatchLimit,
+			terminalResultByteLimit, terminalResultsByteLimit)
+	}
 	var messages int
 	if err := api.db.Pool().QueryRow(ctx, `select count(*) from chat_messages where chat_id = $1`, chatID).Scan(&messages); err != nil {
 		t.Fatal(err)
 	}
-	if messages != 1 {
-		t.Fatalf("preserved chat message count = %d, want 1", messages)
+	if messages != 2 {
+		t.Fatalf("preserved chat message count = %d, want 2", messages)
 	}
 }
 
