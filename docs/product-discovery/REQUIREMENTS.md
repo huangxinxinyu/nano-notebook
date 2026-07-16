@@ -28,7 +28,7 @@ Anything absent from the initial-release column is outside initial acceptance un
 
 ### Foundation Delivery Sequence
 
-The model-knowledge Chat mode is a formal but deliberately narrow product capability introduced in Sprint 2A. It answers directly from the configured model without claiming to have read Sources, searched the web, or produced a Grounded Answer. The UI labels these Assistant Messages as based on model knowledge and may suggest useful Sources when they would materially improve accuracy, recency, depth, verification, or citation quality.
+The model-knowledge Chat capability is a formal but deliberately narrow product capability introduced in Sprint 2A. It answers directly from the configured model without claiming to have read Sources, searched the web, or produced a Grounded Answer. While no source-grounded path exists, the workspace discloses that answers are not based on Notebook Sources rather than persisting a mode on each Message; the Agent may suggest useful Sources when they would materially improve accuracy, recency, depth, verification, or citation quality.
 
 This mode proves private Chat, durable Message/Run/Job admission, real model execution, publication, refresh, and failure behavior before RAG exists. It does not weaken the later grounded contract: once a Run is explicitly source-grounded, model knowledge must not silently fill evidence gaps and only Citation-backed output may be presented as a Grounded Answer.
 
@@ -146,7 +146,7 @@ The initial Research Agent cannot:
 - Create durable Outputs
 - Silently mix unselected Sources, model knowledge, or hidden internet context into a source-grounded answer
 
-If selected Sources do not support a source-grounded answer, the Agent states that the evidence is insufficient instead of filling the gap with general knowledge. A separate model-knowledge answer is allowed only when its answer mode is explicit to the user.
+If selected Sources do not support a source-grounded answer, the Agent states that the evidence is insufficient instead of filling the gap with general knowledge. A separate model-knowledge answer is allowed only when the current Run or product capability is explicitly disclosed as not source-grounded; Message rows do not carry a duplicate answer mode.
 
 ### Agent Run Experience
 

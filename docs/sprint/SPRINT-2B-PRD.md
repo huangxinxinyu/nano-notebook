@@ -275,7 +275,7 @@ Sprint 2B stores no `retry_of_run_id`; Runs for one input are ordered by creatio
 - Redis, an external MQ, or a general Workflow SDK
 - Agent-runtime retry after an explicit terminal Bifrost failure
 
-Run Checkpoints are mandatory before a later multi-step model/tool loop. That future runtime will persist accepted model and tool results at explicit boundaries and continue from the first incomplete step; it remains distinct from Sprint 3 trace storage.
+Run Checkpoints are mandatory in Sprint 3 before multi-step model/Action iteration. That runtime will persist accepted model decisions and Action results at explicit boundaries and continue from the first incomplete step; it remains distinct from Sprint 4 trace storage.
 
 ## 11. Verification
 

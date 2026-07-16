@@ -6,7 +6,7 @@
 - **Status:** Complete
 - **Date:** 2026-07-14
 - **Theme:** Durable bare AgentLoop and private model-knowledge chat
-- **Delivery boundary:** Sprint 2A implements the smallest production-shaped Agent execution path. Sprint 2B adds interruption and crash recovery, and Sprint 3 adds the reusable Observability/Audit SDK.
+- **Delivery boundary:** Sprint 2A implements the smallest production-shaped Agent execution path. Sprint 2B adds interruption and whole-pass crash recovery, Sprint 3 adds checkpointed multi-step Agent Action execution, and Sprint 4 adds the reusable Observability/Audit SDK.
 
 ## 1. Decision And Product Change
 
@@ -139,11 +139,12 @@ If the model call fails after Bifrost exhausts its configured retries, the Run a
 
 - Source upload, parsing, chunking, embedding, retrieval, RAG, reranking, or Citations
 - Web search, quick research, or automatic Source collection
-- MCP, executable tools, tool-call iteration, planners, critics, reflection, or subagents
+- Provider tool-call iteration and bounded Agent Actions; these belong to Sprint 3
+- MCP, executable or external tools, planners, critics, reflection, or subagents
 - Token streaming, fake typewriter playback, partial-output storage, backpressure, or delta replay
 - Interrupt or stop controls; these belong to Sprint 2B
 - Leases, heartbeats, attempts, fencing, stale-Job recovery, or process-loss recovery; these belong to Sprint 2B
-- Run Events, Model Call payload retention, Durable Agent Trace, Trace UI, new OpenTelemetry abstractions, or a reusable observability/audit layer; these belong to Sprint 3
+- Run Events, Model Call payload retention, Durable Agent Trace, Trace UI, new OpenTelemetry abstractions, or a reusable observability/audit layer; these belong to Sprint 4
 - Redis, an external MQ, an outbox, or a separate persisted Context/Session blob
 - Token-aware trimming, summarization, compaction, or long-term memory
 - Multi-Chat switching UI, Chat rename, Chat delete, branching, editing, regeneration, or queued conversational turns
@@ -621,7 +622,38 @@ Sprint 2A is complete only when all of the following are demonstrated:
 - safe whole-pass re-execution without duplicate Assistant Messages; no Run Checkpoint or partial model-generation resume
 - restart and fault-injection verification
 
-### Sprint 3 — Reusable Observability And Audit SDK
+### Sprint 3 — Checkpointed Multi-Step Agent Loop
+
+- removal of the Sprint 2A Message `answer_mode`, API projection, and per-Message label; source-grounded truth will derive from Run evidence and Citations
+- removal of single-call Run `iteration_count`, `finish_reason`, and token-usage columns; Model Call accounting moves to Sprint 4 Trace
+- Provider tool-call support normalized into bounded, application-defined Agent Actions
+- an internal startup Action Registry so later built-in Actions can register definitions and executors without changing Agent Controller orchestration
+- a unified Provider-neutral Model Decision result containing either a Final Draft or ordered Action Proposal batch
+- one real `aliyun/qwen-flash` through-Bifrost acceptance path, with automated adapter contracts for final, single-Action, ordered multi-Action, and invalid responses
+- built-in typed `calculate` and `current_time` Actions: structured decimal arithmetic for calculation, and a fixed observed instant, IANA zone, and UTC offset for time; each Run pins the user's IANA time zone for `current_time` defaults
+- Agent Controller iteration across model decisions, Action execution, and final answer publication
+- durable Run Checkpoints for accepted model decisions and completed Action results
+- an append-only, idempotently keyed Checkpoint sequence with no persisted step-running state
+- stable Checkpoint identities and canonical payload hashes for uncertain-commit reconciliation
+- explicit at-least-once model invocation when a response is lost before Checkpoint acceptance
+- Provider-neutral Checkpoint payloads limited to recovery, excluding raw model and diagnostic data
+- terminal Checkpoints retained internally with their Run and removed through the same parent lifecycle, without a separate Sprint 3 TTL
+- ordered Action batches with sequential execution and per-Action-result recovery
+- checkpointed typed Action domain errors that the next model decision may repair
+- Run-pinned model, Action, elapsed-time, and result-size budgets with one Action-disabled final response
+- configurable Sprint 3 defaults of four Action-capable decisions, one reserved final decision, eight Actions per Run, and four Actions per batch
+- an admission-pinned ten-minute default Run deadline that survives queue delay and recovery
+- idempotent on-demand Run expiry from queue scan, admission/Retry, and SSE paths without a dedicated sweeper
+- recovery from the first incomplete step after lease loss or Worker process loss
+- one Agent Job per Run across the full multi-step loop, without per-step child Jobs
+- no Checkpoint resume after user Stop and no Checkpoint inheritance by a Retry Run
+- heartbeat-based Stop propagation plus authority checks at every model, Action, Checkpoint, and publication boundary
+- no new Action, Checkpoint, budget, or recovery projection in SSE or the browser; Trace UI remains Sprint 4
+- cancellation, fencing, budgets, and terminal failure semantics at model and Action boundaries
+- no reusable Action SDK, runtime plugins, MCP runtime, arbitrary external tools, or generic Workflow engine
+- no Action catalog versioning or multi-version executor registry; Sprint 3 built-in Action contracts remain stable
+
+### Sprint 4 — Reusable Observability And Audit SDK
 
 - Run Events and Model Call records
 - governed request/response payload capture
@@ -631,7 +663,7 @@ Sprint 2A is complete only when all of the following are demonstrated:
 
 These later Sprints must extend the Run, Job, ModelClient, and Publisher seams established here instead of replacing the Sprint 2A information flow.
 
-Run Checkpoints are required before a later Sprint introduces multi-step model/tool iteration. They will persist accepted step results and resume from the first incomplete step; they are intentionally unnecessary for Sprint 2B's single-call Fixed Agent Loop and are distinct from Sprint 3 trace or audit storage.
+Run Checkpoints are required in Sprint 3 before multi-step model/Action iteration. They persist accepted step results and resume from the first incomplete step; they are intentionally unnecessary for Sprint 2B's single-call Fixed Agent Loop and are distinct from Sprint 4 trace or audit storage.
 
 Sprint 2B also evolves the Sprint 2A one-Run-per-input-Message constraint. Transport replay still returns the originally admitted Run, and infrastructure recovery still creates only a new attempt within that Run. An explicit user retry after a cancelled or failed Run creates a new Run and Job for the same immutable User Message; the input may have multiple failed or cancelled Runs but at most one active and one completed Run. Completed-answer regeneration remains outside scope.
 

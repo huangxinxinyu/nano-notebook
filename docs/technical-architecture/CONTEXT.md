@@ -37,11 +37,11 @@ An explicit user request to answer the latest unanswered input Message again aft
 _Avoid_: Job retry, Attempt, reopening a terminal Run
 
 **Run Cancellation**:
-The durable product decision that an active Agent Run will publish no answer. It may become final before an in-flight Provider request actually stops.
-_Avoid_: Process kill, guaranteed Provider cancellation
+The durable product decision that an active Agent Run will publish no answer. It may become final before in-flight work actually stops, is never resumed from Checkpoints, and a later Retry creates a new Run.
+_Avoid_: Pause, process kill, guaranteed Provider cancellation
 
 **Agent Job**:
-The internal durable delivery record that tells an Agent Worker which Run to execute. The browser never depends on Agent Job state; Sprint 2A keeps it separate even before attempts and leases are added.
+The single internal durable delivery record that tells an Agent Worker which Run to advance across its model and Action steps. It remains one Job across Checkpoints and infrastructure Attempts, and the browser never depends on its state.
 _Avoid_: Agent Run, frontend status
 
 **Job Lease**:
@@ -53,8 +53,8 @@ The identity of the current leased execution of a Job. Reclaiming the Job replac
 _Avoid_: Session token, Worker identity, permanent ownership
 
 **Run Checkpoint**:
-A durable boundary after a completed Agent step from which later execution can reuse accepted results and continue with the first incomplete step. It is not a snapshot of a Worker process or an in-flight model generation.
-_Avoid_: Process snapshot, partial-token continuation, Durable Agent Trace
+An immutable, Provider-neutral durable boundary after an Agent outcome is accepted, from which later execution can reuse accepted results and continue with the first incomplete step. It contains no transient running state, raw Provider payload, or diagnostic history and is not a snapshot of a Worker process or an in-flight model generation.
+_Avoid_: Mutable step status, process snapshot, partial-token continuation, Durable Agent Trace
 
 **Workload Class**:
 A fixed product category such as interactive Agent, Source Processing, or offline Eval/Reindex, used to reserve concurrency and prevent background work from starving user-facing Jobs.
@@ -95,6 +95,34 @@ _Avoid_: Current Sources, live Notebook contents
 **Agent Controller**:
 The Go component that advances an Agent Run through its fixed outer stages while validating and bounding model-selected, read-only research actions.
 _Avoid_: Workflow engine, autonomous agent loop
+
+**Agent Action**:
+A model-proposed, Agent Controller-authorized operation from a finite application-defined set. Each Action has a canonical typed input and result, is read-only or pure computation, and remains distinct from Provider tool-call formats and general external tools.
+_Avoid_: General Tool, Provider Tool Call, MCP Tool, command
+
+**Action Registry**:
+The application-owned catalog through which the Agent Controller discovers registered Agent Action definitions and executors. It is extensible by code registration while remaining closed to runtime plugins, external discovery, and model-defined Actions.
+_Avoid_: Plugin manager, MCP registry, dynamic Tool marketplace
+
+**Action Proposal**:
+A Provider-independent, ordered model request to invoke one or more registered Agent Actions. It is input to Agent Controller validation, not execution authority.
+_Avoid_: Tool Call, command, approved Action
+
+**Model Decision**:
+The Provider-neutral result presented to the Agent Controller by one completed model invocation. It contains exactly one Final Draft or one ordered Action Proposal batch.
+_Avoid_: Raw Provider response, Chat completion, chain of thought
+
+**Action Result**:
+The accepted typed outcome of one Agent Action, containing either success data or an expected domain error. It is durable Run working state consumed by later model decisions and reused after recovery.
+_Avoid_: Tool response, log entry, Trace Event
+
+**Final Draft**:
+An accepted model-produced candidate answer that may become an Assistant Message only through the Publication Barrier.
+_Avoid_: Assistant Message, published answer, raw model response
+
+**Run Budget**:
+The limits pinned to one Agent Run for model decisions, accepted logical Agent Actions, elapsed time, and retained Action Result size. Success and expected domain error consume one Action each, recovery re-execution does not consume another, and one final model decision without Actions is reserved for graceful exhaustion.
+_Avoid_: Provider quota, Job retry policy, context window
 
 **Fixed Agent Loop**:
 The Sprint 2A orchestration seam that executes exactly one `LoadRun -> BuildContext -> InvokeModel -> PublishAnswer` pass. It is named a loop for compatibility with later typed action iteration, but it contains no speculative loop or tool execution today.

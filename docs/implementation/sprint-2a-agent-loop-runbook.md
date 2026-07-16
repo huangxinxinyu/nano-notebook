@@ -113,4 +113,5 @@ Successful execution leaves one User Message, one completed Run, one succeeded J
 
 - Sprint 2A: no RAG, Source ingestion, retrieval, MCP, tool calls, token deltas, interruption, process-loss recovery, or durable Trace.
 - Sprint 2B: cooperative interruption, late-publication prevention, leases, heartbeats, fencing, and safe recovery after process loss.
-- Sprint 3: reusable observability/audit SDK, Run Events, Model Call payload governance, Durable Agent Trace, and Trace UI.
+- Sprint 3: bounded multi-step Agent Action execution, Run Checkpoints, and recovery from the first incomplete step.
+- Sprint 4: reusable observability/audit SDK, Run Events, Model Call payload governance, Durable Agent Trace, and Trace UI.
