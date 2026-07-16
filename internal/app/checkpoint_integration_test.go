@@ -461,6 +461,52 @@ func TestCheckpointConcurrentReplayCommitsOneRow(t *testing.T) {
 	assertCheckpointCount(t, api, runID, 1)
 }
 
+func TestPublicationRequiresMatchingAcceptedFinalCheckpoint(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "checkpoint-publication-barrier@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c071")
+	ctx := context.Background()
+	claimed, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(ctx)
+	if err != nil || !ok {
+		t.Fatalf("claim = %+v ok=%t err=%v", claimed, ok, err)
+	}
+	attempt := attemptFromClaim(claimed)
+	runtime := agent.NewPostgresRuntime(api.db.Pool(), "", func() string { return "msg_checkpoint_final" })
+	draft := models.FinalDraft{Text: "Accepted before publication."}
+
+	if err := runtime.PublishFinal(ctx, attempt, draft); !errors.Is(err, agent.ErrCheckpointInvalid) {
+		t.Fatalf("publication without Final Checkpoint error = %v, want checkpoint_invalid", err)
+	}
+	var assistants int
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from chat_messages where chat_id = $1 and role = 'assistant'`, chatID).Scan(&assistants); err != nil {
+		t.Fatal(err)
+	}
+	if assistants != 0 {
+		t.Fatalf("Assistant Messages before Final Checkpoint = %d", assistants)
+	}
+	final, err := agent.NewFinalDraftCheckpoint(1, draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.AppendCheckpoint(ctx, attempt, final); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.PublishFinal(ctx, attempt, draft); err != nil {
+		t.Fatal(err)
+	}
+	var runStatus, jobStatus, outputID, content string
+	if err := api.db.Pool().QueryRow(ctx, `
+		select r.status, j.status, r.output_message_id, m.content
+		from agent_runs r
+		join agent_jobs j on j.run_id = r.id
+		join chat_messages m on m.id = r.output_message_id
+		where r.id = $1`, runID).Scan(&runStatus, &jobStatus, &outputID, &content); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "completed" || jobStatus != "succeeded" || outputID != "msg_checkpoint_final" || content != draft.Text {
+		t.Fatalf("publication state = %s/%s/%s/%q", runStatus, jobStatus, outputID, content)
+	}
+}
+
 func assertCheckpointCount(t *testing.T, api *testAPI, runID string, want int) {
 	t.Helper()
 	var count int

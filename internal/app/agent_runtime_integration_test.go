@@ -93,6 +93,115 @@ func TestWorkerClaimsBuildsContextAndPublishesOneAnswer(t *testing.T) {
 	}
 }
 
+func TestControllerExecutesBifrostActionBatchAndPublishesFinal(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "controller-actions@example.com")
+	const messageID = "0190cdd2-5f2d-7ad8-b3f5-1b588788c072"
+	admitted := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
+		"id": messageID, "content": "Calculate two values, then summarize.", "time_zone": "Asia/Shanghai",
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if admitted.Code != http.StatusAccepted {
+		t.Fatalf("admission status = %d, body = %s", admitted.Code, admitted.Body.String())
+	}
+	var admittedBody struct {
+		RunID string `json:"run_id"`
+	}
+	decodeBody(t, admitted, &admittedBody)
+	ctx := context.Background()
+	claimed, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(ctx)
+	if err != nil || !ok {
+		t.Fatalf("claim = %+v ok=%t err=%v", claimed, ok, err)
+	}
+
+	modelCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		modelCalls++
+		var request struct {
+			Tools []struct {
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tools"`
+			Messages []struct {
+				Role       string `json:"role"`
+				Content    string `json:"content"`
+				ToolCallID string `json:"tool_call_id"`
+				ToolCalls  []struct {
+					ID       string `json:"id"`
+					Function struct {
+						Name string `json:"name"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch modelCalls {
+		case 1:
+			if len(request.Tools) != 2 || request.Tools[0].Function.Name != "calculate" || request.Tools[1].Function.Name != "current_time" || len(request.Messages) != 2 {
+				t.Fatalf("first model request = %+v", request)
+			}
+			_, _ = w.Write([]byte(`{
+				"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[
+					{"id":"provider-a","type":"function","function":{"name":"calculate","arguments":"{\"operation\":\"add\",\"operands\":[\"12.5\",\"3.2\"]}"}},
+					{"id":"provider-b","type":"function","function":{"name":"calculate","arguments":"{\"operation\":\"multiply\",\"operands\":[\"4\",\"5\"]}"}}
+				]},"finish_reason":"tool_calls"}]
+			}`))
+		case 2:
+			if len(request.Messages) != 5 || len(request.Messages[2].ToolCalls) != 2 ||
+				request.Messages[2].ToolCalls[0].ID != "decision:1/action:0" ||
+				request.Messages[2].ToolCalls[1].ID != "decision:1/action:1" ||
+				request.Messages[3].Role != "tool" || request.Messages[3].ToolCallID != "decision:1/action:0" ||
+				request.Messages[4].Role != "tool" || request.Messages[4].ToolCallID != "decision:1/action:1" {
+				t.Fatalf("reconstructed model request = %+v", request.Messages)
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"12.5 + 3.2 = 15.7, and 4 × 5 = 20."},"finish_reason":"stop"}]}`))
+		default:
+			t.Fatalf("unexpected model call %d", modelCalls)
+		}
+	}))
+	defer upstream.Close()
+
+	runtime := agent.NewPostgresRuntime(api.db.Pool(), agent.BareSystemPrompt, func() string { return "msg_controller_actions" })
+	registry, err := agent.NewActionRegistry(agent.NewCalculateAction(), agent.NewCurrentTimeAction(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller := agent.NewController(runtime, models.NewBifrostClient(upstream.URL, upstream.Client(), 2048), registry)
+	if err := controller.Execute(ctx, attemptFromClaim(claimed)); err != nil {
+		t.Fatal(err)
+	}
+
+	var runStatus, jobStatus, outputID, content string
+	var checkpointKinds []string
+	if err := api.db.Pool().QueryRow(ctx, `
+		select r.status, j.status, r.output_message_id, m.content
+		from agent_runs r
+		join agent_jobs j on j.run_id = r.id
+		join chat_messages m on m.id = r.output_message_id
+		where r.id = $1`, admittedBody.RunID).Scan(&runStatus, &jobStatus, &outputID, &content); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(ctx, `
+		select array_agg(kind order by sequence_no)
+		from agent_run_checkpoints where run_id = $1`, admittedBody.RunID).Scan(&checkpointKinds); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "completed" || jobStatus != "succeeded" || outputID != "msg_controller_actions" || content != "12.5 + 3.2 = 15.7, and 4 × 5 = 20." {
+		t.Fatalf("terminal state = %s/%s/%s/%q", runStatus, jobStatus, outputID, content)
+	}
+	wantKinds := []string{"action_proposal", "action_result", "action_result", "final_draft"}
+	if len(checkpointKinds) != len(wantKinds) {
+		t.Fatalf("checkpoint kinds = %v", checkpointKinds)
+	}
+	for index := range wantKinds {
+		if checkpointKinds[index] != wantKinds[index] {
+			t.Fatalf("checkpoint kinds = %v, want %v", checkpointKinds, wantKinds)
+		}
+	}
+}
+
 func TestWorkerPersistsTerminalBifrostFailureWithoutAssistantMessage(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "worker-failure@example.com")
 	admitted := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{

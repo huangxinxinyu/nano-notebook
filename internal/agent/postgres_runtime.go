@@ -143,17 +143,28 @@ func (r *PostgresRuntime) Build(ctx context.Context, execution Execution) (model
 }
 
 func (r *PostgresRuntime) Publish(ctx context.Context, attempt Attempt, result models.ChatResult) error {
+	return r.publishResult(ctx, attempt, result, nil)
+}
+
+func (r *PostgresRuntime) PublishFinal(ctx context.Context, attempt Attempt, draft models.FinalDraft) error {
+	if _, err := NewFinalDraftCheckpoint(1, draft); err != nil {
+		return err
+	}
+	return r.publishResult(ctx, attempt, models.ChatResult{Text: draft.Text}, &draft)
+}
+
+func (r *PostgresRuntime) publishResult(ctx context.Context, attempt Attempt, result models.ChatResult, expectedFinal *models.FinalDraft) error {
 	messageID := r.newMessageID()
 	if messageID == "" {
 		return errors.New("empty Assistant Message ID")
 	}
 	var publishErr error
 	for publishTry := 0; publishTry < 2; publishTry++ {
-		publishErr = r.publishOnce(ctx, attempt, messageID, result)
+		publishErr = r.publishOnce(ctx, attempt, messageID, result, expectedFinal)
 		if publishErr == nil {
 			return nil
 		}
-		if errors.Is(publishErr, ErrLeaseLost) {
+		if errors.Is(publishErr, ErrLeaseLost) || errors.Is(publishErr, ErrRunDeadlineExceeded) || errors.Is(publishErr, ErrCheckpointInvalid) {
 			return publishErr
 		}
 		state, reconcileErr := r.reconcilePublication(ctx, attempt)
@@ -165,6 +176,8 @@ func (r *PostgresRuntime) Publish(ctx context.Context, attempt Attempt, result m
 			return nil
 		case publicationLeaseLost:
 			return ErrLeaseLost
+		case publicationDeadline:
+			return ErrRunDeadlineExceeded
 		case publicationCurrent:
 			continue
 		}
@@ -172,35 +185,31 @@ func (r *PostgresRuntime) Publish(ctx context.Context, attempt Attempt, result m
 	return publishErr
 }
 
-func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, messageID string, result models.ChatResult) error {
+func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, messageID string, result models.ChatResult, expectedFinal *models.FinalDraft) error {
 	tx, err := r.workerTx(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	var chatID, jobID string
-	var authorized bool
-	err = tx.QueryRow(ctx, `
-		select r.chat_id, j.id, exists(
-			select 1
-			from chat_chats c
-			join notebook_memberships m on m.notebook_id = c.notebook_id
-			where c.id = r.chat_id and c.creator_user_id = r.user_id and m.user_id = r.user_id
-		)
-		from agent_runs r
-		join agent_jobs j on j.run_id = r.id
-		where r.id = $1 and j.id = $2 and j.lease_token = $3::uuid
-			and j.lease_expires_at > now()
-			and r.status = 'running' and j.status = 'running' and r.output_message_id is null
-		for update of r, j`, attempt.RunID, attempt.JobID, attempt.LeaseToken).Scan(&chatID, &jobID, &authorized)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrLeaseLost
-	}
-	if err != nil {
+	if err := lockCheckpointAuthority(ctx, tx, attempt); err != nil {
 		return err
 	}
-	if !authorized {
-		return errors.New("Run is no longer authorized to publish")
+	var chatID string
+	if err := tx.QueryRow(ctx, `select chat_id from agent_runs where id = $1`, attempt.RunID).Scan(&chatID); err != nil {
+		return err
+	}
+	if expectedFinal != nil {
+		checkpoints, err := loadRunCheckpoints(ctx, tx, attempt.RunID)
+		if err != nil {
+			return err
+		}
+		prefix, err := LoadCheckpointPrefix(ctx, checkpoints)
+		if err != nil {
+			return err
+		}
+		if prefix.Final == nil || prefix.Final.Text != expectedFinal.Text {
+			return invalidCheckpoint("publication Final Draft does not match accepted prefix")
+		}
 	}
 	if _, err := tx.Exec(ctx, `
 		insert into chat_messages(id, chat_id, role, content)
@@ -222,7 +231,7 @@ func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, mess
 		update agent_jobs
 		set status = 'succeeded', lease_token = null, lease_expires_at = null,
 			finished_at = now(), updated_at = now()
-		where id = $1 and status = 'running' and lease_token = $2::uuid`, jobID, attempt.LeaseToken)
+		where id = $1 and status = 'running' and lease_token = $2::uuid`, attempt.JobID, attempt.LeaseToken)
 	if err != nil {
 		return err
 	}
@@ -244,6 +253,7 @@ const (
 	publicationLeaseLost publicationState = iota
 	publicationCurrent
 	publicationCompleted
+	publicationDeadline
 )
 
 func (r *PostgresRuntime) reconcilePublication(ctx context.Context, attempt Attempt) (publicationState, error) {
@@ -254,14 +264,15 @@ func (r *PostgresRuntime) reconcilePublication(ctx context.Context, attempt Atte
 	defer tx.Rollback(ctx)
 	var runStatus, jobStatus string
 	var outputMessageID *string
-	var currentLease bool
+	var currentLease, deadlineValid bool
 	err = tx.QueryRow(ctx, `
 		select r.status, r.output_message_id, j.status,
-			coalesce(j.id = $2 and j.lease_token = $3::uuid and j.lease_expires_at > now(), false)
+			coalesce(j.id = $2 and j.lease_token = $3::uuid and j.lease_expires_at > now(), false),
+			r.deadline_at > now()
 		from agent_runs r
 		join agent_jobs j on j.run_id = r.id
 		where r.id = $1`, attempt.RunID, attempt.JobID, attempt.LeaseToken).
-		Scan(&runStatus, &outputMessageID, &jobStatus, &currentLease)
+		Scan(&runStatus, &outputMessageID, &jobStatus, &currentLease, &deadlineValid)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return publicationLeaseLost, nil
 	}
@@ -274,7 +285,10 @@ func (r *PostgresRuntime) reconcilePublication(ctx context.Context, attempt Atte
 	if runStatus == "completed" && outputMessageID != nil && jobStatus == "succeeded" {
 		return publicationCompleted, nil
 	}
-	if runStatus == "running" && jobStatus == "running" && outputMessageID == nil && currentLease {
+	if runStatus == "running" && jobStatus == "running" && outputMessageID == nil && !deadlineValid {
+		return publicationDeadline, nil
+	}
+	if runStatus == "running" && jobStatus == "running" && outputMessageID == nil && currentLease && deadlineValid {
 		return publicationCurrent, nil
 	}
 	return publicationLeaseLost, nil

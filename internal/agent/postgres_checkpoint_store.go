@@ -81,6 +81,18 @@ func (r *PostgresRuntime) LoadCheckpointPrefix(ctx context.Context, attempt Atte
 	return prefix, nil
 }
 
+func (r *PostgresRuntime) CheckAuthority(ctx context.Context, attempt Attempt) error {
+	tx, err := r.workerTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockCheckpointAuthority(ctx, tx, attempt); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func (r *PostgresRuntime) appendCheckpointOnce(ctx context.Context, attempt Attempt, pending PendingCheckpoint) (Checkpoint, error) {
 	tx, err := r.workerTx(ctx)
 	if err != nil {

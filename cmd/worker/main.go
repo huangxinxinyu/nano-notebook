@@ -44,8 +44,13 @@ func main() {
 
 	modelClient := models.NewBifrostClient(env("NANO_BIFROST_URL", "http://127.0.0.1:56666"), &http.Client{}, 2048)
 	runtime := agent.NewPostgresRuntime(db.Pool(), agent.BareSystemPrompt, nil)
-	loop := agent.NewLoop(runtime, runtime, agent.NewModelRunner(modelClient), runtime)
-	workerService := agentworker.NewService(db.Pool(), jobs.NewQueue(db.Pool()), loop, 5*time.Second, 210*time.Second)
+	registry, err := agent.NewActionRegistry(agent.NewCalculateAction(), agent.NewCurrentTimeAction(nil))
+	if err != nil {
+		slog.Error("worker Action registry invalid", "error", err)
+		os.Exit(1)
+	}
+	controller := agent.NewController(runtime, modelClient, registry)
+	workerService := agentworker.NewService(db.Pool(), jobs.NewQueue(db.Pool()), controller, 5*time.Second, 210*time.Second)
 	workerDone := make(chan error, 1)
 	go func() {
 		err := workerService.Run(ctx)
