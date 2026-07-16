@@ -721,7 +721,7 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		if err := chatStore.InsertUserMessage(r.Context(), req.ID, chatID, req.Content); err != nil {
 			return err
 		}
-		if err := agent.NewStore(tx).CreateQueued(r.Context(), runID, userID, chatID, req.ID, s.cfg.DefaultModel, "agent-bare-v1", normalizeBrowserTimeZone(req.TimeZone), s.cfg.AgentRun); err != nil {
+		if err := agent.NewStore(tx).CreateQueued(r.Context(), runID, userID, chatID, req.ID, s.cfg.DefaultModel, agent.BarePromptVersion, normalizeBrowserTimeZone(req.TimeZone), s.cfg.AgentRun); err != nil {
 			return err
 		}
 		if err := jobs.NewStore(tx).CreateAgentRun(r.Context(), jobID, runID); err != nil {

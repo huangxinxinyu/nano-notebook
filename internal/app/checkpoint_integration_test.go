@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
@@ -63,6 +64,131 @@ func TestCheckpointAppendIsIdempotentAndRejectsIdentityConflict(t *testing.T) {
 	}
 	if runID != claimed.RunID {
 		t.Fatalf("claimed Run = %q, want %q", claimed.RunID, runID)
+	}
+}
+
+func TestRuntimeLoadProjectsPinnedSprint3Configuration(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "runtime-pinned-config@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c069")
+	ctx := context.Background()
+	if _, err := api.db.Pool().Exec(ctx, `
+		update agent_runs
+		set time_zone = 'Asia/Tokyo', deadline_at = now() + interval '5 minutes',
+			action_decision_limit = 2, final_decision_limit = 1,
+			action_limit = 5, action_batch_limit = 2,
+			action_result_byte_limit = 8192, action_results_byte_limit = 24576
+		where id = $1`, runID); err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(ctx)
+	if err != nil || !ok {
+		t.Fatalf("claim = %+v ok=%t err=%v", claimed, ok, err)
+	}
+	loadedAt := time.Now().UTC()
+	execution, err := agent.NewPostgresRuntime(api.db.Pool(), "", nil).Load(ctx, attemptFromClaim(claimed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if execution.PromptVersion != "agent-bare-v1" || execution.TimeZone != "Asia/Tokyo" {
+		t.Fatalf("prompt/time zone = %q/%q", execution.PromptVersion, execution.TimeZone)
+	}
+	if execution.ActionDecisionLimit != 2 || execution.FinalDecisionLimit != 1 ||
+		execution.ActionLimit != 5 || execution.ActionBatchLimit != 2 ||
+		execution.ActionResultByteLimit != 8192 || execution.ActionResultsByteLimit != 24576 {
+		t.Fatalf("loaded limits = %+v", execution)
+	}
+	if execution.DeadlineAt.Before(loadedAt.Add(4*time.Minute+50*time.Second)) || execution.DeadlineAt.After(loadedAt.Add(5*time.Minute+10*time.Second)) {
+		t.Fatalf("deadline = %s, want approximately five minutes after load", execution.DeadlineAt)
+	}
+}
+
+func TestDecisionContextReconstructsCompletedCheckpointBatches(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "decision-context@example.com")
+	_ = admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c070")
+	ctx := context.Background()
+	claimed, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(ctx)
+	if err != nil || !ok {
+		t.Fatalf("claim = %+v ok=%t err=%v", claimed, ok, err)
+	}
+	attempt := attemptFromClaim(claimed)
+	runtime := agent.NewPostgresRuntime(api.db.Pool(), "System prompt for checkpoint context.", nil)
+	execution, err := runtime.Load(ctx, attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal, err := agent.NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{
+		{Name: "current_time", Input: []byte(`{"time_zone":"Asia/Shanghai"}`)},
+		{Name: "calculate", Input: []byte(`{"operation":"divide","operands":["1","0"]}`)},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.AppendCheckpoint(ctx, attempt, proposal); err != nil {
+		t.Fatal(err)
+	}
+	firstResult, err := agent.NewActionResultCheckpoint(1, 0, "decision:1/action:0", agent.ActionResult{
+		Status: agent.ActionSucceeded,
+		Output: []byte(`{"local_time":"2026-07-16T17:40:00+08:00","observed_at":"2026-07-16T09:40:00Z","time_zone":"Asia/Shanghai","utc_offset_seconds":28800}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.AppendCheckpoint(ctx, attempt, firstResult); err != nil {
+		t.Fatal(err)
+	}
+	incomplete, err := runtime.LoadCheckpointPrefix(ctx, attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.BuildDecisionRequest(ctx, execution, incomplete, nil); err == nil {
+		t.Fatal("incomplete Action batch incorrectly produced another model request")
+	}
+	secondResult, err := agent.NewActionResultCheckpoint(1, 1, "decision:1/action:1", agent.ActionResult{
+		Status: agent.ActionDomainError, ErrorCode: "division_by_zero",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.AppendCheckpoint(ctx, attempt, secondResult); err != nil {
+		t.Fatal(err)
+	}
+	prefix, err := runtime.LoadCheckpointPrefix(ctx, attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := agent.NewActionRegistry(agent.NewCurrentTimeAction(nil), agent.NewCalculateAction())
+	if err != nil {
+		t.Fatal(err)
+	}
+	definitions := registry.Definitions(agent.ActionPolicy{RemainingActions: 6})
+
+	request, err := runtime.BuildDecisionRequest(ctx, execution, prefix, definitions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Model != "aliyun/qwen-flash" || len(request.Messages) != 5 {
+		t.Fatalf("request model/messages = %q/%+v", request.Model, request.Messages)
+	}
+	if request.Messages[0].Role != models.RoleSystem || request.Messages[0].Content != "System prompt for checkpoint context." ||
+		request.Messages[1].Role != models.RoleUser || request.Messages[1].Content != "Exercise lease semantics." {
+		t.Fatalf("durable Chat context = %+v", request.Messages[:2])
+	}
+	proposalMessage := request.Messages[2]
+	if proposalMessage.Role != models.RoleAssistant || proposalMessage.Content != "" || len(proposalMessage.ActionCalls) != 2 {
+		t.Fatalf("proposal message = %+v", proposalMessage)
+	}
+	if proposalMessage.ActionCalls[0].ID != "decision:1/action:0" || proposalMessage.ActionCalls[0].Name != "current_time" ||
+		proposalMessage.ActionCalls[1].ID != "decision:1/action:1" || proposalMessage.ActionCalls[1].Name != "calculate" {
+		t.Fatalf("reconstructed calls = %+v", proposalMessage.ActionCalls)
+	}
+	if got := request.Messages[3]; got.Role != models.RoleAction || got.ActionCallID != "decision:1/action:0" || got.Content != string(firstResult.Payload) {
+		t.Fatalf("success result message = %+v, payload=%s", got, firstResult.Payload)
+	}
+	if got := request.Messages[4]; got.Role != models.RoleAction || got.ActionCallID != "decision:1/action:1" || got.Content != string(secondResult.Payload) {
+		t.Fatalf("domain result message = %+v, payload=%s", got, secondResult.Payload)
+	}
+	if len(request.ActionDefinitions) != 2 || request.ActionDefinitions[0].Name != "calculate" || request.ActionDefinitions[1].Name != "current_time" {
+		t.Fatalf("Action definitions = %+v", request.ActionDefinitions)
 	}
 }
 

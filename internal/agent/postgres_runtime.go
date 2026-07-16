@@ -56,8 +56,14 @@ func (r *PostgresRuntime) Load(ctx context.Context, attempt Attempt) (Execution,
 	}
 	defer tx.Rollback(ctx)
 	var execution Execution
+	var deadlineValid bool
 	err = tx.QueryRow(ctx, `
-		select r.id, r.chat_id, r.user_id, r.input_message_id, r.model
+		select r.id, r.chat_id, r.user_id, r.input_message_id, r.model,
+			r.prompt_version, r.time_zone, r.deadline_at,
+			r.action_decision_limit, r.final_decision_limit,
+			r.action_limit, r.action_batch_limit,
+			r.action_result_byte_limit, r.action_results_byte_limit,
+			r.deadline_at > now()
 		from agent_runs r
 		join agent_jobs j on j.run_id = r.id
 		join chat_chats c on c.id = r.chat_id and c.creator_user_id = r.user_id
@@ -65,12 +71,22 @@ func (r *PostgresRuntime) Load(ctx context.Context, attempt Attempt) (Execution,
 		where r.id = $1 and j.id = $2 and j.lease_token = $3::uuid
 			and r.status = 'running' and j.status = 'running'
 			and j.lease_expires_at > now() and r.output_message_id is null`, attempt.RunID, attempt.JobID, attempt.LeaseToken).
-		Scan(&execution.RunID, &execution.ChatID, &execution.UserID, &execution.InputMessageID, &execution.Model)
+		Scan(
+			&execution.RunID, &execution.ChatID, &execution.UserID, &execution.InputMessageID, &execution.Model,
+			&execution.PromptVersion, &execution.TimeZone, &execution.DeadlineAt,
+			&execution.ActionDecisionLimit, &execution.FinalDecisionLimit,
+			&execution.ActionLimit, &execution.ActionBatchLimit,
+			&execution.ActionResultByteLimit, &execution.ActionResultsByteLimit,
+			&deadlineValid,
+		)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Execution{}, ErrLeaseLost
 	}
 	if err != nil {
 		return Execution{}, err
+	}
+	if !deadlineValid {
+		return Execution{}, ErrRunDeadlineExceeded
 	}
 	execution.Attempt = attempt
 	if err := tx.Commit(ctx); err != nil {

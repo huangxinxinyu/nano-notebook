@@ -10,10 +10,19 @@ import (
 
 type Execution struct {
 	Attempt
-	ChatID         string
-	UserID         string
-	InputMessageID string
-	Model          string
+	ChatID                 string
+	UserID                 string
+	InputMessageID         string
+	Model                  string
+	PromptVersion          string
+	TimeZone               string
+	DeadlineAt             time.Time
+	ActionDecisionLimit    int
+	FinalDecisionLimit     int
+	ActionLimit            int
+	ActionBatchLimit       int
+	ActionResultByteLimit  int
+	ActionResultsByteLimit int
 }
 
 type Attempt struct {
