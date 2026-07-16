@@ -104,7 +104,8 @@ func TestRetryCreatesANewRunForTheSameMessageAndReplaysByIdempotencyKey(t *testi
 		t.Fatalf("cancel status=%d body=%s", cancelled.Code, cancelled.Body.String())
 	}
 	path := "/api/v1/agent-runs/" + oldRunID + "/retry"
-	first := api.postJSONWithCookieAndCSRF(t, path, map[string]any{}, sessionCookie, csrfCookie, csrfCookie.Value, "retry-command-one")
+	retryPayload := map[string]any{"time_zone": "Europe/London"}
+	first := api.postJSONWithCookieAndCSRF(t, path, retryPayload, sessionCookie, csrfCookie, csrfCookie.Value, "retry-command-one")
 	if first.Code != http.StatusAccepted {
 		t.Fatalf("retry status=%d body=%s", first.Code, first.Body.String())
 	}
@@ -115,7 +116,7 @@ func TestRetryCreatesANewRunForTheSameMessageAndReplaysByIdempotencyKey(t *testi
 	if firstBody.Run.ID == "" || firstBody.Run.ID == oldRunID || firstBody.Run.InputMessageID != messageID || firstBody.Run.Status != "queued" {
 		t.Fatalf("new retry Run=%+v old=%q", firstBody.Run, oldRunID)
 	}
-	replay := api.postJSONWithCookieAndCSRF(t, path, map[string]any{}, sessionCookie, csrfCookie, csrfCookie.Value, "retry-command-one")
+	replay := api.postJSONWithCookieAndCSRF(t, path, retryPayload, sessionCookie, csrfCookie, csrfCookie.Value, "retry-command-one")
 	if replay.Code != http.StatusAccepted {
 		t.Fatalf("retry replay status=%d body=%s", replay.Code, replay.Body.String())
 	}
@@ -125,6 +126,17 @@ func TestRetryCreatesANewRunForTheSameMessageAndReplaysByIdempotencyKey(t *testi
 	decodeBody(t, replay, &replayBody)
 	if replayBody.Run.ID != firstBody.Run.ID {
 		t.Fatalf("retry replay Run=%q want=%q", replayBody.Run.ID, firstBody.Run.ID)
+	}
+	var retryTimeZone string
+	if err := api.db.Pool().QueryRow(context.Background(), `select time_zone from agent_runs where id=$1`, firstBody.Run.ID).Scan(&retryTimeZone); err != nil {
+		t.Fatal(err)
+	}
+	if retryTimeZone != "Europe/London" {
+		t.Fatalf("retry time zone=%q want Europe/London", retryTimeZone)
+	}
+	mismatch := api.postJSONWithCookieAndCSRF(t, path, map[string]any{"time_zone": "Asia/Tokyo"}, sessionCookie, csrfCookie, csrfCookie.Value, "retry-command-one")
+	if mismatch.Code != http.StatusConflict || decodeError(t, mismatch).Code != "idempotency_mismatch" {
+		t.Fatalf("retry time-zone mismatch status=%d body=%s", mismatch.Code, mismatch.Body.String())
 	}
 	admissionReplay := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
 		"id": messageID, "content": "Exercise lease semantics.",

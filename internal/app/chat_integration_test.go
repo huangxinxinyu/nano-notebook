@@ -97,8 +97,9 @@ func TestMessageAdmissionAtomicallyCreatesQueuedRunAndJob(t *testing.T) {
 
 	const messageID = "0190cdd2-5f2d-7ad8-b3f5-1b588788c001"
 	admitted := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatBody.Chat.ID+"/messages", map[string]any{
-		"id":      messageID,
-		"content": "Explain why durable admission matters.",
+		"id":        messageID,
+		"content":   "Explain why durable admission matters.",
+		"time_zone": "Asia/Shanghai",
 	}, sessionCookie, csrfCookie, csrfCookie.Value, "")
 	if admitted.Code != http.StatusAccepted {
 		t.Fatalf("admit message status = %d, body = %s", admitted.Code, admitted.Body.String())
@@ -115,25 +116,25 @@ func TestMessageAdmissionAtomicallyCreatesQueuedRunAndJob(t *testing.T) {
 
 	ctx := context.Background()
 	var messageCount, runCount, jobCount int
-	var runStatus, jobStatus, inputMessageID, jobRunID string
+	var runStatus, jobStatus, inputMessageID, jobRunID, timeZone string
 	if err := api.db.Pool().QueryRow(ctx, `select count(*) from chat_messages where id = $1`, messageID).Scan(&messageCount); err != nil {
 		t.Fatal(err)
 	}
-	if err := api.db.Pool().QueryRow(ctx, `select count(*), min(status), min(input_message_id) from agent_runs where id = $1`, admittedBody.RunID).Scan(&runCount, &runStatus, &inputMessageID); err != nil {
+	if err := api.db.Pool().QueryRow(ctx, `select count(*), min(status), min(input_message_id), min(time_zone) from agent_runs where id = $1`, admittedBody.RunID).Scan(&runCount, &runStatus, &inputMessageID, &timeZone); err != nil {
 		t.Fatal(err)
 	}
 	if err := api.db.Pool().QueryRow(ctx, `select count(*), min(status), min(run_id) from agent_jobs where run_id = $1`, admittedBody.RunID).Scan(&jobCount, &jobStatus, &jobRunID); err != nil {
 		t.Fatal(err)
 	}
-	if messageCount != 1 || runCount != 1 || jobCount != 1 || runStatus != "queued" || jobStatus != "queued" || inputMessageID != messageID || jobRunID != admittedBody.RunID {
-		t.Fatalf("durable admission message=%d run=%d/%s/%s job=%d/%s/%s", messageCount, runCount, runStatus, inputMessageID, jobCount, jobStatus, jobRunID)
+	if messageCount != 1 || runCount != 1 || jobCount != 1 || runStatus != "queued" || jobStatus != "queued" || inputMessageID != messageID || jobRunID != admittedBody.RunID || timeZone != "Asia/Shanghai" {
+		t.Fatalf("durable admission message=%d run=%d/%s/%s/%s job=%d/%s/%s", messageCount, runCount, runStatus, inputMessageID, timeZone, jobCount, jobStatus, jobRunID)
 	}
 }
 
 func TestMessageAdmissionReusesTheOriginalRunForTheSameCommand(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "admission-replay@example.com")
 	const messageID = "0190cdd2-5f2d-7ad8-b3f5-1b588788c002"
-	payload := map[string]any{"id": messageID, "content": "Explain idempotent admission."}
+	payload := map[string]any{"id": messageID, "content": "Explain idempotent admission.", "time_zone": "Asia/Tokyo"}
 
 	first := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", payload, sessionCookie, csrfCookie, csrfCookie.Value, "")
 	if first.Code != http.StatusAccepted {
@@ -144,7 +145,9 @@ func TestMessageAdmissionReusesTheOriginalRunForTheSameCommand(t *testing.T) {
 	}
 	decodeBody(t, first, &firstBody)
 
-	replayed := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", payload, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	replayed := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
+		"id": messageID, "content": "Explain idempotent admission.", "time_zone": "America/New_York",
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "")
 	if replayed.Code != http.StatusAccepted {
 		t.Fatalf("replayed admission status = %d, body = %s", replayed.Code, replayed.Body.String())
 	}
@@ -155,6 +158,13 @@ func TestMessageAdmissionReusesTheOriginalRunForTheSameCommand(t *testing.T) {
 	decodeBody(t, replayed, &replayedBody)
 	if replayedBody.RunID != firstBody.RunID || replayedBody.Status != "queued" {
 		t.Fatalf("replayed admission = %+v, want original run %q", replayedBody, firstBody.RunID)
+	}
+	var pinnedTimeZone string
+	if err := api.db.Pool().QueryRow(context.Background(), `select time_zone from agent_runs where id = $1`, firstBody.RunID).Scan(&pinnedTimeZone); err != nil {
+		t.Fatal(err)
+	}
+	if pinnedTimeZone != "Asia/Tokyo" {
+		t.Fatalf("replayed admission changed pinned time zone to %q", pinnedTimeZone)
 	}
 
 	mismatch := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
@@ -178,6 +188,29 @@ func TestMessageAdmissionReusesTheOriginalRunForTheSameCommand(t *testing.T) {
 	}
 	if messages != 1 || runs != 1 || jobs != 1 {
 		t.Fatalf("replay created duplicate rows messages=%d runs=%d jobs=%d", messages, runs, jobs)
+	}
+}
+
+func TestMessageAdmissionFallsBackToUTCForInvalidTimeZone(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "admission-time-zone-fallback@example.com")
+	response := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
+		"id":        "0190cdd2-5f2d-7ad8-b3f5-1b588788c062",
+		"content":   "Use a safe time zone fallback.",
+		"time_zone": "Mars/Olympus_Mons",
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("admission status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		RunID string `json:"run_id"`
+	}
+	decodeBody(t, response, &body)
+	var timeZone string
+	if err := api.db.Pool().QueryRow(context.Background(), `select time_zone from agent_runs where id = $1`, body.RunID).Scan(&timeZone); err != nil {
+		t.Fatal(err)
+	}
+	if timeZone != "UTC" {
+		t.Fatalf("invalid browser time zone pinned as %q, want UTC", timeZone)
 	}
 }
 

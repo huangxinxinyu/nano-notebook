@@ -191,7 +191,7 @@ func (s *Store) Cancel(ctx context.Context, userID, runID string) (RunSnapshot, 
 	return run, nil
 }
 
-func (s *Store) RetryQueued(ctx context.Context, userID, sourceRunID, key, requestHash, runID, jobID string) (RunSnapshot, bool, error) {
+func (s *Store) RetryQueued(ctx context.Context, userID, sourceRunID, key, requestHash, runID, jobID, timeZone string) (RunSnapshot, bool, error) {
 	if _, err := s.db.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, "admit_agent_run:"+userID); err != nil {
 		return RunSnapshot{}, false, err
 	}
@@ -255,7 +255,7 @@ func (s *Store) RetryQueued(ctx context.Context, userID, sourceRunID, key, reque
 	} else if active {
 		return RunSnapshot{}, false, ErrActiveRun
 	}
-	if err := s.CreateQueued(ctx, runID, userID, chatID, inputMessageID, model, promptVersion); err != nil {
+	if err := s.CreateQueued(ctx, runID, userID, chatID, inputMessageID, model, promptVersion, timeZone); err != nil {
 		return RunSnapshot{}, false, err
 	}
 	if _, err := s.db.Exec(ctx, `
@@ -287,9 +287,9 @@ func NewStore(db DBTX) *Store {
 	return &Store{db: db}
 }
 
-func (s *Store) CreateQueued(ctx context.Context, runID, userID, chatID, inputMessageID, model, promptVersion string) error {
+func (s *Store) CreateQueued(ctx context.Context, runID, userID, chatID, inputMessageID, model, promptVersion, timeZone string) error {
 	_, err := s.db.Exec(ctx, `
-		insert into agent_runs(id, user_id, chat_id, input_message_id, status, model, prompt_version)
-		values($1, $2, $3, $4, 'queued', $5, $6)`, runID, userID, chatID, inputMessageID, model, promptVersion)
+		insert into agent_runs(id, user_id, chat_id, input_message_id, status, model, prompt_version, time_zone)
+		values($1, $2, $3, $4, 'queued', $5, $6, $7)`, runID, userID, chatID, inputMessageID, model, promptVersion, timeZone)
 	return err
 }

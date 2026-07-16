@@ -523,6 +523,13 @@ func (s *Server) retryRun(w http.ResponseWriter, r *http.Request, userID, source
 		writeError(w, r, http.StatusForbidden, "csrf_required", "error.csrf_required")
 		return
 	}
+	var req struct {
+		TimeZone string `json:"time_zone"`
+	}
+	if r.Body != nil && r.ContentLength != 0 && !readJSON(w, r, &req) {
+		return
+	}
+	timeZone := normalizeBrowserTimeZone(req.TimeZone)
 	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	if key == "" {
 		writeError(w, r, http.StatusBadRequest, "idempotency_required", "error.idempotency_required")
@@ -541,7 +548,7 @@ func (s *Server) retryRun(w http.ResponseWriter, r *http.Request, userID, source
 	var run agent.RunSnapshot
 	err = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
 		var err error
-		run, _, err = agent.NewStore(tx).RetryQueued(r.Context(), userID, sourceRunID, key, requestHash([]byte(sourceRunID)), runID, jobID)
+		run, _, err = agent.NewStore(tx).RetryQueued(r.Context(), userID, sourceRunID, key, requestHash([]byte(sourceRunID+"\x00"+timeZone)), runID, jobID, timeZone)
 		return err
 	})
 	if errors.Is(err, agent.ErrRunNotFound) {
@@ -658,8 +665,9 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		return
 	}
 	var req struct {
-		ID      string `json:"id"`
-		Content string `json:"content"`
+		ID       string `json:"id"`
+		Content  string `json:"content"`
+		TimeZone string `json:"time_zone"`
 	}
 	if !readJSON(w, r, &req) {
 		return
@@ -711,7 +719,7 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		if err := chatStore.InsertUserMessage(r.Context(), req.ID, chatID, req.Content); err != nil {
 			return err
 		}
-		if err := agent.NewStore(tx).CreateQueued(r.Context(), runID, userID, chatID, req.ID, s.cfg.DefaultModel, "agent-bare-v1"); err != nil {
+		if err := agent.NewStore(tx).CreateQueued(r.Context(), runID, userID, chatID, req.ID, s.cfg.DefaultModel, "agent-bare-v1", normalizeBrowserTimeZone(req.TimeZone)); err != nil {
 			return err
 		}
 		if err := jobs.NewStore(tx).CreateAgentRun(r.Context(), jobID, runID); err != nil {
@@ -737,6 +745,17 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"message_id": req.ID, "run_id": runID, "status": status})
+}
+
+func normalizeBrowserTimeZone(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "UTC"
+	}
+	if _, err := time.LoadLocation(value); err != nil {
+		return "UTC"
+	}
+	return value
 }
 
 func isUniqueViolation(err error, constraint string) bool {
