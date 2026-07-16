@@ -14,7 +14,6 @@ export type ChatMessage = {
   chat_id?: string;
   role: "user" | "assistant";
   content: string;
-  answer_mode: "model_knowledge" | null;
   created_at: string;
 };
 
@@ -43,8 +42,8 @@ export type ChatController = {
 export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatController {
   const queryClient = useQueryClient();
   const [bootstrapKey] = useState(() => crypto.randomUUID());
-  const [command, setCommand] = useState<{ id: string; content: string } | null>(null);
-  const retryCommand = useRef<{ sourceRunID: string; key: string } | null>(null);
+  const [command, setCommand] = useState<{ id: string; content: string; time_zone: string } | null>(null);
+  const retryCommand = useRef<{ sourceRunID: string; key: string; timeZone: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const queryKey = useMemo(() => ["private-chat", notebookID] as const, [notebookID]);
   const snapshotQuery = useQuery({
@@ -103,7 +102,9 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
     const snapshot = snapshotQuery.data;
     if (!snapshot || !content) return false;
 
-    const pending = command?.content === content ? command : { id: crypto.randomUUID(), content };
+    const pending = command?.content === content
+      ? command
+      : { id: crypto.randomUUID(), content, time_zone: browserTimeZone() };
     setCommand(pending);
     setError(null);
     const response = await api(`/api/v1/chats/${snapshot.chat.id}/messages`, {
@@ -124,7 +125,6 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
         chat_id: current.chat.id,
         role: "user",
         content,
-        answer_mode: null,
         created_at: new Date().toISOString()
       };
       return {
@@ -160,12 +160,13 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
   async function retry(runID: string) {
     const pending = retryCommand.current?.sourceRunID === runID
       ? retryCommand.current
-      : { sourceRunID: runID, key: crypto.randomUUID() };
+      : { sourceRunID: runID, key: crypto.randomUUID(), timeZone: browserTimeZone() };
     retryCommand.current = pending;
     setError(null);
     const response = await api(`/api/v1/agent-runs/${runID}/retry`, {
       method: "POST",
-      headers: { "Idempotency-Key": pending.key, "X-CSRF-Token": csrfToken() }
+      headers: { "Idempotency-Key": pending.key, "X-CSRF-Token": csrfToken() },
+      body: JSON.stringify({ time_zone: pending.timeZone })
     });
     if (!response.ok) {
       setError(copy.unavailableLabel);
@@ -187,6 +188,14 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
     stop,
     retry
   };
+}
+
+export function browserTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone?.trim() || "UTC";
+  } catch {
+    return "UTC";
+  }
 }
 
 export function appendMessageText(message: AppendMessage) {

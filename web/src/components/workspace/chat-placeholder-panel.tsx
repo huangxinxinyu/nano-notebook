@@ -21,7 +21,7 @@ export type ChatPanelCopy = {
   sendLabel: string;
   waitingLabel: string;
   generatingLabel: string;
-  knowledgeLabel: string;
+  sourceDisclosure: string;
   failedLabel: string;
   stoppedLabel: string;
   stopLabel: string;
@@ -69,6 +69,7 @@ export function ChatPanelContent({ copy, controller }: { copy: ChatPanelCopy; co
           <h2>{copy.title}</h2>
           <MaterialSymbol name="more_vert" size={20} />
         </div>
+        <p className="chat-source-disclosure">{copy.sourceDisclosure}</p>
         <ThreadPrimitive.Root className="chat-thread">
           <ThreadPrimitive.Viewport className="chat-thread-viewport">
             <ThreadPrimitive.Empty>
@@ -81,7 +82,7 @@ export function ChatPanelContent({ copy, controller }: { copy: ChatPanelCopy; co
             <div className="chat-message-list">
               <ThreadPrimitive.Messages components={{
                 UserMessage: () => <UserMessage controller={controller} copy={copy} latestMessageID={latestMessageID} />,
-                AssistantMessage: () => <AssistantMessage knowledgeLabel={copy.knowledgeLabel} />
+                AssistantMessage
               }} />
             </div>
             {run ? (
@@ -121,10 +122,9 @@ function UserMessage({ controller, copy, latestMessageID }: { controller: ChatCo
   );
 }
 
-function AssistantMessage({ knowledgeLabel }: { knowledgeLabel: string }) {
+function AssistantMessage() {
   return (
     <MessagePrimitive.Root className="chat-message chat-message--assistant">
-      <span className="chat-answer-mode">{knowledgeLabel}</span>
       <MessagePrimitive.Parts />
     </MessagePrimitive.Root>
   );

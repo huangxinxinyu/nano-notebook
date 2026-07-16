@@ -39,6 +39,7 @@ class FakeEventSource {
 }
 
 beforeEach(() => {
+  vi.restoreAllMocks();
   localStorage.clear();
   window.history.pushState(null, "", "/");
   document.documentElement.lang = "en";
@@ -47,6 +48,9 @@ beforeEach(() => {
   FakeEventSource.instances = [];
   HTMLElement.prototype.scrollTo = vi.fn();
   Object.defineProperty(window.navigator, "language", { value: "en-US", configurable: true });
+  vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockReturnValue({
+    locale: "en-US", calendar: "gregory", numberingSystem: "latn", timeZone: "Asia/Shanghai"
+  });
   fetchHandler = async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     const method = init?.method ?? "GET";
@@ -108,6 +112,7 @@ test("restores the private Chat and enables the composer", async () => {
   expect(chat).toHaveAttribute("data-chat-framework", "@assistant-ui/react");
   expect(await within(chat).findByRole("textbox", { name: "Message Nano Notebook" })).toBeEnabled();
   expect(within(chat).getByText("Chat will start here")).toBeInTheDocument();
+  expect(within(chat).getByText("Answers use model knowledge and are not based on Notebook Sources.")).toBeInTheDocument();
   expect(screen.getByRole("region", { name: "Studio" })).toBeInTheDocument();
 
   await user.click(within(sources).getByRole("button", { name: "Add sources" }));
@@ -127,10 +132,11 @@ test("submits one durable Message and projects the final answer from Run SSE", a
     if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
     if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [] });
     if (url.endsWith("/api/v1/chats/chat_test/messages") && method === "POST") {
-      const body = JSON.parse(String(init?.body)) as { id: string; content: string };
+      const body = JSON.parse(String(init?.body)) as { id: string; content: string; time_zone: string };
       admittedMessageID = body.id;
       expect(body.id).toMatch(/^[0-9a-f-]{36}$/);
       expect(body.content).toBe("Why does a KV cache help?");
+      expect(body.time_zone).toBe("Asia/Shanghai");
       expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("test-token");
       return json({ message_id: body.id, run_id: "run_test", status: "queued" }, 202);
     }
@@ -164,14 +170,13 @@ test("submits one durable Message and projects the final answer from Run SSE", a
         id: "msg_answer",
         role: "assistant",
         content: "It reuses the keys and values already computed for earlier tokens.",
-        answer_mode: "model_knowledge",
         created_at: "2026-07-14T12:00:00Z"
       }
     });
   });
 
   expect(await within(chat).findByText("It reuses the keys and values already computed for earlier tokens.")).toBeInTheDocument();
-  expect(within(chat).getByText("Based on model knowledge")).toBeInTheDocument();
+  expect(within(chat).getByText("Answers use model knowledge and are not based on Notebook Sources.")).toBeInTheDocument();
   expect(within(chat).queryByRole("status")).not.toBeInTheDocument();
   expect(FakeEventSource.instances[0]?.closed).toBe(true);
   expect(admittedMessageID).not.toBe("");
@@ -212,7 +217,7 @@ test("reconnects an active Run after refresh and shows terminal failure without 
     if (url.endsWith("/api/v1/notebooks/nb_test/chats")) return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
     if (url.endsWith("/api/v1/chats/chat_test")) return json({
       chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" },
-      messages: [{ id: "msg_question", chat_id: "chat_test", role: "user", content: "Will this work?", answer_mode: null, created_at: "2026-07-14T12:00:00Z" }],
+      messages: [{ id: "msg_question", chat_id: "chat_test", role: "user", content: "Will this work?", created_at: "2026-07-14T12:00:00Z" }],
       runs: [{ id: "run_active", input_message_id: "msg_question", status: "queued", error_code: null }]
     });
     return json({ error: { code: "not_found" } }, 404);
@@ -232,7 +237,7 @@ test("reconnects an active Run after refresh and shows terminal failure without 
 
   expect(await within(chat).findByText("The answer could not be generated. Try again.")).toBeInTheDocument();
   expect(within(chat).getByRole("button", { name: "Retry" })).toBeInTheDocument();
-  expect(within(chat).queryByText("Based on model knowledge")).not.toBeInTheDocument();
+  expect(within(chat).getByText("Answers use model knowledge and are not based on Notebook Sources.")).toBeInTheDocument();
   expect(within(chat).getByRole("textbox", { name: "Message Nano Notebook" })).toBeEnabled();
   expect(FakeEventSource.instances[0]?.closed).toBe(true);
 });
@@ -248,7 +253,7 @@ test("stops an active Run and retries the same User Message with one idempotency
     if (url.endsWith("/api/v1/notebooks/nb_test/chats")) return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
     if (url.endsWith("/api/v1/chats/chat_test")) return json({
       chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" },
-      messages: [{ id: "msg_question", chat_id: "chat_test", role: "user", content: "Stop and retry this", answer_mode: null, created_at: "2026-07-14T12:00:00Z" }],
+      messages: [{ id: "msg_question", chat_id: "chat_test", role: "user", content: "Stop and retry this", created_at: "2026-07-14T12:00:00Z" }],
       runs: [{ id: "run_active", input_message_id: "msg_question", status: "running", error_code: null }]
     });
     if (url.endsWith("/api/v1/agent-runs/run_active/cancel") && method === "POST") {
@@ -258,6 +263,7 @@ test("stops an active Run and retries the same User Message with one idempotency
     if (url.endsWith("/api/v1/agent-runs/run_active/retry") && method === "POST") {
       retryKey = new Headers(init?.headers).get("Idempotency-Key") ?? "";
       expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("test-token");
+      expect(JSON.parse(String(init?.body))).toEqual({ time_zone: "Asia/Shanghai" });
       return json({ run: { id: "run_retry", input_message_id: "msg_question", status: "queued", error_code: null } }, 202);
     }
     return json({ error: { code: "not_found" } }, 404);
@@ -283,6 +289,7 @@ test("stops an active Run and retries the same User Message with one idempotency
 test("reuses the User Message UUID when admission must be retried", async () => {
   window.history.pushState(null, "", "/notebooks/nb_test");
   const attemptedIDs: string[] = [];
+  const attemptedTimeZones: string[] = [];
   fetchHandler = async (input, init) => {
     const url = String(input);
     const method = init?.method ?? "GET";
@@ -291,8 +298,9 @@ test("reuses the User Message UUID when admission must be retried", async () => 
     if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
     if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [] });
     if (url.endsWith("/api/v1/chats/chat_test/messages") && method === "POST") {
-      const body = JSON.parse(String(init?.body)) as { id: string; content: string };
+      const body = JSON.parse(String(init?.body)) as { id: string; content: string; time_zone: string };
       attemptedIDs.push(body.id);
+      attemptedTimeZones.push(body.time_zone);
       if (attemptedIDs.length === 1) return json({ error: { code: "active_run_conflict" } }, 409);
       return json({ message_id: body.id, run_id: "run_retry", status: "queued" }, 202);
     }
@@ -308,11 +316,15 @@ test("reuses the User Message UUID when admission must be retried", async () => 
 
   expect(await within(chat).findByRole("alert")).toHaveTextContent("Waiting to start…");
   expect(composer).toHaveValue("Retry this safely");
+  vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockReturnValue({
+    locale: "en-US", calendar: "gregory", numberingSystem: "latn", timeZone: "Asia/Tokyo"
+  });
   await user.click(within(chat).getByRole("button", { name: "Send message" }));
 
   expect(await within(chat).findByText("Retry this safely")).toBeInTheDocument();
   expect(attemptedIDs).toHaveLength(2);
   expect(attemptedIDs[1]).toBe(attemptedIDs[0]);
+  expect(attemptedTimeZones).toEqual(["Asia/Shanghai", "Asia/Shanghai"]);
 });
 
 test("clears the private Chat projection after successful sign-out", async () => {
