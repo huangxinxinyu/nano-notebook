@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -38,6 +39,9 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 		if _, err := tx.Exec(ctx, `set local role nano_worker`); err != nil {
 			return ClaimedJob{}, false, err
 		}
+		if _, err := agent.NewStore(tx).ExpireIfOverdue(ctx, "", ""); err != nil {
+			return ClaimedJob{}, false, err
+		}
 
 		var job ClaimedJob
 		var status string
@@ -51,6 +55,9 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 			for update of r, j skip locked
 			limit 1`).Scan(&job.ID, &job.RunID, &status, &job.AttemptNo)
 		if errors.Is(err, pgx.ErrNoRows) {
+			if err := tx.Commit(ctx); err != nil {
+				return ClaimedJob{}, false, err
+			}
 			return ClaimedJob{}, false, nil
 		}
 		if err != nil {

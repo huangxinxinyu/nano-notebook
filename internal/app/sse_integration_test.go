@@ -59,6 +59,25 @@ func TestRunSSEReconnectSendsTheCompletedDurableSnapshot(t *testing.T) {
 	}
 }
 
+func TestRunSSEInitialSnapshotExpiresOverdueRun(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "sse-deadline@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c077")
+	if _, err := api.db.Pool().Exec(context.Background(), `update agent_runs set deadline_at = now() - interval '1 second' where id = $1`, runID); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/agent-runs/"+runID+"/events", nil).WithContext(ctx)
+	request.AddCookie(sessionCookie)
+	response := httptest.NewRecorder()
+
+	api.handler.ServeHTTP(response, request)
+	body := response.Body.String()
+	if response.Code != http.StatusOK || !strings.Contains(body, `"status":"failed"`) || !strings.Contains(body, `"error_code":"run_deadline_exceeded"`) {
+		t.Fatalf("overdue SSE status=%d body=%s", response.Code, body)
+	}
+}
+
 func TestRunSSEProjectsQueuedRunningAndCompletedAcrossPostgresNotifications(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "sse-live@example.com")
 	admitted := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{

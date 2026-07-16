@@ -189,6 +189,40 @@ func TestCancelledRunSSEIsTerminalAndRetryRejectsHistoricalInput(t *testing.T) {
 	}
 }
 
+func TestRetryExpiresOverdueSourceBeforeRetryabilityAndActiveSlotChecks(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "retry-deadline@example.com")
+	sourceRunID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c076")
+	ctx := context.Background()
+	if _, err := api.db.Pool().Exec(ctx, `update agent_runs set deadline_at = now() - interval '1 second' where id = $1`, sourceRunID); err != nil {
+		t.Fatal(err)
+	}
+
+	response := api.postJSONWithCookieAndCSRF(t, "/api/v1/agent-runs/"+sourceRunID+"/retry", map[string]any{
+		"time_zone": "Europe/London",
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "retry-overdue-source")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("retry status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Run agent.RunSnapshot `json:"run"`
+	}
+	decodeBody(t, response, &body)
+	var sourceStatus, sourceError, retryStatus string
+	var retryCheckpoints int
+	if err := api.db.Pool().QueryRow(ctx, `select status, error_code from agent_runs where id = $1`, sourceRunID).Scan(&sourceStatus, &sourceError); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(ctx, `select status from agent_runs where id = $1`, body.Run.ID).Scan(&retryStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_run_checkpoints where run_id = $1`, body.Run.ID).Scan(&retryCheckpoints); err != nil {
+		t.Fatal(err)
+	}
+	if sourceStatus != "failed" || sourceError != "run_deadline_exceeded" || retryStatus != "queued" || retryCheckpoints != 0 {
+		t.Fatalf("source/retry state = %s/%s -> %s checkpoints=%d", sourceStatus, sourceError, retryStatus, retryCheckpoints)
+	}
+}
+
 func TestRunCommandsRequireCSRFAndDoNotLeakAcrossUsers(t *testing.T) {
 	api, ownerSession, ownerCSRF, chatID := newChatFixture(t, "run-command-owner@example.com")
 	intruderSession, intruderCSRF := api.registerWithCSRF(t, "run-command-intruder@example.com")

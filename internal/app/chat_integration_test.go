@@ -196,6 +196,36 @@ func TestMessageAdmissionPinsConfiguredRunBudgets(t *testing.T) {
 	}
 }
 
+func TestMessageAdmissionExpiresOverdueRunBeforeActiveSlotCheck(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "admission-deadline@example.com")
+	oldRunID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c074")
+	ctx := context.Background()
+	if _, err := api.db.Pool().Exec(ctx, `update agent_runs set deadline_at = now() - interval '1 second' where id = $1`, oldRunID); err != nil {
+		t.Fatal(err)
+	}
+
+	response := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
+		"id": "0190cdd2-5f2d-7ad8-b3f5-1b588788c075", "content": "Start after the old deadline.",
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("admission status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		RunID string `json:"run_id"`
+	}
+	decodeBody(t, response, &body)
+	var oldStatus, oldError, newStatus string
+	if err := api.db.Pool().QueryRow(ctx, `select status, error_code from agent_runs where id = $1`, oldRunID).Scan(&oldStatus, &oldError); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(ctx, `select status from agent_runs where id = $1`, body.RunID).Scan(&newStatus); err != nil {
+		t.Fatal(err)
+	}
+	if oldStatus != "failed" || oldError != "run_deadline_exceeded" || newStatus != "queued" {
+		t.Fatalf("old/new state = %s/%s -> %s", oldStatus, oldError, newStatus)
+	}
+}
+
 func TestMessageAdmissionReusesTheOriginalRunForTheSameCommand(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "admission-replay@example.com")
 	const messageID = "0190cdd2-5f2d-7ad8-b3f5-1b588788c002"

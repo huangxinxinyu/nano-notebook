@@ -618,6 +618,17 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, userID, runID
 		case <-r.Context().Done():
 			return
 		case <-heartbeat.C:
+			projection, err := s.runProjection(r.Context(), userID, runID)
+			if err != nil {
+				return
+			}
+			if terminalRun(projection.Run.Status) {
+				if err := writeRunEvent(w, projection); err != nil {
+					return
+				}
+				flusher.Flush()
+				return
+			}
 			if _, err := io.WriteString(w, ": heartbeat\n\n"); err != nil {
 				return
 			}
@@ -641,8 +652,12 @@ func (s *Server) streamRun(w http.ResponseWriter, r *http.Request, userID, runID
 func (s *Server) runProjection(ctx context.Context, userID, runID string) (agent.RunProjection, error) {
 	var projection agent.RunProjection
 	err := s.db.WithRequestPrincipal(ctx, userID, func(tx pgx.Tx) error {
+		store := agent.NewStore(tx)
+		if _, err := store.ExpireIfOverdue(ctx, userID, runID); err != nil {
+			return err
+		}
 		var err error
-		projection, err = agent.NewStore(tx).ProjectionForUser(ctx, userID, runID)
+		projection, err = store.ProjectionForUser(ctx, userID, runID)
 		return err
 	})
 	return projection, err
@@ -713,7 +728,11 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 			status = run.Status
 			return nil
 		}
-		if _, active, err := agent.NewStore(tx).ActiveByUser(r.Context(), userID); err != nil {
+		agentStore := agent.NewStore(tx)
+		if _, err := agentStore.ExpireIfOverdue(r.Context(), userID, ""); err != nil {
+			return err
+		}
+		if _, active, err := agentStore.ActiveByUser(r.Context(), userID); err != nil {
 			return err
 		} else if active {
 			return agent.ErrActiveRun
@@ -721,7 +740,7 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		if err := chatStore.InsertUserMessage(r.Context(), req.ID, chatID, req.Content); err != nil {
 			return err
 		}
-		if err := agent.NewStore(tx).CreateQueued(r.Context(), runID, userID, chatID, req.ID, s.cfg.DefaultModel, agent.BarePromptVersion, normalizeBrowserTimeZone(req.TimeZone), s.cfg.AgentRun); err != nil {
+		if err := agentStore.CreateQueued(r.Context(), runID, userID, chatID, req.ID, s.cfg.DefaultModel, agent.BarePromptVersion, normalizeBrowserTimeZone(req.TimeZone), s.cfg.AgentRun); err != nil {
 			return err
 		}
 		if err := jobs.NewStore(tx).CreateAgentRun(r.Context(), jobID, runID); err != nil {

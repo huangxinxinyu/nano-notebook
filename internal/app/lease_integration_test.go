@@ -53,6 +53,34 @@ func TestJobLeaseClaimHeartbeatAndReclaimFenceOlderAttempt(t *testing.T) {
 	}
 }
 
+func TestQueueExpiresOverdueRunBeforeClaim(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "queue-deadline@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c073")
+	ctx := context.Background()
+	if _, err := api.db.Pool().Exec(ctx, `update agent_runs set deadline_at = now() - interval '1 second' where id = $1`, runID); err != nil {
+		t.Fatal(err)
+	}
+
+	claimed, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatalf("overdue Run was claimed: %+v", claimed)
+	}
+	var runStatus, jobStatus, errorCode string
+	var leaseToken *string
+	if err := api.db.Pool().QueryRow(ctx, `
+		select r.status, r.error_code, j.status, j.lease_token::text
+		from agent_runs r join agent_jobs j on j.run_id = r.id
+		where r.id = $1`, runID).Scan(&runStatus, &errorCode, &jobStatus, &leaseToken); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "failed" || jobStatus != "failed" || errorCode != "run_deadline_exceeded" || leaseToken != nil {
+		t.Fatalf("expired state = %s/%s/%s lease=%v", runStatus, jobStatus, errorCode, leaseToken)
+	}
+}
+
 func TestThirdExpiredAttemptFailsRunAndJobAsRecoveryExhausted(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "lease-exhausted@example.com")
 	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c021")

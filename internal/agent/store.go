@@ -76,6 +76,69 @@ func (s *Store) ActiveByUser(ctx context.Context, userID string) (RunRef, bool, 
 	return run, true, nil
 }
 
+// ExpireIfOverdue atomically terminalizes every matching active Run whose
+// admission-pinned deadline has passed. Empty filters are used by the Worker;
+// request-principal callers pass both user and/or Run identity.
+func (s *Store) ExpireIfOverdue(ctx context.Context, userID, runID string) (int, error) {
+	rows, err := s.db.Query(ctx, `
+		select r.id, j.id
+		from agent_runs r
+		join agent_jobs j on j.run_id = r.id
+		where r.status in ('queued', 'running')
+			and j.status in ('queued', 'running')
+			and r.deadline_at <= now()
+			and ($1 = '' or r.user_id = $1)
+			and ($2 = '' or r.id = $2)
+		order by r.id
+		for update of r, j`, userID, runID)
+	if err != nil {
+		return 0, err
+	}
+	type overdueRun struct {
+		runID string
+		jobID string
+	}
+	overdue := make([]overdueRun, 0)
+	for rows.Next() {
+		var item overdueRun
+		if err := rows.Scan(&item.runID, &item.jobID); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		overdue = append(overdue, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+	for _, item := range overdue {
+		runTag, err := s.db.Exec(ctx, `
+			update agent_runs
+			set status = 'failed', error_code = 'run_deadline_exceeded',
+				finished_at = now(), updated_at = now()
+			where id = $1 and status in ('queued', 'running') and deadline_at <= now()`, item.runID)
+		if err != nil {
+			return 0, err
+		}
+		jobTag, err := s.db.Exec(ctx, `
+			update agent_jobs
+			set status = 'failed', lease_token = null, lease_expires_at = null,
+				finished_at = now(), updated_at = now()
+			where id = $1 and status in ('queued', 'running')`, item.jobID)
+		if err != nil {
+			return 0, err
+		}
+		if runTag.RowsAffected() != 1 || jobTag.RowsAffected() != 1 {
+			return 0, errors.New("deadline expiry did not transition Run and Job together")
+		}
+		if _, err := s.db.Exec(ctx, `select pg_notify('nano_agent_runs', $1)`, item.runID); err != nil {
+			return 0, err
+		}
+	}
+	return len(overdue), nil
+}
+
 func (s *Store) ActiveForChat(ctx context.Context, userID, chatID string) (RunSnapshot, bool, error) {
 	var run RunSnapshot
 	err := s.db.QueryRow(ctx, `
@@ -214,6 +277,9 @@ func (s *Store) RetryQueued(ctx context.Context, userID, sourceRunID, key, reque
 		return body.Run, true, nil
 	}
 	if !errors.Is(err, pgx.ErrNoRows) {
+		return RunSnapshot{}, false, err
+	}
+	if _, err := s.ExpireIfOverdue(ctx, userID, ""); err != nil {
 		return RunSnapshot{}, false, err
 	}
 
