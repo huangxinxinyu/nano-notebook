@@ -113,6 +113,13 @@ func TestThirdExpiredAttemptFailsRunAndJobAsRecoveryExhausted(t *testing.T) {
 	if runStatus != "failed" || jobStatus != "failed" || errorCode != "recovery_exhausted" || attemptNo != 3 || token != nil || expiry != nil {
 		t.Fatalf("exhausted state run=%q job=%q code=%q attempt=%d token=%v expiry=%v", runStatus, jobStatus, errorCode, attemptNo, token, expiry)
 	}
+	var assistants int
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from chat_messages where chat_id = $1 and role = 'assistant'`, chatID).Scan(&assistants); err != nil {
+		t.Fatal(err)
+	}
+	if assistants != 0 {
+		t.Fatalf("recovery exhaustion published %d Assistant Messages", assistants)
+	}
 }
 
 func TestJobExecutionStateConstraintRejectsLeaseAuthorityOnQueuedWork(t *testing.T) {

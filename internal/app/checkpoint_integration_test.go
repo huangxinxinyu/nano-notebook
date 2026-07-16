@@ -116,6 +116,17 @@ func TestDecisionContextReconstructsCompletedCheckpointBatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	emptyPrefix, err := runtime.LoadCheckpointPrefix(ctx, attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyRequest, err := runtime.BuildDecisionRequest(ctx, execution, emptyPrefix, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(emptyRequest.Messages) != 2 {
+		t.Fatalf("empty-prefix messages=%+v", emptyRequest.Messages)
+	}
 	proposal, err := agent.NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{
 		{Name: "current_time", Input: []byte(`{"time_zone":"Asia/Shanghai"}`)},
 		{Name: "calculate", Input: []byte(`{"operation":"divide","operands":["1","0"]}`)},
@@ -189,6 +200,20 @@ func TestDecisionContextReconstructsCompletedCheckpointBatches(t *testing.T) {
 	}
 	if len(request.ActionDefinitions) != 2 || request.ActionDefinitions[0].Name != "calculate" || request.ActionDefinitions[1].Name != "current_time" {
 		t.Fatalf("Action definitions = %+v", request.ActionDefinitions)
+	}
+	final, err := agent.NewFinalDraftCheckpoint(2, models.FinalDraft{Text: "Accepted after reconstructed domain context."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.AppendCheckpoint(ctx, attempt, final); err != nil {
+		t.Fatal(err)
+	}
+	finalPrefix, err := runtime.LoadCheckpointPrefix(ctx, attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.BuildDecisionRequest(ctx, execution, finalPrefix, definitions); err == nil {
+		t.Fatal("Final prefix incorrectly produced another model request")
 	}
 }
 

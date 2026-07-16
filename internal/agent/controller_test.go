@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -307,6 +308,68 @@ func TestControllerCallsModelAgainWhenProposalWasNotAccepted(t *testing.T) {
 	}
 	if len(model.requests) != 3 || len(executionOrder) != 1 || len(runtime.checkpoints) != 3 || len(runtime.published) != 1 {
 		t.Fatalf("recovery model/Actions/checkpoints/published=%d/%v/%+v/%v", len(model.requests), executionOrder, runtime.checkpoints, runtime.published)
+	}
+}
+
+func TestControllerResumesAfterProposalAndAfterLastResultWithoutRepeatingAcceptedNodes(t *testing.T) {
+	proposal, err := NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{
+		{Name: "record", Input: json.RawMessage(`{"value":"first"}`)},
+		{Name: "record", Input: json.RawMessage(`{"value":"second"}`)},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstResult, err := NewActionResultCheckpoint(1, 0, "decision:1/action:0", ActionResult{
+		Status: ActionSucceeded, Output: json.RawMessage(`{"recorded":"first"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondResult, err := NewActionResultCheckpoint(1, 1, "decision:1/action:1", ActionResult{
+		Status: ActionSucceeded, Output: json.RawMessage(`{"recorded":"second"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name          string
+		checkpoints   []Checkpoint
+		wantExecution []string
+		wantCount     int
+	}{
+		{
+			name:          "after proposal",
+			checkpoints:   []Checkpoint{{SequenceNo: 1, PendingCheckpoint: proposal}},
+			wantExecution: []string{"first", "second"},
+			wantCount:     4,
+		},
+		{
+			name: "after last result",
+			checkpoints: []Checkpoint{
+				{SequenceNo: 1, PendingCheckpoint: proposal},
+				{SequenceNo: 2, PendingCheckpoint: firstResult},
+				{SequenceNo: 3, PendingCheckpoint: secondResult},
+			},
+			wantExecution: nil,
+			wantCount:     4,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			executionOrder := make([]string, 0, 2)
+			registry, err := NewActionRegistry(&recordingAction{name: "record", order: &executionOrder})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime := &controllerRuntimeStub{execution: defaultControllerExecution(), checkpoints: append([]Checkpoint(nil), tt.checkpoints...)}
+			model := &decisionModelStub{decisions: []models.ModelDecision{{Final: &models.FinalDraft{Text: "Recovered final."}}}}
+			if err := NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(executionOrder, ",") != strings.Join(tt.wantExecution, ",") || len(model.requests) != 1 || len(runtime.checkpoints) != tt.wantCount || len(runtime.published) != 1 {
+				t.Fatalf("recovery Actions/model/checkpoints/published=%v/%d/%+v/%v", executionOrder, len(model.requests), runtime.checkpoints, runtime.published)
+			}
+		})
 	}
 }
 

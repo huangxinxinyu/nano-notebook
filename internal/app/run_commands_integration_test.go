@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
@@ -82,6 +83,61 @@ func TestCancelRunningRunFencesLatePublication(t *testing.T) {
 	if assistants != 0 {
 		t.Fatalf("late publication inserted %d assistant messages", assistants)
 	}
+}
+
+func TestStopDuringAnActionRetainsProposalButFencesResultAndPublication(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "cancel-inflight-action@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c087")
+	ctx := context.Background()
+	claimed, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(ctx)
+	if err != nil || !ok {
+		t.Fatalf("claim=%+v ok=%t err=%v", claimed, ok, err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	action := &blockingTestAction{started: started, release: release}
+	registry, err := agent.NewActionRegistry(action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := &recordingModelClient{result: models.ModelDecision{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{
+		{Name: "blocking_test", Input: json.RawMessage(`{}`)},
+	}}}}
+	runtime := agent.NewPostgresRuntime(api.db.Pool(), "", func() string { return "msg_must_not_publish" })
+	done := make(chan error, 1)
+	go func() {
+		done <- agent.NewController(runtime, model, registry).Execute(ctx, attemptFromClaim(claimed))
+	}()
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Action did not reach blocking hook")
+	}
+
+	cancelled := api.postJSONWithCookieAndCSRF(t, "/api/v1/agent-runs/"+runID+"/cancel", map[string]any{}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if cancelled.Code != http.StatusOK {
+		t.Fatalf("cancel status=%d body=%s", cancelled.Code, cancelled.Body.String())
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if !errors.Is(err, agent.ErrLeaseLost) {
+			t.Fatalf("Controller error=%v, want lease lost", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Controller did not stop after Action release")
+	}
+	if action.calls != 1 || model.calls != 1 {
+		t.Fatalf("Action/model calls=%d/%d", action.calls, model.calls)
+	}
+	var kinds []string
+	if err := api.db.Pool().QueryRow(ctx, `select array_agg(kind order by sequence_no) from agent_run_checkpoints where run_id = $1`, runID).Scan(&kinds); err != nil {
+		t.Fatal(err)
+	}
+	if len(kinds) != 1 || kinds[0] != "action_proposal" {
+		t.Fatalf("retained checkpoints=%v", kinds)
+	}
+	assertTerminalRunState(t, api, runID, chatID, "cancelled", "cancelled", "", 0)
 }
 
 func TestCompletedRunCannotBeCancelled(t *testing.T) {
@@ -409,4 +465,41 @@ func TestRetryRejectsAnotherChatsActiveRunWithoutPartialRows(t *testing.T) {
 	if sourceRuns != 1 || retryKeys != 0 {
 		t.Fatalf("rejected retry left source runs=%d idempotency rows=%d", sourceRuns, retryKeys)
 	}
+}
+
+type blockingTestAction struct {
+	started chan<- struct{}
+	release <-chan struct{}
+	calls   int
+}
+
+func (*blockingTestAction) Definition() models.ActionDefinition {
+	return models.ActionDefinition{
+		Name:        "blocking_test",
+		Description: "Deterministically block one test Action until released.",
+		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false}`),
+	}
+}
+
+func (*blockingTestAction) ValidateInput(input json.RawMessage) error {
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(input, &decoded); err != nil || decoded == nil || len(decoded) != 0 {
+		return errors.New("blocking test Action requires an empty object")
+	}
+	return nil
+}
+
+func (a *blockingTestAction) Execute(ctx context.Context, _ agent.ActionRequest) (agent.ActionResult, error) {
+	a.calls++
+	select {
+	case a.started <- struct{}{}:
+	case <-ctx.Done():
+		return agent.ActionResult{}, ctx.Err()
+	}
+	select {
+	case <-a.release:
+	case <-ctx.Done():
+		return agent.ActionResult{}, ctx.Err()
+	}
+	return agent.ActionResult{Status: agent.ActionSucceeded, Output: json.RawMessage(`{"released":true}`)}, nil
 }
