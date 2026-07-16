@@ -546,6 +546,74 @@ func TestCheckpointPrefixRejectsCorruptStoredPayload(t *testing.T) {
 	}
 }
 
+func TestPostgresCheckpointLoaderRejectsPersistedGapsAndContradictoryRows(t *testing.T) {
+	tests := []struct {
+		name     string
+		pending  func(t *testing.T) agent.PendingCheckpoint
+		sequence int
+	}{
+		{
+			name: "sequence gap",
+			pending: func(t *testing.T) agent.PendingCheckpoint {
+				t.Helper()
+				pending, err := agent.NewFinalDraftCheckpoint(1, models.FinalDraft{Text: "Illegally stored after a gap."})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return pending
+			},
+			sequence: 2,
+		},
+		{
+			name: "result without proposal",
+			pending: func(t *testing.T) agent.PendingCheckpoint {
+				t.Helper()
+				pending, err := agent.NewActionResultCheckpoint(1, 0, "decision:1/action:0", agent.ActionResult{
+					Status: agent.ActionSucceeded, Output: []byte(`{"value":"3"}`),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return pending
+			},
+			sequence: 1,
+		},
+	}
+	for index, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "checkpoint-illegal-row-"+string(rune('a'+index))+"@example.com")
+			_ = admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c09"+string(rune('0'+index)))
+			ctx := context.Background()
+			claimed, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(ctx)
+			if err != nil || !ok {
+				t.Fatalf("claim=%+v ok=%t err=%v", claimed, ok, err)
+			}
+			pending := tt.pending(t)
+			var actionIndex any
+			if pending.ActionIndex != nil {
+				actionIndex = *pending.ActionIndex
+			}
+			var actionID any
+			if pending.ActionID != "" {
+				actionID = pending.ActionID
+			}
+			if _, err := api.db.Pool().Exec(ctx, `
+				insert into agent_run_checkpoints(
+					run_id, sequence_no, identity_key, kind, decision_no,
+					action_index, action_id, payload_version, payload, payload_sha256
+				) values($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10)`,
+				claimed.RunID, tt.sequence, pending.IdentityKey, string(pending.Kind), pending.DecisionNo,
+				actionIndex, actionID, pending.PayloadVersion, []byte(pending.Payload), pending.PayloadSHA256,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := agent.NewPostgresRuntime(api.db.Pool(), "", nil).LoadCheckpointPrefix(ctx, attemptFromClaim(claimed)); !errors.Is(err, agent.ErrCheckpointInvalid) {
+				t.Fatalf("illegal PostgreSQL prefix error=%v, want checkpoint_invalid", err)
+			}
+		})
+	}
+}
+
 func TestCheckpointConcurrentReplayCommitsOneRow(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "checkpoint-concurrent-replay@example.com")
 	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c067")
