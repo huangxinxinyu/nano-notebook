@@ -592,6 +592,60 @@ func TestMigrationsInstallSprint3RunConfiguration(t *testing.T) {
 	}
 }
 
+func TestMigrationsUpgradePopulatedSprint2BRunConfiguration(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "migration-sprint2b@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c046")
+	ctx := context.Background()
+	if _, err := api.db.Pool().Exec(ctx, `
+		alter table agent_runs drop column time_zone;
+		alter table agent_runs drop column deadline_at;
+		alter table agent_runs drop column action_decision_limit;
+		alter table agent_runs drop column final_decision_limit;
+		alter table agent_runs drop column action_limit;
+		alter table agent_runs drop column action_batch_limit;
+		alter table agent_runs drop column action_result_byte_limit;
+		alter table agent_runs drop column action_results_byte_limit;`); err != nil {
+		t.Fatal(err)
+	}
+
+	migrationStarted := time.Now().UTC()
+	if err := app.RunMigrations(ctx, api.db); err != nil {
+		t.Fatalf("Sprint 2B upgrade migration: %v", err)
+	}
+	var runStatus, jobStatus, timeZone string
+	var deadlineAt time.Time
+	var actionDecisionLimit, finalDecisionLimit, actionLimit, actionBatchLimit int
+	var actionResultByteLimit, actionResultsByteLimit int
+	if err := api.db.Pool().QueryRow(ctx, `
+		select r.status, j.status, r.time_zone, r.deadline_at,
+			r.action_decision_limit, r.final_decision_limit, r.action_limit,
+			r.action_batch_limit, r.action_result_byte_limit, r.action_results_byte_limit
+		from agent_runs r join agent_jobs j on j.run_id = r.id
+		where r.id = $1`, runID).Scan(
+		&runStatus, &jobStatus, &timeZone, &deadlineAt,
+		&actionDecisionLimit, &finalDecisionLimit, &actionLimit,
+		&actionBatchLimit, &actionResultByteLimit, &actionResultsByteLimit,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "queued" || jobStatus != "queued" || timeZone != "UTC" {
+		t.Fatalf("upgraded active state run=%q job=%q zone=%q", runStatus, jobStatus, timeZone)
+	}
+	if actionDecisionLimit != 4 || finalDecisionLimit != 1 || actionLimit != 8 || actionBatchLimit != 4 || actionResultByteLimit != 16*1024 || actionResultsByteLimit != 64*1024 {
+		t.Fatalf("upgraded budgets=%d+%d/%d/%d/%d/%d", actionDecisionLimit, finalDecisionLimit, actionLimit, actionBatchLimit, actionResultByteLimit, actionResultsByteLimit)
+	}
+	if deadlineAt.Before(migrationStarted.Add(9*time.Minute+50*time.Second)) || deadlineAt.After(migrationStarted.Add(10*time.Minute+10*time.Second)) {
+		t.Fatalf("upgraded deadline_at = %s, want approximately ten minutes after migration", deadlineAt)
+	}
+	var messages int
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from chat_messages where chat_id = $1`, chatID).Scan(&messages); err != nil {
+		t.Fatal(err)
+	}
+	if messages != 1 {
+		t.Fatalf("preserved chat message count = %d, want 1", messages)
+	}
+}
+
 func TestMigrationsUpgradeAPopulatedSprint2ADatabase(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "migration-2a@example.com")
 	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c026")
