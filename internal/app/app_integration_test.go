@@ -10,6 +10,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
 )
@@ -521,6 +522,73 @@ func TestMigrationsReapplyAndInstallRLSBoundary(t *testing.T) {
 	}
 	if visibleWithPrincipal != 1 {
 		t.Fatalf("visible notebooks with owner principal = %d, want 1", visibleWithPrincipal)
+	}
+}
+
+func TestMigrationsInstallSprint3RunConfiguration(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "migration-sprint3-config@example.com")
+	ctx := context.Background()
+
+	wantColumns := []string{
+		"time_zone",
+		"deadline_at",
+		"action_decision_limit",
+		"final_decision_limit",
+		"action_limit",
+		"action_batch_limit",
+		"action_result_byte_limit",
+		"action_results_byte_limit",
+	}
+	rows, err := api.db.Pool().Query(ctx, `
+		select column_name
+		from information_schema.columns
+		where table_schema = 'public' and table_name = 'agent_runs'
+			and column_name = any($1::text[])
+		order by column_name`, wantColumns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	found := make(map[string]bool, len(wantColumns))
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		found[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range wantColumns {
+		if !found[name] {
+			t.Errorf("Sprint 3 agent_runs column %q is missing", name)
+		}
+	}
+	if t.Failed() {
+		return
+	}
+
+	admittedAfter := time.Now().UTC()
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c036")
+	var timeZone string
+	var deadlineAt time.Time
+	var actionDecisionLimit, finalDecisionLimit, actionLimit, actionBatchLimit int
+	var actionResultByteLimit, actionResultsByteLimit int
+	if err := api.db.Pool().QueryRow(ctx, `
+		select time_zone, deadline_at, action_decision_limit, final_decision_limit,
+			action_limit, action_batch_limit, action_result_byte_limit, action_results_byte_limit
+		from agent_runs where id = $1`, runID).Scan(
+		&timeZone, &deadlineAt, &actionDecisionLimit, &finalDecisionLimit,
+		&actionLimit, &actionBatchLimit, &actionResultByteLimit, &actionResultsByteLimit,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if timeZone != "UTC" || actionDecisionLimit != 4 || finalDecisionLimit != 1 || actionLimit != 8 || actionBatchLimit != 4 || actionResultByteLimit != 16*1024 || actionResultsByteLimit != 64*1024 {
+		t.Fatalf("unexpected Sprint 3 defaults: zone=%q decisions=%d+%d actions=%d batch=%d bytes=%d/%d", timeZone, actionDecisionLimit, finalDecisionLimit, actionLimit, actionBatchLimit, actionResultByteLimit, actionResultsByteLimit)
+	}
+	if deadlineAt.Before(admittedAfter.Add(9*time.Minute+50*time.Second)) || deadlineAt.After(admittedAfter.Add(10*time.Minute+10*time.Second)) {
+		t.Fatalf("deadline_at = %s, want approximately ten minutes after admission", deadlineAt)
 	}
 }
 

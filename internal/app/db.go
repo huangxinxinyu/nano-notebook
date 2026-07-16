@@ -197,6 +197,14 @@ create table if not exists agent_runs (
 	status text not null check (status in ('queued', 'running', 'completed', 'failed', 'cancelled')),
 	model text not null,
 	prompt_version text not null,
+	time_zone text not null default 'UTC',
+	deadline_at timestamptz not null default (now() + interval '10 minutes'),
+	action_decision_limit integer not null default 4,
+	final_decision_limit integer not null default 1,
+	action_limit integer not null default 8,
+	action_batch_limit integer not null default 4,
+	action_result_byte_limit integer not null default 16384,
+	action_results_byte_limit integer not null default 65536,
 	iteration_count integer not null default 0 check (iteration_count between 0 and 1),
 	finish_reason text,
 	prompt_tokens integer check (prompt_tokens is null or prompt_tokens >= 0),
@@ -254,6 +262,14 @@ alter table agent_runs drop constraint if exists agent_runs_input_message_id_key
 alter table agent_runs drop constraint if exists agent_runs_status_check;
 alter table agent_runs add constraint agent_runs_status_check
 	check (status in ('queued', 'running', 'completed', 'failed', 'cancelled'));
+alter table agent_runs add column if not exists time_zone text not null default 'UTC';
+alter table agent_runs add column if not exists deadline_at timestamptz not null default (now() + interval '10 minutes');
+alter table agent_runs add column if not exists action_decision_limit integer not null default 4;
+alter table agent_runs add column if not exists final_decision_limit integer not null default 1;
+alter table agent_runs add column if not exists action_limit integer not null default 8;
+alter table agent_runs add column if not exists action_batch_limit integer not null default 4;
+alter table agent_runs add column if not exists action_result_byte_limit integer not null default 16384;
+alter table agent_runs add column if not exists action_results_byte_limit integer not null default 65536;
 
 alter table agent_jobs add column if not exists attempt_no integer not null default 0;
 alter table agent_jobs add column if not exists lease_token uuid;
