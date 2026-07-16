@@ -192,7 +192,7 @@ func TestDecisionContextReconstructsCompletedCheckpointBatches(t *testing.T) {
 	}
 }
 
-func TestCheckpointAppendReconcilesCommittedWriteAfterAcknowledgementLoss(t *testing.T) {
+func TestEveryCheckpointKindReconcilesCommitAcknowledgementLossAndRejectsConflict(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "checkpoint-uncertain-commit@example.com")
 	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c061")
 	ctx := context.Background()
@@ -206,30 +206,130 @@ func TestCheckpointAppendReconcilesCommittedWriteAfterAcknowledgementLoss(t *tes
 		if err := tx.Commit(ctx); err != nil {
 			return err
 		}
-		if commitCalls == 1 {
-			return errors.New("simulated lost commit acknowledgement")
-		}
-		return nil
+		return errors.New("simulated lost commit acknowledgement")
 	}))
-	pending, err := agent.NewFinalDraftCheckpoint(1, models.FinalDraft{Text: "The durable answer."})
+	proposal, err := agent.NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{
+		{Name: "calculate", Input: []byte(`{"operation":"add","operands":["1","2"]}`)},
+	}})
 	if err != nil {
 		t.Fatal(err)
+	}
+	result, err := agent.NewActionResultCheckpoint(1, 0, "decision:1/action:0", agent.ActionResult{
+		Status: agent.ActionSucceeded, Output: []byte(`{"result":"3"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, err := agent.NewFinalDraftCheckpoint(2, models.FinalDraft{Text: "The durable answer."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, pending := range []agent.PendingCheckpoint{proposal, result, final} {
+		checkpoint, err := runtime.AppendCheckpoint(ctx, attemptFromClaim(claimed), pending)
+		if err != nil {
+			t.Fatalf("append %s: %v", pending.Kind, err)
+		}
+		if checkpoint.SequenceNo != index+1 {
+			t.Fatalf("%s checkpoint=%+v", pending.Kind, checkpoint)
+		}
+	}
+	if commitCalls != 3 {
+		t.Fatalf("commit calls=%d, want one uncertain commit per kind", commitCalls)
 	}
 
-	checkpoint, err := runtime.AppendCheckpoint(ctx, attemptFromClaim(claimed), pending)
+	conflictingProposal, err := agent.NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{
+		{Name: "calculate", Input: []byte(`{"operation":"add","operands":["2","2"]}`)},
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if checkpoint.SequenceNo != 1 || commitCalls != 1 {
-		t.Fatalf("checkpoint=%+v commit calls=%d", checkpoint, commitCalls)
+	conflictingResult, err := agent.NewActionResultCheckpoint(1, 0, "decision:1/action:0", agent.ActionResult{
+		Status: agent.ActionSucceeded, Output: []byte(`{"result":"4"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflictingFinal, err := agent.NewFinalDraftCheckpoint(2, models.FinalDraft{Text: "A contradictory answer."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pending := range []agent.PendingCheckpoint{conflictingProposal, conflictingResult, conflictingFinal} {
+		if _, err := runtime.AppendCheckpoint(ctx, attemptFromClaim(claimed), pending); !errors.Is(err, agent.ErrCheckpointInvalid) {
+			t.Fatalf("conflicting %s error=%v, want checkpoint_invalid", pending.Kind, err)
+		}
 	}
 	var count int
 	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_run_checkpoints where run_id = $1`, runID).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Fatalf("checkpoint count = %d, want 1", count)
+	if count != 3 {
+		t.Fatalf("checkpoint count = %d, want 3", count)
 	}
+}
+
+func TestReclaimedAttemptFencesEveryCheckpointKind(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "checkpoint-stale-kinds@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c079")
+	ctx := context.Background()
+	queue := jobs.NewQueue(api.db.Pool())
+	first, ok, err := queue.ClaimNext(ctx)
+	if err != nil || !ok {
+		t.Fatalf("first claim=%+v ok=%t err=%v", first, ok, err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `update agent_jobs set lease_expires_at = now() - interval '1 second' where id = $1`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	second, ok, err := queue.ClaimNext(ctx)
+	if err != nil || !ok {
+		t.Fatalf("second claim=%+v ok=%t err=%v", second, ok, err)
+	}
+	proposal, err := agent.NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{
+		{Name: "calculate", Input: []byte(`{"operation":"add","operands":["1","2"]}`)},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := agent.NewActionResultCheckpoint(1, 0, "decision:1/action:0", agent.ActionResult{
+		Status: agent.ActionSucceeded, Output: []byte(`{"result":"3"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, err := agent.NewFinalDraftCheckpoint(1, models.FinalDraft{Text: "Stale draft."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := agent.NewPostgresRuntime(api.db.Pool(), "", nil)
+	for _, pending := range []agent.PendingCheckpoint{proposal, result, final} {
+		if _, err := runtime.AppendCheckpoint(ctx, attemptFromClaim(first), pending); !errors.Is(err, agent.ErrLeaseLost) {
+			t.Fatalf("stale %s append error=%v, want lease lost", pending.Kind, err)
+		}
+	}
+	assertCheckpointCount(t, api, runID, 0)
+	if _, err := runtime.AppendCheckpoint(ctx, attemptFromClaim(second), proposal); err != nil {
+		t.Fatalf("current attempt append=%v", err)
+	}
+}
+
+func TestDeletingParentRunCascadesItsInternalCheckpoints(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "checkpoint-cascade@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c080")
+	ctx := context.Background()
+	claimed, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(ctx)
+	if err != nil || !ok {
+		t.Fatalf("claim=%+v ok=%t err=%v", claimed, ok, err)
+	}
+	pending, err := agent.NewFinalDraftCheckpoint(1, models.FinalDraft{Text: "Retained only with its Run."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agent.NewPostgresRuntime(api.db.Pool(), "", nil).AppendCheckpoint(ctx, attemptFromClaim(claimed), pending); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `delete from agent_runs where id = $1`, runID); err != nil {
+		t.Fatal(err)
+	}
+	assertCheckpointCount(t, api, runID, 0)
 }
 
 func TestCheckpointPrefixLoadsFirstIncompleteActionAndDerivedConsumption(t *testing.T) {
