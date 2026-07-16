@@ -561,6 +561,75 @@ func TestCheckpointConcurrentReplayCommitsOneRow(t *testing.T) {
 	assertCheckpointCount(t, api, runID, 1)
 }
 
+func TestConcurrentWorkersUnderDifferentLeasesAcceptOneMissingActionResult(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "checkpoint-concurrent-leases@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c084")
+	ctx := context.Background()
+	queue := jobs.NewQueue(api.db.Pool())
+	first, ok, err := queue.ClaimNext(ctx)
+	if err != nil || !ok {
+		t.Fatalf("first claim=%+v ok=%t err=%v", first, ok, err)
+	}
+	runtime := agent.NewPostgresRuntime(api.db.Pool(), "", nil)
+	proposal, err := agent.NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{
+		{Name: "calculate", Input: []byte(`{"operation":"add","operands":["1","2"]}`)},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.AppendCheckpoint(ctx, attemptFromClaim(first), proposal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `update agent_jobs set lease_expires_at = now() - interval '1 second' where id = $1`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	second, ok, err := queue.ClaimNext(ctx)
+	if err != nil || !ok {
+		t.Fatalf("second claim=%+v ok=%t err=%v", second, ok, err)
+	}
+	result, err := agent.NewActionResultCheckpoint(1, 0, "decision:1/action:0", agent.ActionResult{
+		Status: agent.ActionSucceeded, Output: []byte(`{"value":"3"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for _, claimed := range []jobs.ClaimedJob{first, second} {
+		claimed := claimed
+		go func() {
+			<-start
+			_, err := runtime.AppendCheckpoint(ctx, attemptFromClaim(claimed), result)
+			errs <- err
+		}()
+	}
+	close(start)
+	firstErr, secondErr := <-errs, <-errs
+	close(errs)
+	accepted, fenced := 0, 0
+	for _, err := range []error{firstErr, secondErr} {
+		switch {
+		case err == nil:
+			accepted++
+		case errors.Is(err, agent.ErrLeaseLost):
+			fenced++
+		default:
+			t.Fatalf("concurrent append error=%v", err)
+		}
+	}
+	if accepted != 1 || fenced != 1 {
+		t.Fatalf("concurrent outcomes accepted=%d fenced=%d", accepted, fenced)
+	}
+	var resultCount int
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_run_checkpoints where run_id = $1 and kind = 'action_result'`, runID).Scan(&resultCount); err != nil {
+		t.Fatal(err)
+	}
+	if resultCount != 1 {
+		t.Fatalf("Action Result rows=%d, want 1", resultCount)
+	}
+}
+
 func TestPublicationRequiresMatchingAcceptedFinalCheckpoint(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "checkpoint-publication-barrier@example.com")
 	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c071")

@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -62,9 +63,18 @@ func TestCancelRunningRunFencesLatePublication(t *testing.T) {
 		t.Fatalf("cancel status=%d body=%s", cancelled.Code, cancelled.Body.String())
 	}
 	runtime := agent.NewPostgresRuntime(api.db.Pool(), "System prompt.", func() string { return "msg_too_late" })
-	if err := runtime.PublishFinal(context.Background(), attemptFromClaim(claimed), models.FinalDraft{Text: "Too late"}); !errors.Is(err, agent.ErrLeaseLost) {
+	draft := models.FinalDraft{Text: "Too late"}
+	pending, err := agent.NewFinalDraftCheckpoint(1, draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.AppendCheckpoint(context.Background(), attemptFromClaim(claimed), pending); !errors.Is(err, agent.ErrLeaseLost) {
+		t.Fatalf("late checkpoint error=%v, want ErrLeaseLost", err)
+	}
+	if err := runtime.PublishFinal(context.Background(), attemptFromClaim(claimed), draft); !errors.Is(err, agent.ErrLeaseLost) {
 		t.Fatalf("late publish error=%v, want ErrLeaseLost", err)
 	}
+	assertCheckpointCount(t, api, runID, 0)
 	var assistants int
 	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from chat_messages where chat_id=$1 and role='assistant'`, chatID).Scan(&assistants); err != nil {
 		t.Fatal(err)
@@ -164,6 +174,61 @@ func TestRetryCreatesANewRunForTheSameMessageAndReplaysByIdempotencyKey(t *testi
 	}
 	if messages != 1 || runs != 2 || jobCount != 2 {
 		t.Fatalf("retry rows messages=%d runs=%d jobs=%d", messages, runs, jobCount)
+	}
+}
+
+func TestConcurrentRetriesOfTheSameCommandCreateOneEmptyRun(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "retry-concurrent-command@example.com")
+	const messageID = "0190cdd2-5f2d-7ad8-b3f5-1b588788c085"
+	sourceRunID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, messageID)
+	cancelled := api.postJSONWithCookieAndCSRF(t, "/api/v1/agent-runs/"+sourceRunID+"/cancel", map[string]any{}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if cancelled.Code != http.StatusOK {
+		t.Fatalf("cancel status=%d body=%s", cancelled.Code, cancelled.Body.String())
+	}
+
+	type retryResult struct {
+		status int
+		runID  string
+		err    error
+	}
+	start := make(chan struct{})
+	results := make(chan retryResult, 2)
+	path := "/api/v1/agent-runs/" + sourceRunID + "/retry"
+	for range 2 {
+		go func() {
+			<-start
+			response := api.postJSONWithCookieAndCSRF(t, path, map[string]any{"time_zone": "Asia/Shanghai"}, sessionCookie, csrfCookie, csrfCookie.Value, "same-concurrent-retry")
+			var body struct {
+				Run agent.RunSnapshot `json:"run"`
+			}
+			err := json.Unmarshal(response.Body.Bytes(), &body)
+			results <- retryResult{status: response.Code, runID: body.Run.ID, err: err}
+		}()
+	}
+	close(start)
+	first, second := <-results, <-results
+	close(results)
+	for _, result := range []retryResult{first, second} {
+		if result.err != nil || result.status != http.StatusAccepted || result.runID == "" || result.runID == sourceRunID {
+			t.Fatalf("retry result=%+v", result)
+		}
+	}
+	if first.runID != second.runID {
+		t.Fatalf("concurrent retry Runs=%q/%q", first.runID, second.runID)
+	}
+	var runs, jobsForInput, checkpoints int
+	ctx := context.Background()
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_runs where input_message_id = $1`, messageID).Scan(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_jobs j join agent_runs r on r.id = j.run_id where r.input_message_id = $1`, messageID).Scan(&jobsForInput); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_run_checkpoints where run_id = $1`, first.runID).Scan(&checkpoints); err != nil {
+		t.Fatal(err)
+	}
+	if runs != 2 || jobsForInput != 2 || checkpoints != 0 {
+		t.Fatalf("concurrent retry rows Runs=%d Jobs=%d Checkpoints=%d", runs, jobsForInput, checkpoints)
 	}
 }
 
@@ -293,11 +358,13 @@ func TestConcurrentCancelAndPublishCommitOneConsistentTerminalOutcome(t *testing
 		if !errors.Is(publishErr, agent.ErrLeaseLost) || runStatus != "cancelled" || jobStatus != "cancelled" || assistants != 0 {
 			t.Fatalf("cancel-first outcome cancel=%d publish=%v run=%q job=%q assistants=%d", cancelResponseStatus, publishErr, runStatus, jobStatus, assistants)
 		}
+		assertCheckpointCount(t, api, runID, 1)
 		return
 	}
 	if cancelResponseStatus != http.StatusConflict || cancelErrorCode != "run_not_cancellable" || publishErr != nil || runStatus != "completed" || jobStatus != "succeeded" || assistants != 1 {
 		t.Fatalf("publish-first outcome cancel=%d/%q publish=%v run=%q job=%q assistants=%d", cancelResponseStatus, cancelErrorCode, publishErr, runStatus, jobStatus, assistants)
 	}
+	assertCheckpointCount(t, api, runID, 1)
 }
 
 func TestRetryRejectsAnotherChatsActiveRunWithoutPartialRows(t *testing.T) {
