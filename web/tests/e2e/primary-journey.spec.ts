@@ -146,6 +146,7 @@ test("desktop workspace shows sources, chat, and Studio as simultaneous panels",
   await expect(studioPanel).toBeVisible();
   await expect(sourcesPanel).toContainText("Sources are not available in Sprint 1.");
   await expect(chatPanel).toContainText("Ask from model knowledge now.");
+  await expect(chatPanel).toContainText("Answers use model knowledge and are not based on Notebook Sources.");
   await expect(chatPanel.getByRole("textbox", { name: "Message Nano Notebook" })).toBeEnabled();
   await expect(studioPanel).toContainText("Studio output will be saved here");
   await expect(page.getByRole("tablist", { name: "Notebook panels" })).toBeHidden();
@@ -186,6 +187,7 @@ test("compact workspace keeps one-panel tab navigation without horizontal overfl
   await page.getByRole("tab", { name: "Chat" }).click();
   await expect(sourcesPanel).toBeHidden();
   await expect(chatPanel).toBeVisible();
+  await expect(chatPanel).toContainText("Answers use model knowledge and are not based on Notebook Sources.");
   await expect(chatPanel.getByRole("textbox", { name: "Message Nano Notebook" })).toBeEnabled();
   await expect(studioPanel).toBeHidden();
 
