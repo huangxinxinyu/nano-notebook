@@ -25,6 +25,7 @@ type Config struct {
 	CookieSecure bool
 	Version      string
 	DefaultModel string
+	AgentRun     agent.RunConfig
 }
 
 type Server struct {
@@ -43,6 +44,7 @@ func NewServer(cfg Config, db *DB) *Server {
 	if cfg.DefaultModel == "" {
 		cfg.DefaultModel = "aliyun/qwen-flash"
 	}
+	cfg.AgentRun = normalizedRunConfig(cfg.AgentRun)
 	s := &Server{cfg: cfg, db: db, identity: identity.NewStore(db.Pool()), notebookStore: notebook.NewStore(db.Pool()), mux: http.NewServeMux(), runHub: newRunHub()}
 	s.routes()
 	return s
@@ -548,7 +550,7 @@ func (s *Server) retryRun(w http.ResponseWriter, r *http.Request, userID, source
 	var run agent.RunSnapshot
 	err = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
 		var err error
-		run, _, err = agent.NewStore(tx).RetryQueued(r.Context(), userID, sourceRunID, key, requestHash([]byte(sourceRunID+"\x00"+timeZone)), runID, jobID, timeZone)
+		run, _, err = agent.NewStore(tx).RetryQueued(r.Context(), userID, sourceRunID, key, requestHash([]byte(sourceRunID+"\x00"+timeZone)), runID, jobID, timeZone, s.cfg.AgentRun)
 		return err
 	})
 	if errors.Is(err, agent.ErrRunNotFound) {
@@ -719,7 +721,7 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		if err := chatStore.InsertUserMessage(r.Context(), req.ID, chatID, req.Content); err != nil {
 			return err
 		}
-		if err := agent.NewStore(tx).CreateQueued(r.Context(), runID, userID, chatID, req.ID, s.cfg.DefaultModel, "agent-bare-v1", normalizeBrowserTimeZone(req.TimeZone)); err != nil {
+		if err := agent.NewStore(tx).CreateQueued(r.Context(), runID, userID, chatID, req.ID, s.cfg.DefaultModel, "agent-bare-v1", normalizeBrowserTimeZone(req.TimeZone), s.cfg.AgentRun); err != nil {
 			return err
 		}
 		if err := jobs.NewStore(tx).CreateAgentRun(r.Context(), jobID, runID); err != nil {
@@ -754,6 +756,31 @@ func normalizeBrowserTimeZone(value string) string {
 	}
 	if _, err := time.LoadLocation(value); err != nil {
 		return "UTC"
+	}
+	return value
+}
+
+func normalizedRunConfig(value agent.RunConfig) agent.RunConfig {
+	if value.ActionDecisionLimit <= 0 {
+		value.ActionDecisionLimit = 4
+	}
+	if value.FinalDecisionLimit <= 0 {
+		value.FinalDecisionLimit = 1
+	}
+	if value.ActionLimit <= 0 {
+		value.ActionLimit = 8
+	}
+	if value.ActionBatchLimit <= 0 {
+		value.ActionBatchLimit = 4
+	}
+	if value.ActionResultByteLimit <= 0 {
+		value.ActionResultByteLimit = 16 * 1024
+	}
+	if value.ActionResultsByteLimit <= 0 {
+		value.ActionResultsByteLimit = 64 * 1024
+	}
+	if value.Deadline <= 0 {
+		value.Deadline = 10 * time.Minute
 	}
 	return value
 }

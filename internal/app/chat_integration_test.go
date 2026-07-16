@@ -6,6 +6,10 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/huangxinxinyu/nano-notebook/internal/agent"
+	"github.com/huangxinxinyu/nano-notebook/internal/app"
 )
 
 func TestPrivateChatCreateIsIdempotentAndRestorable(t *testing.T) {
@@ -128,6 +132,67 @@ func TestMessageAdmissionAtomicallyCreatesQueuedRunAndJob(t *testing.T) {
 	}
 	if messageCount != 1 || runCount != 1 || jobCount != 1 || runStatus != "queued" || jobStatus != "queued" || inputMessageID != messageID || jobRunID != admittedBody.RunID || timeZone != "Asia/Shanghai" {
 		t.Fatalf("durable admission message=%d run=%d/%s/%s/%s job=%d/%s/%s", messageCount, runCount, runStatus, inputMessageID, timeZone, jobCount, jobStatus, jobRunID)
+	}
+}
+
+func TestMessageAdmissionPinsConfiguredRunBudgets(t *testing.T) {
+	api := newTestAPI(t)
+	api.server = app.NewServer(app.Config{
+		CookieSecure: false,
+		AgentRun: agent.RunConfig{
+			ActionDecisionLimit:    2,
+			FinalDecisionLimit:     1,
+			ActionLimit:            5,
+			ActionBatchLimit:       2,
+			ActionResultByteLimit:  8 * 1024,
+			ActionResultsByteLimit: 24 * 1024,
+			Deadline:               3 * time.Minute,
+		},
+	}, api.db)
+	api.handler = api.server.Handler()
+	sessionCookie, csrfCookie := api.registerWithCSRF(t, "configured-admission@example.com")
+
+	createdNotebook := api.postJSONWithCookieAndCSRF(t, "/api/v1/notebooks", map[string]any{"title": "Configured Agent"}, sessionCookie, csrfCookie, csrfCookie.Value, "configured-notebook")
+	var notebookBody struct {
+		Notebook struct {
+			ID string `json:"id"`
+		} `json:"notebook"`
+	}
+	decodeBody(t, createdNotebook, &notebookBody)
+	createdChat := api.postJSONWithCookieAndCSRF(t, "/api/v1/notebooks/"+notebookBody.Notebook.ID+"/chats", map[string]any{}, sessionCookie, csrfCookie, csrfCookie.Value, "configured-chat")
+	var chatBody struct {
+		Chat struct {
+			ID string `json:"id"`
+		} `json:"chat"`
+	}
+	decodeBody(t, createdChat, &chatBody)
+
+	admittedAfter := time.Now().UTC()
+	response := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatBody.Chat.ID+"/messages", map[string]any{
+		"id": "0190cdd2-5f2d-7ad8-b3f5-1b588788c063", "content": "Pin configured limits.", "time_zone": "Europe/Paris",
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if response.Code != http.StatusAccepted {
+		t.Fatalf("admission status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		RunID string `json:"run_id"`
+	}
+	decodeBody(t, response, &body)
+	var deadlineAt time.Time
+	var decisions, finals, actions, batch, resultBytes, resultsBytes int
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select deadline_at, action_decision_limit, final_decision_limit, action_limit,
+			action_batch_limit, action_result_byte_limit, action_results_byte_limit
+		from agent_runs where id = $1`, body.RunID).Scan(
+		&deadlineAt, &decisions, &finals, &actions, &batch, &resultBytes, &resultsBytes,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if decisions != 2 || finals != 1 || actions != 5 || batch != 2 || resultBytes != 8*1024 || resultsBytes != 24*1024 {
+		t.Fatalf("pinned config=%d+%d/%d/%d/%d/%d", decisions, finals, actions, batch, resultBytes, resultsBytes)
+	}
+	if deadlineAt.Before(admittedAfter.Add(2*time.Minute+50*time.Second)) || deadlineAt.After(admittedAfter.Add(3*time.Minute+10*time.Second)) {
+		t.Fatalf("deadline_at=%s, want approximately three minutes after admission", deadlineAt)
 	}
 }
 

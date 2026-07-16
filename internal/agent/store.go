@@ -191,7 +191,7 @@ func (s *Store) Cancel(ctx context.Context, userID, runID string) (RunSnapshot, 
 	return run, nil
 }
 
-func (s *Store) RetryQueued(ctx context.Context, userID, sourceRunID, key, requestHash, runID, jobID, timeZone string) (RunSnapshot, bool, error) {
+func (s *Store) RetryQueued(ctx context.Context, userID, sourceRunID, key, requestHash, runID, jobID, timeZone string, config RunConfig) (RunSnapshot, bool, error) {
 	if _, err := s.db.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, "admit_agent_run:"+userID); err != nil {
 		return RunSnapshot{}, false, err
 	}
@@ -255,7 +255,7 @@ func (s *Store) RetryQueued(ctx context.Context, userID, sourceRunID, key, reque
 	} else if active {
 		return RunSnapshot{}, false, ErrActiveRun
 	}
-	if err := s.CreateQueued(ctx, runID, userID, chatID, inputMessageID, model, promptVersion, timeZone); err != nil {
+	if err := s.CreateQueued(ctx, runID, userID, chatID, inputMessageID, model, promptVersion, timeZone, config); err != nil {
 		return RunSnapshot{}, false, err
 	}
 	if _, err := s.db.Exec(ctx, `
@@ -287,9 +287,20 @@ func NewStore(db DBTX) *Store {
 	return &Store{db: db}
 }
 
-func (s *Store) CreateQueued(ctx context.Context, runID, userID, chatID, inputMessageID, model, promptVersion, timeZone string) error {
+func (s *Store) CreateQueued(ctx context.Context, runID, userID, chatID, inputMessageID, model, promptVersion, timeZone string, config RunConfig) error {
 	_, err := s.db.Exec(ctx, `
-		insert into agent_runs(id, user_id, chat_id, input_message_id, status, model, prompt_version, time_zone)
-		values($1, $2, $3, $4, 'queued', $5, $6, $7)`, runID, userID, chatID, inputMessageID, model, promptVersion, timeZone)
+		insert into agent_runs(
+			id, user_id, chat_id, input_message_id, status, model, prompt_version,
+			time_zone, deadline_at, action_decision_limit, final_decision_limit,
+			action_limit, action_batch_limit, action_result_byte_limit, action_results_byte_limit
+		)
+		values(
+			$1, $2, $3, $4, 'queued', $5, $6,
+			$7, now() + ($8 * interval '1 millisecond'), $9, $10, $11, $12, $13, $14
+		)`,
+		runID, userID, chatID, inputMessageID, model, promptVersion,
+		timeZone, config.Deadline.Milliseconds(), config.ActionDecisionLimit, config.FinalDecisionLimit,
+		config.ActionLimit, config.ActionBatchLimit, config.ActionResultByteLimit, config.ActionResultsByteLimit,
+	)
 	return err
 }
