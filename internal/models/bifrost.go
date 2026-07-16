@@ -238,6 +238,7 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (Mode
 					} `json:"function"`
 				} `json:"tool_calls"`
 			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal(responseBody, &decoded); err != nil {
@@ -253,11 +254,15 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (Mode
 		}
 		if len(choice.Message.ToolCalls) > 0 {
 			actions := make([]ActionProposal, 0, len(choice.Message.ToolCalls))
+			providerCallIDs := make(map[string]struct{}, len(choice.Message.ToolCalls))
 			for _, call := range choice.Message.ToolCalls {
 				var input map[string]json.RawMessage
-				if call.Type != "function" || strings.TrimSpace(call.Function.Name) == "" || json.Unmarshal([]byte(call.Function.Arguments), &input) != nil || input == nil {
+				providerCallID := strings.TrimSpace(call.ID)
+				_, duplicateID := providerCallIDs[providerCallID]
+				if providerCallID == "" || duplicateID || call.Type != "function" || strings.TrimSpace(call.Function.Name) == "" || json.Unmarshal([]byte(call.Function.Arguments), &input) != nil || input == nil {
 					return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid Bifrost tool call")}
 				}
+				providerCallIDs[providerCallID] = struct{}{}
 				var canonical bytes.Buffer
 				if err := json.Compact(&canonical, []byte(call.Function.Arguments)); err != nil {
 					return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
@@ -268,6 +273,12 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (Mode
 		}
 		if err := decision.Validate(); err != nil {
 			return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
+		}
+		if decision.Proposal != nil && choice.FinishReason != "tool_calls" {
+			return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost Action proposal has inconsistent finish reason")}
+		}
+		if decision.Final != nil && (strings.TrimSpace(choice.FinishReason) == "" || choice.FinishReason == "tool_calls") {
+			return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost Final Draft has inconsistent finish reason")}
 		}
 		return decision, nil
 	}

@@ -180,6 +180,10 @@ func TestBifrostClientRejectsInvalidDecisions(t *testing.T) {
 		{name: "malformed arguments", response: `{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"bad","type":"function","function":{"name":"calculate","arguments":"{"}}]}}]}`},
 		{name: "both variants", response: `{"choices":[{"message":{"role":"assistant","content":"text","tool_calls":[{"id":"both","type":"function","function":{"name":"current_time","arguments":"{}"}}]}}]}`},
 		{name: "neither variant", response: `{"choices":[{"message":{"role":"assistant","content":null}}]}`},
+		{name: "final with tool-call finish reason", response: `{"choices":[{"message":{"role":"assistant","content":"Contradictory final."},"finish_reason":"tool_calls"}]}`},
+		{name: "proposal with stop finish reason", response: `{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-a","type":"function","function":{"name":"current_time","arguments":"{}"}}]},"finish_reason":"stop"}]}`},
+		{name: "empty Provider call ID", response: `{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"","type":"function","function":{"name":"current_time","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`},
+		{name: "duplicate Provider call ID", response: `{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"same","type":"function","function":{"name":"current_time","arguments":"{}"}},{"id":"same","type":"function","function":{"name":"calculate","arguments":"{\"operation\":\"add\",\"operands\":[\"1\",\"2\"]}"}}]},"finish_reason":"tool_calls"}]}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
