@@ -39,11 +39,10 @@ type RunSnapshot struct {
 }
 
 type AssistantMessageSnapshot struct {
-	ID         string    `json:"id"`
-	Role       string    `json:"role"`
-	Content    string    `json:"content"`
-	AnswerMode string    `json:"answer_mode"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID        string    `json:"id"`
+	Role      string    `json:"role"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type RunProjection struct {
@@ -112,10 +111,10 @@ func (s *Store) ProjectionForUser(ctx context.Context, userID, runID string) (Ru
 	}
 	var message AssistantMessageSnapshot
 	err = s.db.QueryRow(ctx, `
-		select id, role, content, answer_mode, created_at
+		select id, role, content, created_at
 		from chat_messages
 		where id = $1`, *outputMessageID).
-		Scan(&message.ID, &message.Role, &message.Content, &message.AnswerMode, &message.CreatedAt)
+		Scan(&message.ID, &message.Role, &message.Content, &message.CreatedAt)
 	if err != nil {
 		return RunProjection{}, err
 	}

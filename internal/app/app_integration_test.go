@@ -702,6 +702,73 @@ func TestMigrationsInstallInternalCheckpointSchema(t *testing.T) {
 	}
 }
 
+func TestMigrationsRetireSprint2BSingleCallFieldsWithoutLosingHistory(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "migration-retire-fields@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c056")
+	ctx := context.Background()
+	const messageID = "msg_legacy_answer"
+	if _, err := api.db.Pool().Exec(ctx, `
+		alter table chat_messages add column if not exists answer_mode text;
+		alter table agent_runs add column if not exists iteration_count integer not null default 0;
+		alter table agent_runs add column if not exists finish_reason text;
+		alter table agent_runs add column if not exists prompt_tokens integer;
+		alter table agent_runs add column if not exists completion_tokens integer;
+		alter table agent_runs add column if not exists total_tokens integer;`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `
+		insert into chat_messages(id, chat_id, role, content, answer_mode)
+		values($1, $2, 'assistant', 'Preserved historical answer.', 'model_knowledge')`, messageID, chatID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `
+		update agent_runs
+		set output_message_id = $1, status = 'completed', iteration_count = 1,
+			finish_reason = 'stop', prompt_tokens = 12, completion_tokens = 8,
+			total_tokens = 20, finished_at = now(), updated_at = now()
+		where id = $2`, messageID, runID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `
+		update agent_jobs
+		set status = 'succeeded', finished_at = now(), updated_at = now()
+		where run_id = $1`, runID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.RunMigrations(ctx, api.db); err != nil {
+		t.Fatalf("retire Sprint 2B fields migration: %v", err)
+	}
+	var legacyColumns int
+	if err := api.db.Pool().QueryRow(ctx, `
+		select count(*)
+		from information_schema.columns
+		where table_schema = 'public' and (
+			(table_name = 'chat_messages' and column_name = 'answer_mode')
+			or (table_name = 'agent_runs' and column_name in (
+				'iteration_count', 'finish_reason', 'prompt_tokens', 'completion_tokens', 'total_tokens'
+			))
+		)`).Scan(&legacyColumns); err != nil {
+		t.Fatal(err)
+	}
+	if legacyColumns != 0 {
+		t.Fatalf("obsolete Sprint 2B columns remaining = %d, want 0", legacyColumns)
+	}
+
+	var content, runStatus, jobStatus string
+	if err := api.db.Pool().QueryRow(ctx, `
+		select m.content, r.status, j.status
+		from chat_messages m
+		join agent_runs r on r.output_message_id = m.id
+		join agent_jobs j on j.run_id = r.id
+		where m.id = $1`, messageID).Scan(&content, &runStatus, &jobStatus); err != nil {
+		t.Fatal(err)
+	}
+	if content != "Preserved historical answer." || runStatus != "completed" || jobStatus != "succeeded" {
+		t.Fatalf("history after migration content=%q run=%q job=%q", content, runStatus, jobStatus)
+	}
+}
+
 func TestMigrationsUpgradeAPopulatedSprint2ADatabase(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "migration-2a@example.com")
 	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c026")

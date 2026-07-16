@@ -36,12 +36,11 @@ type Chat struct {
 }
 
 type Message struct {
-	ID         string    `json:"id"`
-	ChatID     string    `json:"chat_id"`
-	Role       string    `json:"role"`
-	Content    string    `json:"content"`
-	AnswerMode *string   `json:"answer_mode"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID        string    `json:"id"`
+	ChatID    string    `json:"chat_id"`
+	Role      string    `json:"role"`
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 func NewStore(db DBTX) *Store {
@@ -162,7 +161,7 @@ func (s *Store) MessageByID(ctx context.Context, messageID string) (Message, boo
 
 func (s *Store) ListMessages(ctx context.Context, chatID string) ([]Message, error) {
 	rows, err := s.db.Query(ctx, `
-		select id, chat_id, role, content, answer_mode, created_at
+		select id, chat_id, role, content, created_at
 		from chat_messages
 		where chat_id = $1
 		order by created_at, id`, chatID)
@@ -173,7 +172,7 @@ func (s *Store) ListMessages(ctx context.Context, chatID string) ([]Message, err
 	messages := make([]Message, 0)
 	for rows.Next() {
 		var message Message
-		if err := rows.Scan(&message.ID, &message.ChatID, &message.Role, &message.Content, &message.AnswerMode, &message.CreatedAt); err != nil {
+		if err := rows.Scan(&message.ID, &message.ChatID, &message.Role, &message.Content, &message.CreatedAt); err != nil {
 			return nil, err
 		}
 		messages = append(messages, message)

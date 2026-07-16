@@ -49,10 +49,13 @@ func TestRunSSEReconnectSendsTheCompletedDurableSnapshot(t *testing.T) {
 		t.Fatalf("SSE content type = %q", contentType)
 	}
 	body := events.Body.String()
-	for _, expected := range []string{`event: run`, `"status":"completed"`, `"id":"msg_sse_answer"`, `"content":"The durable answer."`, `"answer_mode":"model_knowledge"`} {
+	for _, expected := range []string{`event: run`, `"status":"completed"`, `"id":"msg_sse_answer"`, `"content":"The durable answer."`} {
 		if !strings.Contains(body, expected) {
 			t.Fatalf("SSE body missing %q: %s", expected, body)
 		}
+	}
+	if strings.Contains(body, "answer_mode") {
+		t.Fatalf("SSE body exposes retired answer_mode: %s", body)
 	}
 }
 

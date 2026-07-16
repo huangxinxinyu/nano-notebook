@@ -178,10 +178,6 @@ create table if not exists chat_messages (
 	chat_id text not null references chat_chats(id) on delete cascade,
 	role text not null check (role in ('user', 'assistant')),
 	content text not null check (char_length(content) between 1 and 65536),
-	answer_mode text check (
-		(role = 'user' and answer_mode is null)
-		or (role = 'assistant' and answer_mode = 'model_knowledge')
-	),
 	created_at timestamptz not null default now()
 );
 
@@ -205,11 +201,6 @@ create table if not exists agent_runs (
 	action_batch_limit integer not null default 4,
 	action_result_byte_limit integer not null default 16384,
 	action_results_byte_limit integer not null default 65536,
-	iteration_count integer not null default 0 check (iteration_count between 0 and 1),
-	finish_reason text,
-	prompt_tokens integer check (prompt_tokens is null or prompt_tokens >= 0),
-	completion_tokens integer check (completion_tokens is null or completion_tokens >= 0),
-	total_tokens integer check (total_tokens is null or total_tokens >= 0),
 	error_code text,
 	created_at timestamptz not null default now(),
 	started_at timestamptz,
@@ -291,6 +282,12 @@ alter table agent_runs add column if not exists action_limit integer not null de
 alter table agent_runs add column if not exists action_batch_limit integer not null default 4;
 alter table agent_runs add column if not exists action_result_byte_limit integer not null default 16384;
 alter table agent_runs add column if not exists action_results_byte_limit integer not null default 65536;
+alter table chat_messages drop column if exists answer_mode;
+alter table agent_runs drop column if exists iteration_count;
+alter table agent_runs drop column if exists finish_reason;
+alter table agent_runs drop column if exists prompt_tokens;
+alter table agent_runs drop column if exists completion_tokens;
+alter table agent_runs drop column if exists total_tokens;
 
 alter table agent_jobs add column if not exists attempt_no integer not null default 0;
 alter table agent_jobs add column if not exists lease_token uuid;

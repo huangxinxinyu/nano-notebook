@@ -187,23 +187,18 @@ func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, mess
 		return errors.New("Run is no longer authorized to publish")
 	}
 	if _, err := tx.Exec(ctx, `
-		insert into chat_messages(id, chat_id, role, content, answer_mode)
-		values($1, $2, 'assistant', $3, 'model_knowledge')`, messageID, chatID, result.Text); err != nil {
+		insert into chat_messages(id, chat_id, role, content)
+		values($1, $2, 'assistant', $3)`, messageID, chatID, result.Text); err != nil {
 		return err
 	}
 	runTag, err := tx.Exec(ctx, `
 		update agent_runs
 		set output_message_id = $2,
 			status = 'completed',
-			iteration_count = 1,
-			finish_reason = $3,
-			prompt_tokens = $4,
-			completion_tokens = $5,
-			total_tokens = $6,
 			error_code = null,
 			finished_at = now(),
 			updated_at = now()
-		where id = $1 and status = 'running' and output_message_id is null`, attempt.RunID, messageID, result.FinishReason, result.PromptTokens, result.CompletionTokens, result.TotalTokens)
+		where id = $1 and status = 'running' and output_message_id is null`, attempt.RunID, messageID)
 	if err != nil {
 		return err
 	}
@@ -295,7 +290,7 @@ func (r *PostgresRuntime) Fail(ctx context.Context, attempt Attempt, errorCode s
 	}
 	runTag, err := tx.Exec(ctx, `
 		update agent_runs
-		set status = 'failed', iteration_count = 1, error_code = $2, finished_at = now(), updated_at = now()
+		set status = 'failed', error_code = $2, finished_at = now(), updated_at = now()
 		where id = $1 and status = 'running' and output_message_id is null`, attempt.RunID, errorCode)
 	if err != nil {
 		return err

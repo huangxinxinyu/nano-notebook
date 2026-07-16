@@ -72,25 +72,24 @@ func TestWorkerClaimsBuildsContextAndPublishesOneAnswer(t *testing.T) {
 		t.Fatalf("model context = %+v", modelRequest.Messages)
 	}
 
-	var runStatus, jobStatus, outputMessageID, role, content, answerMode string
-	var iteration, promptTokens, completionTokens, totalTokens int
+	var runStatus, jobStatus, outputMessageID, role, content string
 	if err := api.db.Pool().QueryRow(ctx, `
-		select status, output_message_id, iteration_count, prompt_tokens, completion_tokens, total_tokens
+		select status, output_message_id
 		from agent_runs where id = $1`, admittedBody.RunID).
-		Scan(&runStatus, &outputMessageID, &iteration, &promptTokens, &completionTokens, &totalTokens); err != nil {
+		Scan(&runStatus, &outputMessageID); err != nil {
 		t.Fatal(err)
 	}
 	if err := api.db.Pool().QueryRow(ctx, `select status from agent_jobs where run_id = $1`, admittedBody.RunID).Scan(&jobStatus); err != nil {
 		t.Fatal(err)
 	}
-	if err := api.db.Pool().QueryRow(ctx, `select role, content, answer_mode from chat_messages where id = $1`, outputMessageID).Scan(&role, &content, &answerMode); err != nil {
+	if err := api.db.Pool().QueryRow(ctx, `select role, content from chat_messages where id = $1`, outputMessageID).Scan(&role, &content); err != nil {
 		t.Fatal(err)
 	}
-	if runStatus != "completed" || jobStatus != "succeeded" || outputMessageID != "msg_worker_answer" || iteration != 1 || promptTokens != 12 || completionTokens != 8 || totalTokens != 20 {
-		t.Fatalf("terminal state run=%s job=%s output=%s iteration=%d usage=%d/%d/%d", runStatus, jobStatus, outputMessageID, iteration, promptTokens, completionTokens, totalTokens)
+	if runStatus != "completed" || jobStatus != "succeeded" || outputMessageID != "msg_worker_answer" {
+		t.Fatalf("terminal state run=%s job=%s output=%s", runStatus, jobStatus, outputMessageID)
 	}
-	if role != "assistant" || content != "It makes provisional output durable exactly once." || answerMode != "model_knowledge" {
-		t.Fatalf("published message role=%q content=%q mode=%q", role, content, answerMode)
+	if role != "assistant" || content != "It makes provisional output durable exactly once." {
+		t.Fatalf("published message role=%q content=%q", role, content)
 	}
 }
 
@@ -154,15 +153,13 @@ func TestContextBuilderSelectsTheLatestTwentyDurableMessages(t *testing.T) {
 	ctx := context.Background()
 	for i := 1; i <= 25; i++ {
 		role := "user"
-		answerMode := any(nil)
 		if i%2 == 0 {
 			role = "assistant"
-			answerMode = "model_knowledge"
 		}
 		if _, err := api.db.Pool().Exec(ctx, `
-			insert into chat_messages(id, chat_id, role, content, answer_mode, created_at)
-			values($1, $2, $3, $4, $5, timestamp with time zone '2026-07-14 00:00:00+00' + ($6 * interval '1 second'))`,
-			messageIDForIndex(i), chatID, role, messageContentForIndex(i), answerMode, i); err != nil {
+			insert into chat_messages(id, chat_id, role, content, created_at)
+			values($1, $2, $3, $4, timestamp with time zone '2026-07-14 00:00:00+00' + ($5 * interval '1 second'))`,
+			messageIDForIndex(i), chatID, role, messageContentForIndex(i), i); err != nil {
 			t.Fatal(err)
 		}
 	}
