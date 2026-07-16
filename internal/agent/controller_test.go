@@ -189,6 +189,127 @@ func TestControllerPublishesAcceptedFinalAfterRecoveryWithoutModelCall(t *testin
 	}
 }
 
+func TestControllerRejectsAnInvalidWholeBatchWithoutPartialAcceptance(t *testing.T) {
+	executionOrder := make([]string, 0)
+	registry, err := NewActionRegistry(&recordingAction{name: "record", order: &executionOrder})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &controllerRuntimeStub{execution: defaultControllerExecution()}
+	model := &decisionModelStub{decisions: []models.ModelDecision{{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{
+		{Name: "record", Input: json.RawMessage(`{"value":"valid-first"}`)},
+		{Name: "record", Input: json.RawMessage(`{"value":""}`)},
+	}}}}}
+
+	if err := NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt); err == nil {
+		t.Fatal("invalid whole batch returned nil error")
+	}
+	if len(runtime.failed) != 1 || runtime.failed[0] != string(models.ErrorInvalidResponse) {
+		t.Fatalf("failure codes=%v", runtime.failed)
+	}
+	if len(runtime.checkpoints) != 0 || len(executionOrder) != 0 || len(runtime.published) != 0 {
+		t.Fatalf("partially accepted batch checkpoints=%v Actions=%v published=%v", runtime.checkpoints, executionOrder, runtime.published)
+	}
+}
+
+func TestControllerDerivesActionResultByteBudgetsFromAcceptedCheckpoints(t *testing.T) {
+	t.Run("one result", func(t *testing.T) {
+		executionOrder := make([]string, 0, 1)
+		registry, err := NewActionRegistry(&recordingAction{name: "record", order: &executionOrder})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime := &controllerRuntimeStub{execution: defaultControllerExecution()}
+		runtime.execution.ActionResultByteLimit = 1
+		model := &decisionModelStub{decisions: []models.ModelDecision{{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{
+			{Name: "record", Input: json.RawMessage(`{"value":"too-large"}`)},
+		}}}}}
+
+		if err := NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt); err == nil {
+			t.Fatal("per-result byte overflow returned nil error")
+		}
+		if len(runtime.failed) != 1 || runtime.failed[0] != ErrorAgentBudgetExhausted || len(runtime.checkpoints) != 1 || runtime.checkpoints[0].Kind != CheckpointActionProposal {
+			t.Fatalf("failure/checkpoints=%v/%+v", runtime.failed, runtime.checkpoints)
+		}
+	})
+
+	t.Run("run total", func(t *testing.T) {
+		executionOrder := make([]string, 0, 1)
+		registry, err := NewActionRegistry(&recordingAction{name: "record", order: &executionOrder})
+		if err != nil {
+			t.Fatal(err)
+		}
+		proposal, err := NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{
+			{Name: "record", Input: json.RawMessage(`{"value":"accepted"}`)},
+			{Name: "record", Input: json.RawMessage(`{"value":"resume"}`)},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		acceptedResult, err := NewActionResultCheckpoint(1, 0, "decision:1/action:0", ActionResult{
+			Status: ActionSucceeded, Output: json.RawMessage(`{"recorded":"accepted"}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		nextResult, err := NewActionResultCheckpoint(1, 1, "decision:1/action:1", ActionResult{
+			Status: ActionSucceeded, Output: json.RawMessage(`{"recorded":"resume"}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		runtime := &controllerRuntimeStub{
+			execution: defaultControllerExecution(),
+			checkpoints: []Checkpoint{
+				{SequenceNo: 1, PendingCheckpoint: proposal},
+				{SequenceNo: 2, PendingCheckpoint: acceptedResult},
+			},
+		}
+		runtime.execution.ActionResultsByteLimit = len(acceptedResult.Payload) + len(nextResult.Payload) - 1
+
+		if err := NewController(runtime, &decisionModelStub{}, registry).Execute(context.Background(), runtime.execution.Attempt); err == nil {
+			t.Fatal("total result byte overflow returned nil error")
+		}
+		if len(executionOrder) != 1 || executionOrder[0] != "resume" || len(runtime.checkpoints) != 2 || len(runtime.failed) != 1 || runtime.failed[0] != ErrorAgentBudgetExhausted {
+			t.Fatalf("Action/checkpoints/failure=%v/%+v/%v", executionOrder, runtime.checkpoints, runtime.failed)
+		}
+	})
+}
+
+func TestControllerCallsModelAgainWhenProposalWasNotAccepted(t *testing.T) {
+	executionOrder := make([]string, 0, 1)
+	registry, err := NewActionRegistry(&recordingAction{name: "record", order: &executionOrder})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &controllerRuntimeStub{
+		execution:    defaultControllerExecution(),
+		appendErrors: []error{errors.New("simulated process loss before proposal commit")},
+	}
+	proposal := models.ModelDecision{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{
+		{Name: "record", Input: json.RawMessage(`{"value":"repeat-model-only"}`)},
+	}}}
+	model := &decisionModelStub{decisions: []models.ModelDecision{
+		proposal,
+		proposal,
+		{Final: &models.FinalDraft{Text: "Recovered after an unaccepted response."}},
+	}}
+	controller := NewController(runtime, model, registry)
+
+	if err := controller.Execute(context.Background(), runtime.execution.Attempt); err == nil {
+		t.Fatal("simulated pre-commit loss returned nil error")
+	}
+	if len(model.requests) != 1 || len(runtime.checkpoints) != 0 || len(executionOrder) != 0 || len(runtime.failed) != 0 {
+		t.Fatalf("first attempt model/checkpoints/Actions/failures=%d/%v/%v/%v", len(model.requests), runtime.checkpoints, executionOrder, runtime.failed)
+	}
+	if err := controller.Execute(context.Background(), runtime.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	if len(model.requests) != 3 || len(executionOrder) != 1 || len(runtime.checkpoints) != 3 || len(runtime.published) != 1 {
+		t.Fatalf("recovery model/Actions/checkpoints/published=%d/%v/%+v/%v", len(model.requests), executionOrder, runtime.checkpoints, runtime.published)
+	}
+}
+
 func defaultControllerExecution() Execution {
 	return Execution{
 		Attempt:                Attempt{JobID: "job_controller", RunID: "run_controller", AttemptNo: 1, LeaseToken: "00000000-0000-0000-0000-000000000001"},
@@ -211,6 +332,7 @@ type controllerRuntimeStub struct {
 	published       []models.FinalDraft
 	failed          []string
 	authorityChecks int
+	appendErrors    []error
 }
 
 func (r *controllerRuntimeStub) Load(_ context.Context, _ Attempt) (Execution, error) {
@@ -231,6 +353,11 @@ func (r *controllerRuntimeStub) CheckAuthority(context.Context, Attempt) error {
 }
 
 func (r *controllerRuntimeStub) AppendCheckpoint(ctx context.Context, _ Attempt, pending PendingCheckpoint) (Checkpoint, error) {
+	if len(r.appendErrors) > 0 {
+		err := r.appendErrors[0]
+		r.appendErrors = r.appendErrors[1:]
+		return Checkpoint{}, err
+	}
 	checkpoint := Checkpoint{SequenceNo: len(r.checkpoints) + 1, PendingCheckpoint: pending, CreatedAt: time.Now()}
 	candidate := append(append([]Checkpoint(nil), r.checkpoints...), checkpoint)
 	if _, err := LoadCheckpointPrefix(ctx, candidate); err != nil {
@@ -270,8 +397,11 @@ func (m *decisionModelStub) Decide(_ context.Context, request models.ModelReques
 }
 
 type recordingAction struct {
-	name  string
-	order *[]string
+	name    string
+	order   *[]string
+	calls   int
+	started chan<- struct{}
+	proceed <-chan struct{}
 }
 
 func (a *recordingAction) Definition() models.ActionDefinition {
@@ -300,6 +430,21 @@ func (a *recordingAction) Execute(ctx context.Context, request ActionRequest) (A
 	}
 	if err := json.Unmarshal(request.Input, &input); err != nil {
 		return ActionResult{}, err
+	}
+	a.calls++
+	if a.started != nil {
+		select {
+		case a.started <- struct{}{}:
+		case <-ctx.Done():
+			return ActionResult{}, ctx.Err()
+		}
+	}
+	if a.proceed != nil {
+		select {
+		case <-a.proceed:
+		case <-ctx.Done():
+			return ActionResult{}, ctx.Err()
+		}
 	}
 	*a.order = append(*a.order, input.Value)
 	output, _ := json.Marshal(map[string]string{"recorded": input.Value})
