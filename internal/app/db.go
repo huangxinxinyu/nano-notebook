@@ -232,6 +232,27 @@ create unique index if not exists agent_runs_one_completed_per_input_idx
 create index if not exists agent_runs_chat_recent_idx
 	on agent_runs(chat_id, created_at desc, id desc);
 
+create table if not exists agent_run_checkpoints (
+	run_id text not null references agent_runs(id) on delete cascade,
+	sequence_no integer not null check (sequence_no >= 1),
+	identity_key text not null check (char_length(identity_key) between 1 and 160),
+	kind text not null check (kind in ('action_proposal', 'action_result', 'final_draft')),
+	decision_no integer not null check (decision_no >= 1),
+	action_index integer,
+	action_id text,
+	payload_version integer not null default 1 check (payload_version >= 1),
+	payload jsonb not null check (jsonb_typeof(payload) = 'object'),
+	payload_sha256 text not null check (payload_sha256 ~ '^[0-9a-f]{64}$'),
+	created_at timestamptz not null default now(),
+	primary key (run_id, sequence_no),
+	unique (run_id, identity_key),
+	constraint agent_run_checkpoints_kind_shape_check check (
+		(kind = 'action_proposal' and action_index is null and action_id is null)
+		or (kind = 'action_result' and action_index >= 0 and char_length(action_id) >= 1)
+		or (kind = 'final_draft' and action_index is null and action_id is null)
+	)
+);
+
 create table if not exists agent_jobs (
 	id text primary key,
 	kind text not null check (kind = 'agent_run'),
@@ -304,6 +325,7 @@ alter table platform_idempotency_keys enable row level security;
 alter table chat_chats enable row level security;
 alter table chat_messages enable row level security;
 alter table agent_runs enable row level security;
+alter table agent_run_checkpoints enable row level security;
 alter table agent_jobs enable row level security;
 
 grant usage on schema public to nano_app, nano_worker;
@@ -331,6 +353,8 @@ grant select on
 to nano_worker;
 grant select, insert, update, delete on agent_jobs to nano_worker;
 grant insert, update on chat_messages, chat_chats, agent_runs to nano_worker;
+revoke all on agent_run_checkpoints from nano_app, nano_worker;
+grant select, insert on agent_run_checkpoints to nano_worker;
 
 drop policy if exists identity_users_owner on identity_users;
 create policy identity_users_owner on identity_users
@@ -439,6 +463,16 @@ drop policy if exists agent_runs_worker on agent_runs;
 create policy agent_runs_worker on agent_runs
 	for all to nano_worker
 	using (true)
+	with check (true);
+
+drop policy if exists agent_run_checkpoints_worker_read on agent_run_checkpoints;
+create policy agent_run_checkpoints_worker_read on agent_run_checkpoints
+	for select to nano_worker
+	using (true);
+
+drop policy if exists agent_run_checkpoints_worker_append on agent_run_checkpoints;
+create policy agent_run_checkpoints_worker_append on agent_run_checkpoints
+	for insert to nano_worker
 	with check (true);
 
 drop policy if exists agent_jobs_private on agent_jobs;

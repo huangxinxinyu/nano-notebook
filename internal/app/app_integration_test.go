@@ -646,6 +646,62 @@ func TestMigrationsUpgradePopulatedSprint2BRunConfiguration(t *testing.T) {
 	}
 }
 
+func TestMigrationsInstallInternalCheckpointSchema(t *testing.T) {
+	api := newTestAPI(t)
+	ctx := context.Background()
+	var exists bool
+	if err := api.db.Pool().QueryRow(ctx, `select to_regclass('public.agent_run_checkpoints') is not null`).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Fatal("agent_run_checkpoints table is missing")
+	}
+
+	wantColumns := []string{
+		"run_id",
+		"sequence_no",
+		"identity_key",
+		"kind",
+		"decision_no",
+		"action_index",
+		"action_id",
+		"payload_version",
+		"payload",
+		"payload_sha256",
+		"created_at",
+	}
+	var columns int
+	if err := api.db.Pool().QueryRow(ctx, `
+		select count(*)
+		from information_schema.columns
+		where table_schema = 'public' and table_name = 'agent_run_checkpoints'
+			and column_name = any($1::text[])`, wantColumns).Scan(&columns); err != nil {
+		t.Fatal(err)
+	}
+	if columns != len(wantColumns) {
+		t.Fatalf("checkpoint schema columns = %d, want %d", columns, len(wantColumns))
+	}
+
+	var rls, workerSelect, workerInsert, workerUpdate, workerDelete, appSelect bool
+	if err := api.db.Pool().QueryRow(ctx, `
+		select c.relrowsecurity,
+			has_table_privilege('nano_worker', c.oid, 'SELECT'),
+			has_table_privilege('nano_worker', c.oid, 'INSERT'),
+			has_table_privilege('nano_worker', c.oid, 'UPDATE'),
+			has_table_privilege('nano_worker', c.oid, 'DELETE'),
+			has_table_privilege('nano_app', c.oid, 'SELECT')
+		from pg_class c
+		join pg_namespace n on n.oid = c.relnamespace
+		where n.nspname = 'public' and c.relname = 'agent_run_checkpoints'`).Scan(
+		&rls, &workerSelect, &workerInsert, &workerUpdate, &workerDelete, &appSelect,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !rls || !workerSelect || !workerInsert || workerUpdate || workerDelete || appSelect {
+		t.Fatalf("checkpoint access rls=%t worker=%t/%t/%t/%t app_select=%t", rls, workerSelect, workerInsert, workerUpdate, workerDelete, appSelect)
+	}
+}
+
 func TestMigrationsUpgradeAPopulatedSprint2ADatabase(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "migration-2a@example.com")
 	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c026")
