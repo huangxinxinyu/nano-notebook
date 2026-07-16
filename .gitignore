@@ -1,4 +1,5 @@
 .planning/
+.worktrees/
 node_modules/
 dist/
 test-results/
