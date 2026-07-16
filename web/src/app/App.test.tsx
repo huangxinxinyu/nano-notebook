@@ -370,6 +370,17 @@ test("defaults to Simplified Chinese for zh browser locales and can switch langu
   expect(screen.getByRole("tablist", { name: "Authentication mode" })).toBeInTheDocument();
 });
 
+test("keeps the source-less Chat disclosure localized in Simplified Chinese", async () => {
+  Object.defineProperty(window.navigator, "language", { value: "zh-CN", configurable: true });
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  fetchHandler = authenticatedWorkspaceHandler();
+
+  render(<App />);
+
+  const chat = await screen.findByRole("region", { name: "对话" });
+  expect(within(chat).getByText("回答使用模型知识，不基于笔记本来源。")).toBeInTheDocument();
+});
+
 test("uses the local Material Symbols system throughout authentication", async () => {
   render(<App />);
 
