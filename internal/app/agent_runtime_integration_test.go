@@ -205,6 +205,77 @@ func TestControllerExecutesBifrostActionBatchAndPublishesFinal(t *testing.T) {
 	}
 }
 
+func TestReclaimedControllerResumesTheFirstMissingActionOnTheSameRunAndJob(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "controller-reclaim-resume@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c088")
+	ctx := context.Background()
+	queue := jobs.NewQueue(api.db.Pool())
+	first, ok, err := queue.ClaimNext(ctx)
+	if err != nil || !ok {
+		t.Fatalf("first claim=%+v ok=%t err=%v", first, ok, err)
+	}
+	runtime := agent.NewPostgresRuntime(api.db.Pool(), "Recovery system prompt.", func() string { return "msg_reclaimed_controller" })
+	proposal, err := agent.NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{
+		{Name: "recovery_record", Input: json.RawMessage(`{"value":"already-accepted"}`)},
+		{Name: "recovery_record", Input: json.RawMessage(`{"value":"resume-here"}`)},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.AppendCheckpoint(ctx, attemptFromClaim(first), proposal); err != nil {
+		t.Fatal(err)
+	}
+	firstResult, err := agent.NewActionResultCheckpoint(1, 0, "decision:1/action:0", agent.ActionResult{
+		Status: agent.ActionSucceeded, Output: json.RawMessage(`{"recorded":"already-accepted"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.AppendCheckpoint(ctx, attemptFromClaim(first), firstResult); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `update agent_jobs set lease_expires_at = now() - interval '1 second' where id = $1`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	second, ok, err := queue.ClaimNext(ctx)
+	if err != nil || !ok || second.ID != first.ID || second.RunID != runID || second.AttemptNo != 2 {
+		t.Fatalf("second claim=%+v ok=%t err=%v", second, ok, err)
+	}
+	action := &recoveryRecordingAction{}
+	registry, err := agent.NewActionRegistry(action)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := &recordingModelClient{result: models.ModelDecision{Final: &models.FinalDraft{Text: "Recovered from the first incomplete Action."}}}
+	if err := agent.NewController(runtime, model, registry).Execute(ctx, attemptFromClaim(second)); err != nil {
+		t.Fatal(err)
+	}
+	if len(action.calls) != 1 || action.calls[0] != "resume-here" || model.calls != 1 {
+		t.Fatalf("recovered Action/model calls=%v/%d", action.calls, model.calls)
+	}
+	if len(model.request.Messages) != 5 || model.request.Messages[2].Role != models.RoleAssistant || len(model.request.Messages[2].ActionCalls) != 2 ||
+		model.request.Messages[3].ActionCallID != "decision:1/action:0" || model.request.Messages[4].ActionCallID != "decision:1/action:1" {
+		t.Fatalf("reconstructed request=%+v", model.request.Messages)
+	}
+	var jobID, runStatus, jobStatus, outputID string
+	var attemptNo, checkpoints, assistants int
+	if err := api.db.Pool().QueryRow(ctx, `
+		select j.id, r.status, j.status, r.output_message_id, j.attempt_no
+		from agent_runs r join agent_jobs j on j.run_id = r.id where r.id = $1`, runID).
+		Scan(&jobID, &runStatus, &jobStatus, &outputID, &attemptNo); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_run_checkpoints where run_id = $1`, runID).Scan(&checkpoints); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from chat_messages where chat_id = $1 and role = 'assistant'`, chatID).Scan(&assistants); err != nil {
+		t.Fatal(err)
+	}
+	if jobID != first.ID || runStatus != "completed" || jobStatus != "succeeded" || outputID != "msg_reclaimed_controller" || attemptNo != 2 || checkpoints != 4 || assistants != 1 {
+		t.Fatalf("recovered durable state job=%q run/job=%s/%s output=%q attempt=%d checkpoints=%d assistants=%d", jobID, runStatus, jobStatus, outputID, attemptNo, checkpoints, assistants)
+	}
+}
+
 func TestWorkerPersistsTerminalBifrostFailureWithoutAssistantMessage(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "worker-failure@example.com")
 	admitted := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
@@ -386,4 +457,44 @@ func messageContentForIndex(index int) string {
 		return "message-0" + string(rune('0'+index))
 	}
 	return "message-" + string(rune('0'+index/10)) + string(rune('0'+index%10))
+}
+
+type recoveryRecordingAction struct {
+	calls []string
+}
+
+func (*recoveryRecordingAction) Definition() models.ActionDefinition {
+	return models.ActionDefinition{
+		Name:        "recovery_record",
+		Description: "Record a deterministic value for recovery integration tests.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"value":{"type":"string"}},"required":["value"],"additionalProperties":false}`),
+	}
+}
+
+func (*recoveryRecordingAction) ValidateInput(input json.RawMessage) error {
+	var decoded struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(input, &decoded); err != nil || decoded.Value == "" {
+		return errors.New("recovery_record requires a value")
+	}
+	return nil
+}
+
+func (a *recoveryRecordingAction) Execute(ctx context.Context, request agent.ActionRequest) (agent.ActionResult, error) {
+	if err := ctx.Err(); err != nil {
+		return agent.ActionResult{}, err
+	}
+	var input struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(request.Input, &input); err != nil {
+		return agent.ActionResult{}, err
+	}
+	a.calls = append(a.calls, input.Value)
+	output, err := json.Marshal(map[string]string{"recorded": input.Value})
+	if err != nil {
+		return agent.ActionResult{}, err
+	}
+	return agent.ActionResult{Status: agent.ActionSucceeded, Output: output}, nil
 }
