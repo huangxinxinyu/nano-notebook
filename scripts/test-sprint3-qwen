@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+COMPOSE_ENV="infra/compose/.env"
+if [ ! -f "$COMPOSE_ENV" ] || ! grep -Eq '^DASHSCOPE_API_KEY=.+$' "$COMPOSE_ENV"; then
+  echo "configure DASHSCOPE_API_KEY in the untracked infra/compose/.env first" >&2
+  exit 1
+fi
+
+export NANO_TEST_DATABASE_URL="${NANO_TEST_DATABASE_URL:-postgres://nano:nano@localhost:55432/nano_test?sslmode=disable}"
+export NANO_BIFROST_URL="${NANO_BIFROST_URL:-http://127.0.0.1:56666}"
+
+docker compose -f infra/compose/compose.yaml up -d postgres bifrost >/dev/null
+
+postgres_ready() {
+  docker compose -f infra/compose/compose.yaml exec -T postgres pg_isready -h 127.0.0.1 -p 5432 -U nano -d nano >/dev/null 2>&1
+}
+
+bifrost_ready() {
+  curl --fail --silent --show-error --max-time 2 "$NANO_BIFROST_URL" >/dev/null 2>&1
+}
+
+for _ in $(seq 1 60); do
+  if postgres_ready && bifrost_ready; then
+    break
+  fi
+  sleep 1
+done
+if ! postgres_ready || ! bifrost_ready; then
+  echo "local PostgreSQL or Bifrost did not become ready" >&2
+  exit 1
+fi
+
+if ! docker compose -f infra/compose/compose.yaml exec -T postgres psql -U nano -d nano -tc "select 1 from pg_database where datname='nano_test'" | grep -q 1; then
+  docker compose -f infra/compose/compose.yaml exec -T postgres createdb -U nano nano_test
+fi
+
+NANO_QWEN_SMOKE=1 go test ./internal/app \
+  -run '^TestLiveQwenThroughBifrostUsesBothSprint3ActionsAndPublishesOnce$' \
+  -count=1
