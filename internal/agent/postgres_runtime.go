@@ -95,10 +95,10 @@ func (r *PostgresRuntime) Load(ctx context.Context, attempt Attempt) (Execution,
 	return execution, nil
 }
 
-func (r *PostgresRuntime) Build(ctx context.Context, execution Execution) (models.ChatRequest, error) {
+func (r *PostgresRuntime) Build(ctx context.Context, execution Execution) (models.ModelRequest, error) {
 	tx, err := r.workerTx(ctx)
 	if err != nil {
-		return models.ChatRequest{}, err
+		return models.ModelRequest{}, err
 	}
 	defer tx.Rollback(ctx)
 	rows, err := tx.Query(ctx, `
@@ -118,49 +118,45 @@ func (r *PostgresRuntime) Build(ctx context.Context, execution Execution) (model
 		from recent
 		order by created_at, id`, execution.ChatID, execution.InputMessageID)
 	if err != nil {
-		return models.ChatRequest{}, err
+		return models.ModelRequest{}, err
 	}
 	defer rows.Close()
-	messages := make([]models.ChatMessage, 0, 21)
-	messages = append(messages, models.ChatMessage{Role: "system", Content: r.systemPrompt})
+	messages := make([]models.ModelMessage, 0, 21)
+	messages = append(messages, models.ModelMessage{Role: models.RoleSystem, Content: r.systemPrompt})
 	for rows.Next() {
-		var message models.ChatMessage
+		var message models.ModelMessage
 		if err := rows.Scan(&message.Role, &message.Content); err != nil {
-			return models.ChatRequest{}, err
+			return models.ModelRequest{}, err
 		}
 		messages = append(messages, message)
 	}
 	if err := rows.Err(); err != nil {
-		return models.ChatRequest{}, err
+		return models.ModelRequest{}, err
 	}
 	if len(messages) == 1 {
-		return models.ChatRequest{}, errors.New("Run context has no durable Messages")
+		return models.ModelRequest{}, errors.New("Run context has no durable Messages")
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return models.ChatRequest{}, err
+		return models.ModelRequest{}, err
 	}
-	return models.ChatRequest{Model: execution.Model, Messages: messages}, nil
-}
-
-func (r *PostgresRuntime) Publish(ctx context.Context, attempt Attempt, result models.ChatResult) error {
-	return r.publishResult(ctx, attempt, result, nil)
+	return models.ModelRequest{Model: execution.Model, Messages: messages}, nil
 }
 
 func (r *PostgresRuntime) PublishFinal(ctx context.Context, attempt Attempt, draft models.FinalDraft) error {
 	if _, err := NewFinalDraftCheckpoint(1, draft); err != nil {
 		return err
 	}
-	return r.publishResult(ctx, attempt, models.ChatResult{Text: draft.Text}, &draft)
+	return r.publishResult(ctx, attempt, draft.Text, &draft)
 }
 
-func (r *PostgresRuntime) publishResult(ctx context.Context, attempt Attempt, result models.ChatResult, expectedFinal *models.FinalDraft) error {
+func (r *PostgresRuntime) publishResult(ctx context.Context, attempt Attempt, text string, expectedFinal *models.FinalDraft) error {
 	messageID := r.newMessageID()
 	if messageID == "" {
 		return errors.New("empty Assistant Message ID")
 	}
 	var publishErr error
 	for publishTry := 0; publishTry < 2; publishTry++ {
-		publishErr = r.publishOnce(ctx, attempt, messageID, result, expectedFinal)
+		publishErr = r.publishOnce(ctx, attempt, messageID, text, expectedFinal)
 		if publishErr == nil {
 			return nil
 		}
@@ -185,7 +181,7 @@ func (r *PostgresRuntime) publishResult(ctx context.Context, attempt Attempt, re
 	return publishErr
 }
 
-func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, messageID string, result models.ChatResult, expectedFinal *models.FinalDraft) error {
+func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, messageID, text string, expectedFinal *models.FinalDraft) error {
 	tx, err := r.workerTx(ctx)
 	if err != nil {
 		return err
@@ -213,7 +209,7 @@ func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, mess
 	}
 	if _, err := tx.Exec(ctx, `
 		insert into chat_messages(id, chat_id, role, content)
-		values($1, $2, 'assistant', $3)`, messageID, chatID, result.Text); err != nil {
+		values($1, $2, 'assistant', $3)`, messageID, chatID, text); err != nil {
 		return err
 	}
 	runTag, err := tx.Exec(ctx, `

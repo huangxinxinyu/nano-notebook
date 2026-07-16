@@ -10,16 +10,16 @@ import (
 	"testing"
 )
 
-func TestBifrostClientCompletesANonStreamingChat(t *testing.T) {
+func TestBifrostClientReturnsANonStreamingFinalDecision(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
 			t.Fatalf("request = %s %s, want POST /v1/chat/completions", r.Method, r.URL.Path)
 		}
 		var request struct {
-			Model               string        `json:"model"`
-			Messages            []ChatMessage `json:"messages"`
-			Stream              bool          `json:"stream"`
-			MaxCompletionTokens int           `json:"max_completion_tokens"`
+			Model               string         `json:"model"`
+			Messages            []ModelMessage `json:"messages"`
+			Stream              bool           `json:"stream"`
+			MaxCompletionTokens int            `json:"max_completion_tokens"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatal(err)
@@ -40,9 +40,9 @@ func TestBifrostClientCompletesANonStreamingChat(t *testing.T) {
 	defer server.Close()
 
 	client := NewBifrostClient(server.URL, server.Client(), 2048)
-	result, err := client.Complete(context.Background(), ChatRequest{
+	decision, err := client.Decide(context.Background(), ModelRequest{
 		Model: "aliyun/qwen-flash",
-		Messages: []ChatMessage{
+		Messages: []ModelMessage{
 			{Role: "system", Content: "Answer directly."},
 			{Role: "user", Content: "What is a KV cache?"},
 		},
@@ -50,20 +50,7 @@ func TestBifrostClientCompletesANonStreamingChat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Text != "A KV cache reuses attention keys and values." || result.FinishReason != "stop" {
-		t.Fatalf("unexpected result: %+v", result)
-	}
-	if result.PromptTokens == nil || *result.PromptTokens != 18 || result.CompletionTokens == nil || *result.CompletionTokens != 9 || result.TotalTokens == nil || *result.TotalTokens != 27 {
-		t.Fatalf("unexpected usage: %+v", result)
-	}
-	decision, err := client.Decide(context.Background(), ModelRequest{
-		Model: "aliyun/qwen-flash",
-		Messages: []ModelMessage{
-			{Role: RoleSystem, Content: "Answer directly."},
-			{Role: RoleUser, Content: "What is a KV cache?"},
-		},
-	})
-	if err != nil || decision.Final == nil || decision.Final.Text != "A KV cache reuses attention keys and values." || decision.Proposal != nil {
+	if decision.Final == nil || decision.Final.Text != "A KV cache reuses attention keys and values." || decision.Proposal != nil {
 		t.Fatalf("final decision = %+v err=%v", decision, err)
 	}
 }

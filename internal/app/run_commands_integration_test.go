@@ -62,7 +62,7 @@ func TestCancelRunningRunFencesLatePublication(t *testing.T) {
 		t.Fatalf("cancel status=%d body=%s", cancelled.Code, cancelled.Body.String())
 	}
 	runtime := agent.NewPostgresRuntime(api.db.Pool(), "System prompt.", func() string { return "msg_too_late" })
-	if err := runtime.Publish(context.Background(), attemptFromClaim(claimed), models.ChatResult{Text: "Too late", FinishReason: "stop"}); !errors.Is(err, agent.ErrLeaseLost) {
+	if err := runtime.PublishFinal(context.Background(), attemptFromClaim(claimed), models.FinalDraft{Text: "Too late"}); !errors.Is(err, agent.ErrLeaseLost) {
 		t.Fatalf("late publish error=%v, want ErrLeaseLost", err)
 	}
 	var assistants int
@@ -82,7 +82,8 @@ func TestCompletedRunCannotBeCancelled(t *testing.T) {
 		t.Fatalf("claim=%+v ok=%v err=%v", claimed, ok, err)
 	}
 	runtime := agent.NewPostgresRuntime(api.db.Pool(), "System prompt.", func() string { return "msg_publish_first" })
-	if err := runtime.Publish(context.Background(), attemptFromClaim(claimed), models.ChatResult{Text: "Published first", FinishReason: "stop"}); err != nil {
+	draft := appendFinalDraft(t, runtime, attemptFromClaim(claimed), "Published first")
+	if err := runtime.PublishFinal(context.Background(), attemptFromClaim(claimed), draft); err != nil {
 		t.Fatal(err)
 	}
 	response := api.postJSONWithCookieAndCSRF(t, "/api/v1/agent-runs/"+runID+"/cancel", map[string]any{}, sessionCookie, csrfCookie, csrfCookie.Value, "")
@@ -254,6 +255,7 @@ func TestConcurrentCancelAndPublishCommitOneConsistentTerminalOutcome(t *testing
 		t.Fatalf("claim=%+v ok=%v err=%v", claimed, ok, err)
 	}
 	runtime := agent.NewPostgresRuntime(api.db.Pool(), "System prompt.", func() string { return "msg_cancel_publish_race" })
+	draft := appendFinalDraft(t, runtime, attemptFromClaim(claimed), "Race result")
 	start := make(chan struct{})
 	var cancelResponseStatus int
 	var cancelErrorCode string
@@ -272,7 +274,7 @@ func TestConcurrentCancelAndPublishCommitOneConsistentTerminalOutcome(t *testing
 	go func() {
 		defer wg.Done()
 		<-start
-		publishErr = runtime.Publish(context.Background(), attemptFromClaim(claimed), models.ChatResult{Text: "Race result", FinishReason: "stop"})
+		publishErr = runtime.PublishFinal(context.Background(), attemptFromClaim(claimed), draft)
 	}()
 	close(start)
 	wg.Wait()

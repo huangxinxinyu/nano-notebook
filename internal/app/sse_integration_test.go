@@ -35,9 +35,13 @@ func TestRunSSEReconnectSendsTheCompletedDurableSnapshot(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("claim ok=%v err=%v", ok, err)
 	}
-	model := &recordingModelClient{result: models.ChatResult{Text: "The durable answer.", FinishReason: "stop"}}
+	model := &recordingModelClient{result: models.ModelDecision{Final: &models.FinalDraft{Text: "The durable answer."}}}
 	runtime := agent.NewPostgresRuntime(api.db.Pool(), "System prompt.", func() string { return "msg_sse_answer" })
-	if err := agent.NewLoop(runtime, runtime, agent.NewModelRunner(model), runtime).Execute(ctx, attemptFromClaim(claimed)); err != nil {
+	registry, err := agent.NewActionRegistry(agent.NewCalculateAction(), agent.NewCurrentTimeAction(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.NewController(runtime, model, registry).Execute(ctx, attemptFromClaim(claimed)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -128,8 +132,12 @@ func TestRunSSEProjectsQueuedRunningAndCompletedAcrossPostgresNotifications(t *t
 	}
 
 	runtime := agent.NewPostgresRuntime(api.db.Pool(), "System prompt.", func() string { return "msg_sse_live" })
-	model := &recordingModelClient{result: models.ChatResult{Text: "Projected completion.", FinishReason: "stop"}}
-	if err := agent.NewLoop(runtime, runtime, agent.NewModelRunner(model), runtime).Execute(context.Background(), attemptFromClaim(claimed)); err != nil {
+	model := &recordingModelClient{result: models.ModelDecision{Final: &models.FinalDraft{Text: "Projected completion."}}}
+	registry, err := agent.NewActionRegistry(agent.NewCalculateAction(), agent.NewCurrentTimeAction(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.NewController(runtime, model, registry).Execute(context.Background(), attemptFromClaim(claimed)); err != nil {
 		t.Fatal(err)
 	}
 	select {

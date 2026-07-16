@@ -40,10 +40,10 @@ func TestWorkerClaimsBuildsContextAndPublishesOneAnswer(t *testing.T) {
 	}
 
 	var modelRequest struct {
-		Model               string               `json:"model"`
-		Messages            []models.ChatMessage `json:"messages"`
-		Stream              bool                 `json:"stream"`
-		MaxCompletionTokens int                  `json:"max_completion_tokens"`
+		Model               string                `json:"model"`
+		Messages            []models.ModelMessage `json:"messages"`
+		Stream              bool                  `json:"stream"`
+		MaxCompletionTokens int                   `json:"max_completion_tokens"`
 	}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
@@ -61,8 +61,11 @@ func TestWorkerClaimsBuildsContextAndPublishesOneAnswer(t *testing.T) {
 	defer upstream.Close()
 	model := models.NewBifrostClient(upstream.URL, upstream.Client(), 2048)
 	runtime := agent.NewPostgresRuntime(api.db.Pool(), "System prompt for the bare agent.", func() string { return "msg_worker_answer" })
-	loop := agent.NewLoop(runtime, runtime, agent.NewModelRunner(model), runtime)
-	if err := loop.Execute(ctx, attemptFromClaim(claimed)); err != nil {
+	registry, err := agent.NewActionRegistry(agent.NewCalculateAction(), agent.NewCurrentTimeAction(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.NewController(runtime, model, registry).Execute(ctx, attemptFromClaim(claimed)); err != nil {
 		t.Fatal(err)
 	}
 	if modelRequest.Model != "aliyun/qwen-flash" || modelRequest.Stream || modelRequest.MaxCompletionTokens != 2048 {
@@ -227,8 +230,11 @@ func TestWorkerPersistsTerminalBifrostFailureWithoutAssistantMessage(t *testing.
 	defer upstream.Close()
 	model := models.NewBifrostClient(upstream.URL, upstream.Client(), 2048)
 	runtime := agent.NewPostgresRuntime(api.db.Pool(), agent.BareSystemPrompt, nil)
-	loop := agent.NewLoop(runtime, runtime, agent.NewModelRunner(model), runtime)
-	if err := loop.Execute(ctx, attemptFromClaim(claimed)); err == nil {
+	registry, err := agent.NewActionRegistry(agent.NewCalculateAction(), agent.NewCurrentTimeAction(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.NewController(runtime, model, registry).Execute(ctx, attemptFromClaim(claimed)); err == nil {
 		t.Fatal("failed Bifrost call returned nil error")
 	}
 
@@ -308,14 +314,14 @@ func TestPublicationRejectsAnExpiredAttemptAfterTheJobIsReclaimed(t *testing.T) 
 		t.Fatalf("reclaim = %+v ok=%v err=%v", second, ok, err)
 	}
 	runtime := agent.NewPostgresRuntime(api.db.Pool(), "System prompt.", func() string { return "msg_fenced_answer" })
-	result := models.ChatResult{Text: "Only the current attempt may publish.", FinishReason: "stop"}
-	if err := runtime.Publish(ctx, attemptFromClaim(first), result); !errors.Is(err, agent.ErrLeaseLost) {
+	draft := appendFinalDraft(t, runtime, attemptFromClaim(second), "Only the current attempt may publish.")
+	if err := runtime.PublishFinal(ctx, attemptFromClaim(first), draft); !errors.Is(err, agent.ErrLeaseLost) {
 		t.Fatalf("stale publish error = %v, want ErrLeaseLost", err)
 	}
 	if err := runtime.Fail(ctx, attemptFromClaim(first), "model_unavailable"); !errors.Is(err, agent.ErrLeaseLost) {
 		t.Fatalf("stale failure error = %v, want ErrLeaseLost", err)
 	}
-	if err := runtime.Publish(ctx, attemptFromClaim(second), result); err != nil {
+	if err := runtime.PublishFinal(ctx, attemptFromClaim(second), draft); err != nil {
 		t.Fatal(err)
 	}
 	var assistantCount int
@@ -335,6 +341,7 @@ func TestPublicationAcknowledgementLossReconcilesCommittedSuccess(t *testing.T) 
 	if err != nil || !ok {
 		t.Fatalf("claim = %+v ok=%v err=%v", claimed, ok, err)
 	}
+	draft := appendFinalDraft(t, agent.NewPostgresRuntime(api.db.Pool(), "System prompt.", nil), attemptFromClaim(claimed), "Committed exactly once.")
 	ackLost := errors.New("simulated commit acknowledgement loss")
 	firstCommit := true
 	runtime := agent.NewPostgresRuntime(
@@ -350,7 +357,7 @@ func TestPublicationAcknowledgementLossReconcilesCommittedSuccess(t *testing.T) 
 			return err
 		}),
 	)
-	if err := runtime.Publish(ctx, attemptFromClaim(claimed), models.ChatResult{Text: "Committed exactly once.", FinishReason: "stop"}); err != nil {
+	if err := runtime.PublishFinal(ctx, attemptFromClaim(claimed), draft); err != nil {
 		t.Fatalf("reconciled publication = %v", err)
 	}
 	var runStatus string
