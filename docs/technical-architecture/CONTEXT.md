@@ -112,6 +112,10 @@ _Avoid_: Tool Call, command, approved Action
 The Provider-neutral result presented to the Agent Controller by one completed model invocation. It contains exactly one Final Draft or one ordered Action Proposal batch.
 _Avoid_: Raw Provider response, Chat completion, chain of thought
 
+**Model Call**:
+One Agent Controller invocation of the Models Module, recorded with application-normalized metadata even when the gateway performs multiple Provider attempts internally. It excludes raw gateway or Provider request and response payloads.
+_Avoid_: Provider request, Bifrost response, Agent Run
+
 **Action Result**:
 The accepted typed outcome of one Agent Action, containing either success data or an expected domain error. It is durable Run working state consumed by later model decisions and reused after recovery.
 _Avoid_: Tool response, log entry, Trace Event
@@ -164,10 +168,26 @@ _Avoid_: Online experiment, Agent Run
 
 ## Observability
 
+**Agent Observability SDK**:
+The reusable Go instrumentation boundary that describes Agent execution through a small recording API, Agent semantic conventions, and replaceable delivery destinations. It produces Operational Telemetry or Durable Agent Trace records without owning an application's workflow or domain decisions.
+_Avoid_: Agent framework, audit platform, Durable Agent Trace
+
 **Operational Telemetry**:
 Sampleable and retention-bounded traces, metrics, and logs used to diagnose the health, latency, and resource behavior of requests and background execution across system components.
 _Avoid_: Agent state, product audit record
 
 **Durable Agent Trace**:
-The retained internal execution record required to reconstruct an Agent Run's observable stages and actions independently of Operational Telemetry sampling or expiry. It is distinct from both the user-facing Reasoning Trace and any claim of access to hidden model cognition.
-_Avoid_: OpenTelemetry span set, user-facing Reasoning Trace
+The retained internal execution record with exactly one Trace and one root Trace Span per Agent Run, following that Run's lifecycle and reconstructing every started execution attempt independently of Operational Telemetry sampling or expiry, including work with no observed completion or accepted Checkpoint. It is not directly user-visible and is distinct from a future administrative projection, the user-facing Reasoning Trace, and any claim of access to hidden model cognition.
+_Avoid_: OpenTelemetry span set, admin dashboard, user-facing Reasoning Trace
+
+**Trace Span**:
+A duration-bearing node in a Durable Agent Trace that represents one execution operation, has at most one parent, and may remain without an observed terminal outcome after process loss.
+_Avoid_: Mutable Job state, Checkpoint, log line
+
+**Trace Event**:
+An immutable instantaneous fact attached to a Durable Agent Trace or Trace Span, such as Checkpoint acceptance, cancellation, or Lease loss.
+_Avoid_: Trace Span, mutable status row, log message
+
+**Trace Link**:
+A typed causal reference between Trace Spans or Durable Agent Traces that does not change their parent-child ownership and may cross Trace boundaries.
+_Avoid_: Parent Span, nested Span, foreign-key ownership
