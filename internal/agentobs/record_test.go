@@ -3,6 +3,7 @@ package agentobs
 import (
 	"bytes"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -218,6 +219,62 @@ func TestRecordPayloadLimitIsConfigurable(t *testing.T) {
 	limits.MaxPayloadBytes = 32 * 1024
 	if err := record.ValidateWithLimits(limits); err != nil {
 		t.Fatalf("custom payload limit rejected record: %v", err)
+	}
+}
+
+func TestDecodeCanonicalPayloadRoundTripsTypedZeroValues(t *testing.T) {
+	record := validRecord(RecordSpanEnded)
+	record.Status = StatusError
+	record.SemanticConventionVersion = 7
+	record.Attributes = []Attribute{
+		String("value.string", ""),
+		Int64("value.int64", 0),
+		Float64("value.float64", 0),
+		Bool("value.bool", false),
+	}
+	encoded, err := record.CanonicalPayload()
+	if err != nil {
+		t.Fatalf("CanonicalPayload: %v", err)
+	}
+
+	decoded, err := DecodeCanonicalPayload(encoded)
+	if err != nil {
+		t.Fatalf("DecodeCanonicalPayload: %v", err)
+	}
+	if decoded.SemanticConventionVersion != 7 || decoded.Status != StatusError {
+		t.Fatalf("decoded header = %#v", decoded)
+	}
+	wantAttributes := []Attribute{
+		Bool("value.bool", false),
+		Float64("value.float64", 0),
+		Int64("value.int64", 0),
+		String("value.string", ""),
+	}
+	if !reflect.DeepEqual(decoded.Attributes, wantAttributes) {
+		t.Fatalf("decoded attributes = %#v, want %#v", decoded.Attributes, wantAttributes)
+	}
+}
+
+func TestDecodeCanonicalPayloadRejectsAmbiguousOrInvalidData(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+	}{
+		{name: "unknown field", payload: `{"semantic_convention_version":1,"attributes":[],"raw_prompt":"secret"}`},
+		{name: "trailing data", payload: `{"semantic_convention_version":1,"attributes":[]} {}`},
+		{name: "invalid version", payload: `{"semantic_convention_version":0,"attributes":[]}`},
+		{name: "invalid status", payload: `{"semantic_convention_version":1,"status":"maybe","attributes":[]}`},
+		{name: "wrong typed field", payload: `{"semantic_convention_version":1,"attributes":[{"key":"value.one","kind":"bool","string":"false"}]}`},
+		{name: "ambiguous typed fields", payload: `{"semantic_convention_version":1,"attributes":[{"key":"value.one","kind":"bool","bool":false,"int64":0}]}`},
+		{name: "duplicate key", payload: `{"semantic_convention_version":1,"attributes":[{"key":"value.one","kind":"bool","bool":false},{"key":"value.one","kind":"bool","bool":true}]}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := DecodeCanonicalPayload([]byte(tt.payload)); err == nil {
+				t.Fatal("invalid canonical payload succeeded")
+			}
+		})
 	}
 }
 
