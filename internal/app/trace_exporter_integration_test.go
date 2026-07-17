@@ -19,6 +19,9 @@ func TestPostgresTraceExporterRoundTripsAndReconcilesRecords(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "trace-exporter@example.com")
 	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c402")
 	ctx := context.Background()
+	if _, err := api.db.Pool().Exec(ctx, `delete from agent_traces where run_id = $1`, runID); err != nil {
+		t.Fatal(err)
+	}
 	root := traceRecord(agentobs.RecordSpanStarted, "trace-exporter", "root", "root-start", "agent.execution")
 
 	tx, err := api.db.Pool().Begin(ctx)
@@ -128,6 +131,9 @@ func TestPostgresTraceExporterReconcilesUncertainCommit(t *testing.T) {
 			api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "trace-uncertain-"+string(rune('a'+index))+"@example.com")
 			runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c41"+string(rune('0'+index)))
 			ctx := context.Background()
+			if _, err := api.db.Pool().Exec(ctx, `delete from agent_traces where run_id = $1`, runID); err != nil {
+				t.Fatal(err)
+			}
 			root := traceRecord(agentobs.RecordSpanStarted, agentobs.TraceID("trace-uncertain-"+string(rune('a'+index))), "root", "root-start", "agent.execution")
 			tx, err := api.db.Pool().Begin(ctx)
 			if err != nil {

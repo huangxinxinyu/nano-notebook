@@ -9,6 +9,25 @@ import (
 
 type Terminal[T any] func(result T, err error) agentobs.SpanEnd
 
+type RecordingPhase string
+
+const (
+	RecordingStart    RecordingPhase = "start"
+	RecordingLink     RecordingPhase = "link"
+	RecordingTerminal RecordingPhase = "terminal"
+)
+
+type RecordingError struct {
+	Phase RecordingPhase
+	Err   error
+}
+
+func (e *RecordingError) Error() string {
+	return "instrumentation " + string(e.Phase) + " recording failed: " + e.Err.Error()
+}
+
+func (e *RecordingError) Unwrap() error { return e.Err }
+
 func Invoke[T any](
 	ctx context.Context,
 	tracer *agentobs.Tracer,
@@ -25,7 +44,7 @@ func Invoke[T any](
 	}
 	callContext, _, err := tracer.StartSpan(ctx, start)
 	if err != nil {
-		return zero, err
+		return zero, &RecordingError{Phase: RecordingStart, Err: err}
 	}
 	result, callErr := call(callContext)
 	end := defaultTerminal(start.Name, callErr)
@@ -39,6 +58,9 @@ func Invoke[T any](
 		}
 	}
 	recordErr := tracer.EndSpan(callContext, end)
+	if recordErr != nil {
+		recordErr = &RecordingError{Phase: RecordingTerminal, Err: recordErr}
+	}
 	return result, errors.Join(callErr, recordErr)
 }
 

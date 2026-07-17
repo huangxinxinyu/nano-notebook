@@ -3,6 +3,7 @@ package models
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 func TestModelDecisionRequiresExactlyOneVariant(t *testing.T) {
@@ -25,6 +26,35 @@ func TestModelDecisionRequiresExactlyOneVariant(t *testing.T) {
 				t.Fatalf("Validate() error = %v, wantErr %t", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestModelCallMetadataKeepsUnknownCostDistinctFromZero(t *testing.T) {
+	zero := 0.0
+	knownZero := ModelCallMetadata{
+		RequestedModel: "aliyun/qwen-flash",
+		ResultKind:     ModelResultFinalDraft,
+		Latency:        12 * time.Millisecond,
+		Cost:           ModelCost{Known: true, Amount: &zero, Currency: "USD", Source: "gateway"},
+	}
+	if err := knownZero.Validate(); err != nil {
+		t.Fatalf("known zero cost: %v", err)
+	}
+	unknown := ModelCallMetadata{
+		RequestedModel: "aliyun/qwen-flash",
+		ResultKind:     ModelResultActionProposal,
+		Latency:        time.Millisecond,
+		Cost:           ModelCost{Known: false},
+	}
+	if err := unknown.Validate(); err != nil {
+		t.Fatalf("unknown cost: %v", err)
+	}
+	encoded, err := json.Marshal(unknown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) == "" || unknown.Cost.Amount != nil {
+		t.Fatalf("unknown cost was represented as zero: %s", encoded)
 	}
 }
 

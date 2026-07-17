@@ -76,6 +76,10 @@ func TestInvokeDoesNotCallWrappedSideEffectWhenStartFails(t *testing.T) {
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("Invoke error = %v, want start failure", err)
 	}
+	var recordingErr *instrumentation.RecordingError
+	if !errors.As(err, &recordingErr) || recordingErr.Phase != instrumentation.RecordingStart {
+		t.Fatalf("Invoke error = %T %v, want start RecordingError", err, err)
+	}
 	if called || result != "" {
 		t.Fatalf("side effect/result after failed start = %t/%q", called, result)
 	}
@@ -97,6 +101,10 @@ func TestInvokeReturnsBusinessAndTerminalFailures(t *testing.T) {
 	)
 	if result != "partial" || !errors.Is(err, businessErr) || !errors.Is(err, terminalErr) {
 		t.Fatalf("result/error = %q/%v, want both failures", result, err)
+	}
+	var recordingErr *instrumentation.RecordingError
+	if !errors.As(err, &recordingErr) || recordingErr.Phase != instrumentation.RecordingTerminal {
+		t.Fatalf("Invoke error = %T %v, want terminal RecordingError", err, err)
 	}
 	if recorder.records[1].Status != agentobs.StatusError {
 		t.Fatalf("default terminal status = %q, want error", recorder.records[1].Status)

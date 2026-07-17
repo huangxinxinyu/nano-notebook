@@ -441,6 +441,66 @@ alter table agent_jobs add constraint agent_jobs_execution_state_check check (
 	or (status in ('succeeded', 'failed', 'cancelled') and attempt_no between 0 and 3 and lease_token is null and lease_expires_at is null)
 );
 
+-- Adopt only active pre-Trace Runs. Terminal history remains untouched because
+-- reconstructing unobserved execution would fabricate evidence. A running
+-- legacy Job is returned to the queue so its first Sprint 4 claim can create a
+-- real Attempt Span under the adopted root.
+do $$
+declare
+	candidate record;
+	identity_suffix text;
+	trace_identity text;
+	root_identity text;
+	payload_text constant text := '{"semantic_convention_version":1,"attributes":[]}';
+	payload_hash text;
+	adopted_at timestamptz;
+begin
+	payload_hash := encode(sha256(convert_to(payload_text, 'UTF8')), 'hex');
+	for candidate in
+		select r.id, r.status
+		from agent_runs r
+		left join agent_traces t on t.run_id = r.id
+		where r.status in ('queued', 'running') and t.trace_id is null
+		order by r.created_at, r.id
+	loop
+		if candidate.status = 'running' then
+			update agent_jobs
+			set status = 'queued', attempt_no = 0, lease_token = null,
+				lease_expires_at = null, started_at = null, finished_at = null,
+				updated_at = now()
+			where run_id = candidate.id;
+			update agent_runs
+			set status = 'queued', started_at = null, updated_at = now()
+			where id = candidate.id;
+		end if;
+
+		identity_suffix := md5(candidate.id);
+		trace_identity := 'migration-trace-' || identity_suffix;
+		root_identity := 'migration-root-' || identity_suffix;
+		adopted_at := clock_timestamp();
+		insert into agent_traces(trace_id, run_id, root_span_id, schema_version, created_at)
+		values(trace_identity, candidate.id, root_identity, 1, adopted_at);
+		insert into agent_trace_records(
+			trace_id, sequence_no, identity_key, record_kind, span_id,
+			parent_span_id, name, target_trace_id, target_span_id,
+			occurred_at, payload_version, payload, payload_sha256
+		) values (
+			trace_identity, 1, 'migration/' || identity_suffix || '/root/start',
+			'span_started', root_identity, null, 'agent.execution', null, null,
+			adopted_at, 1, payload_text::jsonb, payload_hash
+		);
+		insert into agent_trace_records(
+			trace_id, sequence_no, identity_key, record_kind, span_id,
+			parent_span_id, name, target_trace_id, target_span_id,
+			occurred_at, payload_version, payload, payload_sha256
+		) values (
+			trace_identity, 2, 'migration/' || identity_suffix || '/adopted',
+			'event', root_identity, null, 'nano.migration.adopted', null, null,
+			adopted_at, 1, payload_text::jsonb, payload_hash
+		);
+	end loop;
+end $$;
+
 alter table identity_users enable row level security;
 alter table identity_local_credentials enable row level security;
 alter table identity_sessions enable row level security;
@@ -644,6 +704,43 @@ as $$
 $$;
 revoke all on function nano_trace_owned(text) from public;
 grant execute on function nano_trace_owned(text) to nano_app;
+
+create or replace function nano_owned_run_trace_state(candidate_run_id text)
+returns table(trace_id text, root_span_id text, schema_version integer, sequence_no integer)
+language sql
+stable
+security definer
+set search_path = pg_catalog, public
+as $$
+	select t.trace_id, t.root_span_id, t.schema_version, coalesce(max(rec.sequence_no), 0)::integer
+	from public.agent_traces t
+	join public.agent_runs r on r.id = t.run_id
+	left join public.agent_trace_records rec on rec.trace_id = t.trace_id
+	where t.run_id = candidate_run_id
+	  and r.user_id = nullif(current_setting('app.principal_id', true), '')
+	group by t.trace_id, t.root_span_id, t.schema_version
+$$;
+revoke all on function nano_owned_run_trace_state(text) from public;
+grant execute on function nano_owned_run_trace_state(text) to nano_app;
+
+create or replace function nano_owned_trace_span(candidate_run_id text, candidate_identity_key text)
+returns table(trace_id text, span_id text)
+language sql
+stable
+security definer
+set search_path = pg_catalog, public
+as $$
+	select t.trace_id, rec.span_id
+	from public.agent_traces t
+	join public.agent_runs r on r.id = t.run_id
+	join public.agent_trace_records rec on rec.trace_id = t.trace_id
+	where t.run_id = candidate_run_id
+	  and r.user_id = nullif(current_setting('app.principal_id', true), '')
+	  and rec.identity_key = candidate_identity_key
+	  and rec.record_kind = 'span_started'
+$$;
+revoke all on function nano_owned_trace_span(text, text) from public;
+grant execute on function nano_owned_trace_span(text, text) to nano_app;
 
 drop policy if exists agent_trace_records_app_insert on agent_trace_records;
 create policy agent_trace_records_app_insert on agent_trace_records

@@ -261,6 +261,17 @@ func TestEveryCheckpointKindReconcilesCommitAcknowledgementLossAndRejectsConflic
 	if commitCalls != 3 {
 		t.Fatalf("commit calls=%d, want one uncertain commit per kind", commitCalls)
 	}
+	var acceptanceEvents int
+	if err := api.db.Pool().QueryRow(ctx, `
+		select count(*)
+		from agent_trace_records r
+		join agent_traces t on t.trace_id = r.trace_id
+		where t.run_id = $1 and r.record_kind = 'event' and r.name = $2`, runID, agent.TraceEventCheckpointAccepted).Scan(&acceptanceEvents); err != nil {
+		t.Fatal(err)
+	}
+	if acceptanceEvents != 3 {
+		t.Fatalf("checkpoint acceptance Events = %d, want one per reconciled checkpoint", acceptanceEvents)
+	}
 
 	conflictingProposal, err := agent.NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{
 		{Name: "calculate", Input: []byte(`{"operation":"add","operands":["2","2"]}`)},
@@ -438,6 +449,17 @@ func TestCheckpointAppendRetriesAbsentWriteWhileAttemptRemainsCurrent(t *testing
 	}
 	if count != 1 {
 		t.Fatalf("checkpoint count = %d, want 1", count)
+	}
+	var eventCount int
+	if err := api.db.Pool().QueryRow(ctx, `
+		select count(*)
+		from agent_trace_records r
+		join agent_traces t on t.trace_id = r.trace_id
+		where t.run_id = $1 and r.record_kind = 'event' and r.name = $2`, runID, agent.TraceEventCheckpointAccepted).Scan(&eventCount); err != nil {
+		t.Fatal(err)
+	}
+	if eventCount != 1 {
+		t.Fatalf("retried checkpoint acceptance Events = %d, want 1", eventCount)
 	}
 }
 

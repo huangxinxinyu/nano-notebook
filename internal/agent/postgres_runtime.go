@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -20,6 +21,7 @@ type PostgresRuntime struct {
 	systemPrompt string
 	newMessageID func() string
 	commit       func(context.Context, pgx.Tx) error
+	telemetry    agentobs.Exporter
 }
 
 type RuntimeOption func(*PostgresRuntime)
@@ -29,6 +31,12 @@ func WithCommitFunc(commit func(context.Context, pgx.Tx) error) RuntimeOption {
 		if commit != nil {
 			runtime.commit = commit
 		}
+	}
+}
+
+func WithBestEffortTraceExporter(exporter agentobs.Exporter) RuntimeOption {
+	return func(runtime *PostgresRuntime) {
+		runtime.telemetry = exporter
 	}
 }
 
@@ -207,6 +215,27 @@ func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, mess
 			return invalidCheckpoint("publication Final Draft does not match accepted prefix")
 		}
 	}
+	recorder, err := NewRunTraceRecorder(ctx, tx, attempt.RunID)
+	if err != nil {
+		return err
+	}
+	tracer, err := agentobs.NewTracer(agentobs.TracerConfig{
+		Recorder: recorder, SemanticConventionVersion: TraceSemanticConventionVersion,
+	})
+	if err != nil {
+		return err
+	}
+	attemptSpan, err := recorder.SpanContextByIdentity(ctx, TraceAttemptStartIdentity(attempt.RunID, attempt.AttemptNo))
+	if err != nil {
+		return err
+	}
+	publicationContext, _, err := tracer.StartSpan(agentobs.ContextWithSpanContext(ctx, attemptSpan), agentobs.SpanStart{
+		IdentityKey: fmt.Sprintf("run/%s/attempt/%d/publication/start", attempt.RunID, attempt.AttemptNo),
+		Name:        TraceSpanPublication,
+	})
+	if err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `
 		insert into chat_messages(id, chat_id, role, content)
 		values($1, $2, 'assistant', $3)`, messageID, chatID, text); err != nil {
@@ -238,6 +267,20 @@ func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, mess
 		return err
 	}
 	if _, err := tx.Exec(ctx, `select pg_notify('nano_agent_runs', $1)`, attempt.RunID); err != nil {
+		return err
+	}
+	if err := tracer.Event(publicationContext, agentobs.Event{
+		IdentityKey: fmt.Sprintf("run/%s/attempt/%d/publication/passed", attempt.RunID, attempt.AttemptNo),
+		Name:        TraceEventPublicationPassed,
+	}); err != nil {
+		return err
+	}
+	if err := tracer.EndSpan(publicationContext, agentobs.SpanEnd{Name: TraceSpanPublication, Status: agentobs.StatusOK}); err != nil {
+		return err
+	}
+	if err := RecordRunTerminalInTx(ctx, tx, attempt.RunID, RunTerminalTrace{
+		RunStatus: "completed", SpanStatus: agentobs.StatusOK, AttemptNo: attempt.AttemptNo,
+	}); err != nil {
 		return err
 	}
 	return r.commit(ctx, tx)
@@ -333,6 +376,11 @@ func (r *PostgresRuntime) Fail(ctx context.Context, attempt Attempt, errorCode s
 		return errors.New("Run failure did not transition Run and Job together")
 	}
 	if _, err := tx.Exec(ctx, `select pg_notify('nano_agent_runs', $1)`, attempt.RunID); err != nil {
+		return err
+	}
+	if err := RecordRunTerminalInTx(ctx, tx, attempt.RunID, RunTerminalTrace{
+		RunStatus: "failed", SpanStatus: agentobs.StatusError, ErrorCode: errorCode, AttemptNo: attempt.AttemptNo,
+	}); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

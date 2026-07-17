@@ -2,12 +2,14 @@ package app_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
+	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -80,6 +82,9 @@ func TestTraceRLSAllowsOwnedBlindInsertWithoutApplicationRead(t *testing.T) {
 	if err := api.db.Pool().QueryRow(ctx, `select id from identity_users where canonical_email = 'trace-intruder@example.com'`).Scan(&intruderID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := api.db.Pool().Exec(ctx, `delete from agent_traces where run_id = $1`, runID); err != nil {
+		t.Fatal(err)
+	}
 	root := traceRecord(agentobs.RecordSpanStarted, "trace-owned", "root-owned", "root-start", "agent.execution")
 	if err := api.db.WithRequestPrincipal(ctx, intruderID, func(tx pgx.Tx) error {
 		return agent.CreateTraceInTx(ctx, tx, runID, root)
@@ -108,8 +113,15 @@ func TestTraceRLSAllowsOwnedBlindInsertWithoutApplicationRead(t *testing.T) {
 
 func TestMigrationsUpgradePopulatedSprint3DatabaseWithEmptyTraceHistory(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "trace-upgrade@example.com")
-	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c404")
+	terminalRunID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c404")
 	ctx := context.Background()
+	if _, err := api.db.Pool().Exec(ctx, `update agent_runs set status = 'failed', error_code = 'legacy_failure', finished_at = now() where id = $1`, terminalRunID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `update agent_jobs set status = 'failed', finished_at = now() where run_id = $1`, terminalRunID); err != nil {
+		t.Fatal(err)
+	}
+	activeRunID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c405")
 	if _, err := api.db.Pool().Exec(ctx, `drop table agent_trace_records, agent_traces cascade`); err != nil {
 		t.Fatal(err)
 	}
@@ -117,11 +129,11 @@ func TestMigrationsUpgradePopulatedSprint3DatabaseWithEmptyTraceHistory(t *testi
 		t.Fatalf("Sprint 3 populated upgrade: %v", err)
 	}
 
-	var runs, jobs, messages, traces int
-	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_runs where id = $1`, runID).Scan(&runs); err != nil {
+	var runs, jobCount, messages, traces int
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_runs where id = any($1::text[])`, []string{terminalRunID, activeRunID}).Scan(&runs); err != nil {
 		t.Fatal(err)
 	}
-	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_jobs where run_id = $1`, runID).Scan(&jobs); err != nil {
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_jobs where run_id = any($1::text[])`, []string{terminalRunID, activeRunID}).Scan(&jobCount); err != nil {
 		t.Fatal(err)
 	}
 	if err := api.db.Pool().QueryRow(ctx, `select count(*) from chat_messages where chat_id = $1`, chatID).Scan(&messages); err != nil {
@@ -130,8 +142,62 @@ func TestMigrationsUpgradePopulatedSprint3DatabaseWithEmptyTraceHistory(t *testi
 	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_traces`).Scan(&traces); err != nil {
 		t.Fatal(err)
 	}
-	if runs != 1 || jobs != 1 || messages != 1 || traces != 0 {
-		t.Fatalf("populated upgrade state runs/jobs/messages/traces = %d/%d/%d/%d", runs, jobs, messages, traces)
+	if runs != 2 || jobCount != 2 || messages != 2 || traces != 1 {
+		t.Fatalf("populated upgrade state runs/jobs/messages/traces = %d/%d/%d/%d", runs, jobCount, messages, traces)
+	}
+	adopted, err := agent.LoadDurableTraceByRun(ctx, api.db.Pool(), activeRunID)
+	if err != nil {
+		t.Fatalf("load adopted active Trace: %v", err)
+	}
+	if len(adopted.Records) != 2 || adopted.Records[0].Name != agent.TraceSpanAgentExecution || adopted.Records[1].Name != agent.TraceEventMigrationAdopted {
+		t.Fatalf("adopted Trace = %#v", adopted)
+	}
+	if _, err := agent.LoadDurableTraceByRun(ctx, api.db.Pool(), terminalRunID); !errors.Is(err, agent.ErrTraceNotFound) {
+		t.Fatalf("historical terminal Trace error = %v, want not found", err)
+	}
+	claimed, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(ctx)
+	if err != nil || !ok || claimed.RunID != activeRunID {
+		t.Fatalf("claim adopted active Run = %#v ok=%t err=%v", claimed, ok, err)
+	}
+}
+
+func TestMigrationsAdoptRunningSprint3RunAtControlledBoundary(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "trace-upgrade-running@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c406")
+	ctx := context.Background()
+	before, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(ctx)
+	if err != nil || !ok || before.AttemptNo != 1 {
+		t.Fatalf("pre-migration claim = %#v ok=%t err=%v", before, ok, err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `drop table agent_trace_records, agent_traces cascade`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.RunMigrations(ctx, api.db); err != nil {
+		t.Fatalf("running Sprint 3 migration: %v", err)
+	}
+	var runStatus, jobStatus string
+	var attemptNo int
+	var leaseToken *string
+	if err := api.db.Pool().QueryRow(ctx, `
+		select r.status, j.status, j.attempt_no, j.lease_token::text
+		from agent_runs r join agent_jobs j on j.run_id = r.id
+		where r.id = $1`, runID).Scan(&runStatus, &jobStatus, &attemptNo, &leaseToken); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "queued" || jobStatus != "queued" || attemptNo != 0 || leaseToken != nil {
+		t.Fatalf("adopted running state = %s/%s attempt=%d lease=%v", runStatus, jobStatus, attemptNo, leaseToken)
+	}
+	adopted, err := agent.LoadDurableTraceByRun(ctx, api.db.Pool(), runID)
+	if err != nil || len(adopted.Records) != 2 || adopted.Records[1].Name != agent.TraceEventMigrationAdopted {
+		t.Fatalf("adopted running Trace = %#v err=%v", adopted, err)
+	}
+	after, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(ctx)
+	if err != nil || !ok || after.RunID != runID || after.AttemptNo != 1 {
+		t.Fatalf("post-migration claim = %#v ok=%t err=%v", after, ok, err)
+	}
+	trace, err := agent.LoadDurableTraceByRun(ctx, api.db.Pool(), runID)
+	if err != nil || len(trace.Records) != 3 || trace.Records[2].Name != agent.TraceSpanJobAttempt {
+		t.Fatalf("post-migration Attempt Trace = %#v err=%v", trace, err)
 	}
 }
 
@@ -141,6 +207,9 @@ func TestTraceSchemaRejectsInvalidLifecycleAndCascades(t *testing.T) {
 	ctx := context.Background()
 	const traceID = "trace-constraints"
 	const rootSpanID = "span-root"
+	if _, err := api.db.Pool().Exec(ctx, `delete from agent_traces where run_id = $1`, runID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := api.db.Pool().Exec(ctx, `
 		insert into agent_traces(trace_id, run_id, root_span_id, schema_version)
 		values($1, $2, $3, 1)`, traceID, runID, rootSpanID); err != nil {

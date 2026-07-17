@@ -15,10 +15,16 @@ type recordingModelClient struct {
 	err     error
 }
 
-func (c *recordingModelClient) Decide(_ context.Context, request models.ModelRequest) (models.ModelDecision, error) {
+func (c *recordingModelClient) Decide(_ context.Context, request models.ModelRequest) (models.ModelOutcome, error) {
 	c.calls++
 	c.request = request
-	return c.result, c.err
+	resultKind := models.ModelResultFinalDraft
+	if c.result.Proposal != nil {
+		resultKind = models.ModelResultActionProposal
+	}
+	return models.ModelOutcome{ModelDecision: c.result, Metadata: models.ModelCallMetadata{
+		RequestedModel: request.Model, ResultKind: resultKind,
+	}}, c.err
 }
 
 func appendFinalDraft(t *testing.T, runtime *agent.PostgresRuntime, attempt agent.Attempt, text string) models.FinalDraft {

@@ -31,6 +31,14 @@ const (
 	CostSourceKey             = "agent.cost.source"
 	InstrumentationScopeKey   = "agent.instrumentation.scope"
 	InstrumentationVersionKey = "agent.instrumentation.version"
+	InputMessageCountKey      = "agent.input.message_count"
+	InputHashKey              = "agent.input.hash"
+	ActionDefinitionsKey      = "agent.action_definitions.enabled"
+	ActionDefinitionCountKey  = "agent.action_definitions.count"
+	ActionNameKey             = "agent.action.name"
+	ActionLogicalIDKey        = "agent.action.logical_id"
+	GatewayRetryCountKey      = "agent.gateway.retry_count"
+	GatewayFallbackCountKey   = "agent.gateway.fallback_count"
 )
 
 const (

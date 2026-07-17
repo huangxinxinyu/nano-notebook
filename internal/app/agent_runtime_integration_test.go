@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/jackc/pgx/v5"
@@ -441,6 +442,19 @@ func TestPublicationAcknowledgementLossReconcilesCommittedSuccess(t *testing.T) 
 	}
 	if runStatus != "completed" || assistants != 1 {
 		t.Fatalf("reconciled state run=%q assistants=%d", runStatus, assistants)
+	}
+	trace, err := agent.LoadDurableTraceByRun(ctx, api.db.Pool(), claimed.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rootEnds int
+	for _, record := range trace.Records {
+		if record.Kind == agentobs.RecordSpanEnded && record.SpanID == trace.RootSpanID && record.Status == agentobs.StatusOK {
+			rootEnds++
+		}
+	}
+	if rootEnds != 1 {
+		t.Fatalf("reconciled root terminal count = %d, Trace=%#v", rootEnds, trace.Records)
 	}
 }
 

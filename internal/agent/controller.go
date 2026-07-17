@@ -5,10 +5,15 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/instrumentation"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 )
 
-const ErrorAgentBudgetExhausted = "agent_budget_exhausted"
+const (
+	ErrorAgentBudgetExhausted = "agent_budget_exhausted"
+	ErrorAgentTraceInvalid    = "agent_trace_invalid"
+)
 
 type ControllerRuntime interface {
 	Load(context.Context, Attempt) (Execution, error)
@@ -21,7 +26,15 @@ type ControllerRuntime interface {
 }
 
 type DecisionModel interface {
-	Decide(context.Context, models.ModelRequest) (models.ModelDecision, error)
+	Decide(context.Context, models.ModelRequest) (models.ModelOutcome, error)
+}
+
+type AttemptTraceRuntime interface {
+	StartAttemptTrace(context.Context, Attempt) (context.Context, *agentobs.Tracer, error)
+}
+
+type ActionRetryTraceRuntime interface {
+	PreviousActionSpan(context.Context, Attempt, string) (agentobs.SpanContext, bool, error)
 }
 
 type Controller struct {
@@ -45,6 +58,13 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 	if err != nil {
 		return err
 	}
+	var tracer *agentobs.Tracer
+	if traceRuntime, ok := c.runtime.(AttemptTraceRuntime); ok {
+		ctx, tracer, err = traceRuntime.StartAttemptTrace(ctx, attempt)
+		if err != nil {
+			return err
+		}
+	}
 	forceFinalDecision := false
 	for {
 		prefix, err := c.runtime.LoadCheckpointPrefix(ctx, attempt)
@@ -55,7 +75,7 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 			return c.runtime.PublishFinal(ctx, attempt, *prefix.Final)
 		}
 		if proposal, action, ok := firstIncompleteAction(prefix); ok {
-			if err := c.executeAction(ctx, attempt, execution, prefix, proposal, action); err != nil {
+			if err := c.executeAction(ctx, tracer, attempt, execution, prefix, proposal, action); err != nil {
 				return err
 			}
 			continue
@@ -80,10 +100,16 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		if err := c.runtime.CheckAuthority(ctx, attempt); err != nil {
 			return c.handleRuntimeError(ctx, attempt, err)
 		}
-		decision, err := c.model.Decide(ctx, request)
+		var outcome models.ModelOutcome
+		if tracer != nil {
+			outcome, err = InvokeDecisionModel(ctx, tracer, c.model, request, prefix.AcceptedDecisions+1)
+		} else {
+			outcome, err = c.model.Decide(ctx, request)
+		}
 		if err != nil {
 			return c.handleModelError(ctx, attempt, err)
 		}
+		decision := outcome.ModelDecision
 		if err := decision.Validate(); err != nil {
 			code := string(models.ErrorInvalidResponse)
 			if !actionCapable {
@@ -137,6 +163,7 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 
 func (c *Controller) executeAction(
 	ctx context.Context,
+	tracer *agentobs.Tracer,
 	attempt Attempt,
 	execution Execution,
 	prefix CheckpointPrefix,
@@ -150,8 +177,29 @@ func (c *Controller) executeAction(
 	if !ok {
 		return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), fmt.Errorf("accepted unknown Action %q", action.Name))
 	}
-	result, err := executor.Execute(ctx, ActionRequest{Input: action.Input, DefaultTimeZone: execution.TimeZone})
+	request := ActionRequest{Input: action.Input, DefaultTimeZone: execution.TimeZone}
+	var result ActionResult
+	var err error
+	if tracer != nil {
+		options := ActionTraceOptions{StartIdentity: TraceActionStartIdentity(attempt.RunID, attempt.AttemptNo, action.ActionID)}
+		if retryRuntime, ok := c.runtime.(ActionRetryTraceRuntime); ok {
+			prior, found, priorErr := retryRuntime.PreviousActionSpan(ctx, attempt, action.ActionID)
+			if priorErr != nil {
+				return c.handleRuntimeError(ctx, attempt, priorErr)
+			}
+			if found {
+				options.RetryTarget = &prior
+				options.LinkIdentity = options.StartIdentity + "/retries"
+			}
+		}
+		result, err = InvokeAgentAction(ctx, tracer, executor, action.ActionID, request, options)
+	} else {
+		result, err = executor.Execute(ctx, request)
+	}
 	if err != nil {
+		if handled, result := c.handleRecordingError(ctx, attempt, err); handled {
+			return result
+		}
 		if ctx.Err() != nil {
 			return err
 		}
@@ -211,6 +259,9 @@ func encodedActionResultBytes(prefix CheckpointPrefix) (int, error) {
 }
 
 func (c *Controller) handleModelError(ctx context.Context, attempt Attempt, err error) error {
+	if handled, result := c.handleRecordingError(ctx, attempt, err); handled {
+		return result
+	}
 	if errors.Is(context.Cause(ctx), ErrLeaseLost) || errors.Is(err, ErrLeaseLost) {
 		return ErrLeaseLost
 	}
@@ -223,6 +274,17 @@ func (c *Controller) handleModelError(ctx context.Context, attempt Attempt, err 
 		code = string(modelErr.Kind)
 	}
 	return c.fail(ctx, attempt, code, err)
+}
+
+func (c *Controller) handleRecordingError(ctx context.Context, attempt Attempt, err error) (bool, error) {
+	var recordingErr *instrumentation.RecordingError
+	if !errors.As(err, &recordingErr) {
+		return false, nil
+	}
+	if errors.Is(recordingErr, agentobs.ErrLifecycle) || errors.Is(recordingErr, agentobs.ErrLimitExceeded) || errors.Is(recordingErr, agentobs.ErrIdentityConflict) || errors.Is(recordingErr, agentobs.ErrUnresolvedLink) {
+		return true, c.fail(ctx, attempt, ErrorAgentTraceInvalid, recordingErr)
+	}
+	return true, err
 }
 
 func (c *Controller) handleRuntimeError(ctx context.Context, attempt Attempt, err error) error {

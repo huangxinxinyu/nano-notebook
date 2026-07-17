@@ -446,17 +446,23 @@ type decisionModelStub struct {
 	err       error
 }
 
-func (m *decisionModelStub) Decide(_ context.Context, request models.ModelRequest) (models.ModelDecision, error) {
+func (m *decisionModelStub) Decide(_ context.Context, request models.ModelRequest) (models.ModelOutcome, error) {
 	m.requests = append(m.requests, request)
 	if m.err != nil {
-		return models.ModelDecision{}, m.err
+		return models.ModelOutcome{}, m.err
 	}
 	if len(m.decisions) == 0 {
-		return models.ModelDecision{}, errors.New("unexpected model decision")
+		return models.ModelOutcome{}, errors.New("unexpected model decision")
 	}
 	decision := m.decisions[0]
 	m.decisions = m.decisions[1:]
-	return decision, nil
+	resultKind := models.ModelResultFinalDraft
+	if decision.Proposal != nil {
+		resultKind = models.ModelResultActionProposal
+	}
+	return models.ModelOutcome{ModelDecision: decision, Metadata: models.ModelCallMetadata{
+		RequestedModel: request.Model, ResultKind: resultKind,
+	}}, nil
 }
 
 type recordingAction struct {

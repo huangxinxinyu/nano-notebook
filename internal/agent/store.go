@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -81,7 +82,7 @@ func (s *Store) ActiveByUser(ctx context.Context, userID string) (RunRef, bool, 
 // request-principal callers pass both user and/or Run identity.
 func (s *Store) ExpireIfOverdue(ctx context.Context, userID, runID string) (int, error) {
 	rows, err := s.db.Query(ctx, `
-		select r.id, j.id
+		select r.id, j.id, j.attempt_no
 		from agent_runs r
 		join agent_jobs j on j.run_id = r.id
 		where r.status in ('queued', 'running')
@@ -95,13 +96,14 @@ func (s *Store) ExpireIfOverdue(ctx context.Context, userID, runID string) (int,
 		return 0, err
 	}
 	type overdueRun struct {
-		runID string
-		jobID string
+		runID     string
+		jobID     string
+		attemptNo int
 	}
 	overdue := make([]overdueRun, 0)
 	for rows.Next() {
 		var item overdueRun
-		if err := rows.Scan(&item.runID, &item.jobID); err != nil {
+		if err := rows.Scan(&item.runID, &item.jobID, &item.attemptNo); err != nil {
 			rows.Close()
 			return 0, err
 		}
@@ -131,6 +133,19 @@ func (s *Store) ExpireIfOverdue(ctx context.Context, userID, runID string) (int,
 		}
 		if runTag.RowsAffected() != 1 || jobTag.RowsAffected() != 1 {
 			return 0, errors.New("deadline expiry did not transition Run and Job together")
+		}
+		tx, ok := s.db.(pgx.Tx)
+		if !ok {
+			return 0, errors.New("deadline expiry requires a transaction")
+		}
+		if err := RecordRunTerminalInTx(ctx, tx, item.runID, RunTerminalTrace{
+			CauseEvent: TraceEventDeadlineExpired,
+			RunStatus:  "failed",
+			SpanStatus: agentobs.StatusError,
+			ErrorCode:  "run_deadline_exceeded",
+			AttemptNo:  item.attemptNo,
+		}); err != nil {
+			return 0, err
 		}
 		if _, err := s.db.Exec(ctx, `select pg_notify('nano_agent_runs', $1)`, item.runID); err != nil {
 			return 0, err
@@ -209,13 +224,14 @@ func (s *Store) LatestForChat(ctx context.Context, userID, chatID string) ([]Run
 func (s *Store) Cancel(ctx context.Context, userID, runID string) (RunSnapshot, error) {
 	var run RunSnapshot
 	var jobID string
+	var attemptNo int
 	err := s.db.QueryRow(ctx, `
-		select r.id, r.input_message_id, r.status, r.error_code, j.id
+		select r.id, r.input_message_id, r.status, r.error_code, j.id, j.attempt_no
 		from agent_runs r
 		join agent_jobs j on j.run_id = r.id
 		where r.id = $1 and r.user_id = $2
 		for update of r, j`, runID, userID).
-		Scan(&run.ID, &run.InputMessageID, &run.Status, &run.ErrorCode, &jobID)
+		Scan(&run.ID, &run.InputMessageID, &run.Status, &run.ErrorCode, &jobID, &attemptNo)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RunSnapshot{}, ErrRunNotFound
 	}
@@ -245,6 +261,18 @@ func (s *Store) Cancel(ctx context.Context, userID, runID string) (RunSnapshot, 
 	}
 	if runTag.RowsAffected() != 1 || jobTag.RowsAffected() != 1 {
 		return RunSnapshot{}, ErrRunNotCancellable
+	}
+	tx, ok := s.db.(pgx.Tx)
+	if !ok {
+		return RunSnapshot{}, errors.New("Run cancellation requires a transaction")
+	}
+	if err := RecordRunTerminalInTx(ctx, tx, runID, RunTerminalTrace{
+		CauseEvent: TraceEventCancellation,
+		RunStatus:  "cancelled",
+		SpanStatus: agentobs.StatusCancelled,
+		AttemptNo:  attemptNo,
+	}); err != nil {
+		return RunSnapshot{}, err
 	}
 	if _, err := s.db.Exec(ctx, `select pg_notify('nano_agent_runs', $1)`, runID); err != nil {
 		return RunSnapshot{}, err
@@ -327,6 +355,18 @@ func (s *Store) RetryQueued(ctx context.Context, userID, sourceRunID, key, reque
 	if _, err := s.db.Exec(ctx, `
 		insert into agent_jobs(id, kind, run_id, status)
 		values($1, 'agent_run', $2, 'queued')`, jobID, runID); err != nil {
+		return RunSnapshot{}, false, err
+	}
+	tx, ok := s.db.(pgx.Tx)
+	if !ok {
+		return RunSnapshot{}, false, errors.New("Run Retry requires a transaction")
+	}
+	sourceTrace, err := NewOwnedRunTraceRecorder(ctx, tx, sourceRunID)
+	if err != nil {
+		return RunSnapshot{}, false, err
+	}
+	retryFrom := sourceTrace.RootSpanContext()
+	if err := StartRunTraceInTx(ctx, tx, runID, model, promptVersion, &retryFrom); err != nil {
 		return RunSnapshot{}, false, err
 	}
 	run := RunSnapshot{ID: runID, InputMessageID: inputMessageID, Status: "queued"}

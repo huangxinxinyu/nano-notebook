@@ -11,12 +11,14 @@ import (
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/otelbridge"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/telemetry"
 	agentworker "github.com/huangxinxinyu/nano-notebook/internal/worker"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
 )
 
 func main() {
@@ -43,7 +45,13 @@ func main() {
 	telemetry.StartupSpan(ctx, "nano-worker")
 
 	modelClient := models.NewBifrostClient(env("NANO_BIFROST_URL", "http://127.0.0.1:56666"), &http.Client{}, 2048)
-	runtime := agent.NewPostgresRuntime(db.Pool(), agent.BareSystemPrompt, nil)
+	traceBridge, err := otelbridge.New(otel.Tracer("nano-agent-observability"))
+	if err != nil {
+		slog.Error("Agent Trace telemetry bridge unavailable", "error", err)
+		os.Exit(1)
+	}
+	defer traceBridge.Shutdown(context.Background())
+	runtime := agent.NewPostgresRuntime(db.Pool(), agent.BareSystemPrompt, nil, agent.WithBestEffortTraceExporter(traceBridge))
 	registry, err := agent.NewActionRegistry(agent.NewCalculateAction(), agent.NewCurrentTimeAction(nil))
 	if err != nil {
 		slog.Error("worker Action registry invalid", "error", err)

@@ -9,6 +9,9 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/google/uuid"
 )
 
 type ModelRole string
@@ -86,11 +89,19 @@ func NewBifrostClient(baseURL string, httpClient *http.Client, maxCompletionToke
 	}
 }
 
-func (c *BifrostClient) Decide(ctx context.Context, request ModelRequest) (ModelDecision, error) {
+func (c *BifrostClient) Decide(ctx context.Context, request ModelRequest) (ModelOutcome, error) {
 	return c.request(ctx, request)
 }
 
-func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (ModelDecision, error) {
+func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outcome ModelOutcome, resultErr error) {
+	startedAt := time.Now()
+	defer func() {
+		outcome.Metadata.RequestedModel = request.Model
+		outcome.Metadata.Latency = time.Since(startedAt)
+		if resultErr != nil {
+			outcome.Metadata.ResultKind = modelErrorResultKind(resultErr)
+		}
+	}()
 	type providerToolCall struct {
 		ID       string `json:"id"`
 		Type     string `json:"type"`
@@ -111,30 +122,30 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (Mode
 		switch message.Role {
 		case RoleSystem, RoleUser:
 			if strings.TrimSpace(message.Content) == "" || len(message.ActionCalls) > 0 || message.ActionCallID != "" {
-				return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid text model message")}
+				return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid text model message")}
 			}
 			provider.Role = string(message.Role)
 		case RoleAssistant:
 			provider.Role = "assistant"
 			if len(message.ActionCalls) == 0 {
 				if strings.TrimSpace(message.Content) == "" || message.ActionCallID != "" {
-					return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid assistant model message")}
+					return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid assistant model message")}
 				}
 				break
 			}
 			if strings.TrimSpace(message.Content) != "" || message.ActionCallID != "" {
-				return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("assistant proposal message has conflicting fields")}
+				return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("assistant proposal message has conflicting fields")}
 			}
 			provider.Content = ""
 			provider.ToolCalls = make([]providerToolCall, 0, len(message.ActionCalls))
 			for _, call := range message.ActionCalls {
 				var input map[string]json.RawMessage
 				if strings.TrimSpace(call.ID) == "" || strings.TrimSpace(call.Name) == "" || json.Unmarshal(call.Input, &input) != nil || input == nil {
-					return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid assistant Action call")}
+					return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid assistant Action call")}
 				}
 				var canonical bytes.Buffer
 				if err := json.Compact(&canonical, call.Input); err != nil {
-					return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
+					return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
 				}
 				var toolCall providerToolCall
 				toolCall.ID = call.ID
@@ -145,12 +156,12 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (Mode
 			}
 		case RoleAction:
 			if strings.TrimSpace(message.ActionCallID) == "" || strings.TrimSpace(message.Content) == "" || len(message.ActionCalls) > 0 {
-				return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid Action result message")}
+				return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid Action result message")}
 			}
 			provider.Role = "tool"
 			provider.ToolCallID = message.ActionCallID
 		default:
-			return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("unsupported model message role")}
+			return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("unsupported model message role")}
 		}
 		messages = append(messages, provider)
 	}
@@ -167,7 +178,7 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (Mode
 	for _, definition := range request.ActionDefinitions {
 		var schema map[string]json.RawMessage
 		if strings.TrimSpace(definition.Name) == "" || strings.TrimSpace(definition.Description) == "" || json.Unmarshal(definition.InputSchema, &schema) != nil || schema == nil {
-			return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid Action definition")}
+			return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid Action definition")}
 		}
 		var tool providerTool
 		tool.Type = "function"
@@ -196,36 +207,39 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (Mode
 		ToolChoice:          toolChoice,
 	})
 	if err != nil {
-		return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
+		return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
 	}
 	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
+		return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
 	}
 	httpRequest.Header.Set("Content-Type", "application/json")
+	httpRequest.Header.Set("X-Request-ID", uuid.NewString())
 	response, err := c.httpClient.Do(httpRequest)
 	if err != nil {
 		kind := ErrorUnavailable
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			kind = ErrorTimeout
 		}
-		return ModelDecision{}, &ModelError{Kind: kind, Err: err}
+		return ModelOutcome{}, &ModelError{Kind: kind, Err: err}
 	}
 	defer response.Body.Close()
 
 	const maxResponseBytes = 2 << 20
 	responseBody, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
 	if err != nil {
-		return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
+		return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
 	}
 	if len(responseBody) > maxResponseBytes {
-		return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost response too large")}
+		return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost response too large")}
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return ModelDecision{}, &ModelError{Kind: ErrorUnavailable, Err: fmt.Errorf("Bifrost status %d", response.StatusCode)}
+		return ModelOutcome{}, &ModelError{Kind: ErrorUnavailable, Err: fmt.Errorf("Bifrost status %d", response.StatusCode)}
 	}
 	var decoded struct {
-		Choices []struct {
+		Provider string `json:"provider"`
+		Model    string `json:"model"`
+		Choices  []struct {
 			Message struct {
 				Role      string  `json:"role"`
 				Content   *string `json:"content"`
@@ -240,9 +254,25 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (Mode
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
+		Usage struct {
+			PromptTokens     *int64 `json:"prompt_tokens"`
+			CompletionTokens *int64 `json:"completion_tokens"`
+			TotalTokens      *int64 `json:"total_tokens"`
+			PromptDetails    struct {
+				CachedTokens *int64 `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+			CompletionDetails struct {
+				ReasoningTokens *int64 `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
+		} `json:"usage"`
+		GatewayRetries   *int64   `json:"gateway_retries"`
+		GatewayFallbacks *int64   `json:"gateway_fallbacks"`
+		Cost             *float64 `json:"cost"`
+		CostCurrency     string   `json:"cost_currency"`
+		CostSource       string   `json:"cost_source"`
 	}
 	if err := json.Unmarshal(responseBody, &decoded); err != nil {
-		return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
+		return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
 	}
 	for _, choice := range decoded.Choices {
 		if choice.Message.Role != "assistant" {
@@ -260,27 +290,64 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (Mode
 				providerCallID := strings.TrimSpace(call.ID)
 				_, duplicateID := providerCallIDs[providerCallID]
 				if providerCallID == "" || duplicateID || call.Type != "function" || strings.TrimSpace(call.Function.Name) == "" || json.Unmarshal([]byte(call.Function.Arguments), &input) != nil || input == nil {
-					return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid Bifrost tool call")}
+					return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid Bifrost tool call")}
 				}
 				providerCallIDs[providerCallID] = struct{}{}
 				var canonical bytes.Buffer
 				if err := json.Compact(&canonical, []byte(call.Function.Arguments)); err != nil {
-					return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
+					return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
 				}
 				actions = append(actions, ActionProposal{Name: call.Function.Name, Input: json.RawMessage(canonical.Bytes())})
 			}
 			decision.Proposal = &ActionProposalBatch{Actions: actions}
 		}
 		if err := decision.Validate(); err != nil {
-			return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
+			return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
 		}
 		if decision.Proposal != nil && choice.FinishReason != "tool_calls" {
-			return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost Action proposal has inconsistent finish reason")}
+			return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost Action proposal has inconsistent finish reason")}
 		}
 		if decision.Final != nil && (strings.TrimSpace(choice.FinishReason) == "" || choice.FinishReason == "tool_calls") {
-			return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost Final Draft has inconsistent finish reason")}
+			return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost Final Draft has inconsistent finish reason")}
 		}
-		return decision, nil
+		resultKind := ModelResultFinalDraft
+		if decision.Proposal != nil {
+			resultKind = ModelResultActionProposal
+		}
+		metadata := ModelCallMetadata{
+			RequestedModel:   request.Model,
+			SelectedProvider: strings.TrimSpace(decoded.Provider),
+			SelectedModel:    strings.TrimSpace(decoded.Model),
+			ResultKind:       resultKind,
+			FinishReason:     choice.FinishReason,
+			InputTokens:      decoded.Usage.PromptTokens,
+			OutputTokens:     decoded.Usage.CompletionTokens,
+			TotalTokens:      decoded.Usage.TotalTokens,
+			CachedTokens:     decoded.Usage.PromptDetails.CachedTokens,
+			ReasoningTokens:  decoded.Usage.CompletionDetails.ReasoningTokens,
+			GatewayRetries:   decoded.GatewayRetries,
+			GatewayFallbacks: decoded.GatewayFallbacks,
+		}
+		if decoded.Cost != nil && strings.TrimSpace(decoded.CostCurrency) != "" && strings.TrimSpace(decoded.CostSource) != "" {
+			metadata.Cost = ModelCost{Known: true, Amount: decoded.Cost, Currency: decoded.CostCurrency, Source: decoded.CostSource}
+		}
+		if err := metadata.Validate(); err != nil {
+			return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
+		}
+		return ModelOutcome{ModelDecision: decision, Metadata: metadata}, nil
 	}
-	return ModelDecision{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost response has no assistant decision")}
+	return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost response has no assistant decision")}
+}
+
+func modelErrorResultKind(err error) ModelResultKind {
+	var modelErr *ModelError
+	if errors.As(err, &modelErr) {
+		switch modelErr.Kind {
+		case ErrorTimeout:
+			return ModelResultTimeout
+		case ErrorUnavailable:
+			return ModelResultUnavailable
+		}
+	}
+	return ModelResultInvalid
 }

@@ -15,6 +15,9 @@ func TestBifrostClientReturnsANonStreamingFinalDecision(t *testing.T) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
 			t.Fatalf("request = %s %s, want POST /v1/chat/completions", r.Method, r.URL.Path)
 		}
+		if r.Header.Get("X-Request-ID") == "" {
+			t.Fatal("Bifrost correlation request ID is missing")
+		}
 		var request struct {
 			Model               string         `json:"model"`
 			Messages            []ModelMessage `json:"messages"`
@@ -40,7 +43,7 @@ func TestBifrostClientReturnsANonStreamingFinalDecision(t *testing.T) {
 	defer server.Close()
 
 	client := NewBifrostClient(server.URL, server.Client(), 2048)
-	decision, err := client.Decide(context.Background(), ModelRequest{
+	outcome, err := client.Decide(context.Background(), ModelRequest{
 		Model: "aliyun/qwen-flash",
 		Messages: []ModelMessage{
 			{Role: "system", Content: "Answer directly."},
@@ -50,8 +53,12 @@ func TestBifrostClientReturnsANonStreamingFinalDecision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision.Final == nil || decision.Final.Text != "A KV cache reuses attention keys and values." || decision.Proposal != nil {
-		t.Fatalf("final decision = %+v err=%v", decision, err)
+	if outcome.Final == nil || outcome.Final.Text != "A KV cache reuses attention keys and values." || outcome.Proposal != nil {
+		t.Fatalf("final decision = %+v err=%v", outcome.ModelDecision, err)
+	}
+	metadata := outcome.Metadata
+	if metadata.RequestedModel != "aliyun/qwen-flash" || metadata.ResultKind != ModelResultFinalDraft || metadata.FinishReason != "stop" || metadata.InputTokens == nil || *metadata.InputTokens != 18 || metadata.OutputTokens == nil || *metadata.OutputTokens != 9 || metadata.TotalTokens == nil || *metadata.TotalTokens != 27 || metadata.Cost.Known || metadata.Cost.Amount != nil || metadata.Latency <= 0 {
+		t.Fatalf("normalized metadata = %+v", metadata)
 	}
 }
 
@@ -102,6 +109,29 @@ func TestBifrostClientEncodesDefinitionsAndDecodesOrderedActionProposals(t *test
 	first, second := decision.Proposal.Actions[0], decision.Proposal.Actions[1]
 	if first.Name != "current_time" || string(first.Input) != `{"time_zone":"Asia/Shanghai"}` || second.Name != "calculate" || string(second.Input) != `{"operation":"subtract","operands":["12.5","3.2"]}` {
 		t.Fatalf("ordered actions = %+v", decision.Proposal.Actions)
+	}
+}
+
+func TestBifrostClientNormalizesOptionalGatewayMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"provider":"aliyun","model":"qwen-flash","gateway_retries":1,"gateway_fallbacks":0,
+			"cost":0.0025,"cost_currency":"USD","cost_source":"gateway",
+			"choices":[{"message":{"role":"assistant","content":"Done."},"finish_reason":"stop"}],
+			"usage":{"prompt_tokens":20,"completion_tokens":5,"total_tokens":25,
+				"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":2}}
+		}`))
+	}))
+	defer server.Close()
+	outcome, err := NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
+		Model: "aliyun/qwen-flash", Messages: []ModelMessage{{Role: RoleUser, Content: "Decide."}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := outcome.Metadata
+	if m.SelectedProvider != "aliyun" || m.SelectedModel != "qwen-flash" || m.CachedTokens == nil || *m.CachedTokens != 4 || m.ReasoningTokens == nil || *m.ReasoningTokens != 2 || m.GatewayRetries == nil || *m.GatewayRetries != 1 || m.GatewayFallbacks == nil || *m.GatewayFallbacks != 0 || !m.Cost.Known || m.Cost.Amount == nil || *m.Cost.Amount != 0.0025 || m.Cost.Currency != "USD" || m.Cost.Source != "gateway" {
+		t.Fatalf("normalized optional metadata = %+v", m)
 	}
 }
 

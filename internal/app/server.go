@@ -746,6 +746,9 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		if err := jobs.NewStore(tx).CreateAgentRun(r.Context(), jobID, runID); err != nil {
 			return err
 		}
+		if err := agent.StartRunTraceInTx(r.Context(), tx, runID, s.cfg.DefaultModel, agent.BarePromptVersion, nil); err != nil {
+			return err
+		}
 		_, err = tx.Exec(r.Context(), `select pg_notify('nano_agent_jobs', $1)`, jobID)
 		return err
 	})

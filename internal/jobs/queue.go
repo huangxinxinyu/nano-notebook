@@ -3,10 +3,13 @@ package jobs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/semconv"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -74,6 +77,7 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 			continue
 		}
 
+		previousAttemptNo := job.AttemptNo
 		job.AttemptNo++
 		job.LeaseToken = uuid.NewString()
 		jobTag, err := tx.Exec(ctx, `
@@ -100,6 +104,56 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 		}
 		if status == "queued" {
 			if _, err := tx.Exec(ctx, `select pg_notify('nano_agent_runs', $1)`, job.RunID); err != nil {
+				return ClaimedJob{}, false, err
+			}
+		}
+		traceRecorder, err := agent.NewRunTraceRecorder(ctx, tx, job.RunID)
+		if err != nil {
+			return ClaimedJob{}, false, err
+		}
+		tracer, err := agentobs.NewTracer(agentobs.TracerConfig{
+			Recorder: traceRecorder, SemanticConventionVersion: agent.TraceSemanticConventionVersion,
+		})
+		if err != nil {
+			return ClaimedJob{}, false, err
+		}
+		rootContext := agentobs.ContextWithSpanContext(ctx, traceRecorder.RootSpanContext())
+		var priorAttempt agentobs.SpanContext
+		if status == "running" {
+			priorIdentity := agent.TraceAttemptStartIdentity(job.RunID, previousAttemptNo)
+			priorAttempt, err = traceRecorder.SpanContextByIdentity(ctx, priorIdentity)
+			if err != nil {
+				return ClaimedJob{}, false, err
+			}
+			priorContext := agentobs.ContextWithSpanContext(ctx, priorAttempt)
+			if err := tracer.Event(priorContext, agentobs.Event{
+				IdentityKey: fmt.Sprintf("run/%s/attempt/%d/lease-expired", job.RunID, previousAttemptNo),
+				Name:        agent.TraceEventLeaseExpired,
+				Attributes: []agentobs.Attribute{
+					agentobs.String(agent.TraceKeyJobID, job.ID),
+					agentobs.Int64(agent.TraceKeyAttemptNumber, int64(previousAttemptNo)),
+				},
+			}); err != nil {
+				return ClaimedJob{}, false, err
+			}
+		}
+		attemptContext, _, err := tracer.StartSpan(rootContext, agentobs.SpanStart{
+			IdentityKey: agent.TraceAttemptStartIdentity(job.RunID, job.AttemptNo),
+			Name:        agent.TraceSpanJobAttempt,
+			Attributes: []agentobs.Attribute{
+				agentobs.String(agent.TraceKeyJobID, job.ID),
+				agentobs.Int64(agent.TraceKeyAttemptNumber, int64(job.AttemptNo)),
+			},
+		})
+		if err != nil {
+			return ClaimedJob{}, false, err
+		}
+		if status == "running" {
+			if err := tracer.Link(attemptContext, agentobs.Link{
+				IdentityKey: fmt.Sprintf("run/%s/attempt/%d/continues", job.RunID, job.AttemptNo),
+				Name:        semconv.LinkContinues,
+				Target:      priorAttempt,
+			}); err != nil {
 				return ClaimedJob{}, false, err
 			}
 		}
@@ -184,6 +238,17 @@ func exhaustRecovery(ctx context.Context, tx pgx.Tx, job ClaimedJob) error {
 	}
 	if jobTag.RowsAffected() != 1 || runTag.RowsAffected() != 1 {
 		return errors.New("recovery exhaustion did not transition Run and Job together")
+	}
+	if err := agent.RecordAttemptLeaseExpiredInTx(ctx, tx, job.RunID, job.ID, job.AttemptNo); err != nil {
+		return err
+	}
+	if err := agent.RecordRunTerminalInTx(ctx, tx, job.RunID, agent.RunTerminalTrace{
+		CauseEvent: agent.TraceEventRecoveryExhausted,
+		RunStatus:  "failed",
+		SpanStatus: agentobs.StatusError,
+		ErrorCode:  "recovery_exhausted",
+	}); err != nil {
+		return err
 	}
 	_, err = tx.Exec(ctx, `select pg_notify('nano_agent_runs', $1)`, job.RunID)
 	return err
