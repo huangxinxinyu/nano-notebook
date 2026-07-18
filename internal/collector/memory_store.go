@@ -14,8 +14,10 @@ import (
 )
 
 type MemoryStore struct {
-	mu     sync.RWMutex
-	traces map[agentobs.TraceID]memoryTrace
+	mu            sync.RWMutex
+	traces        map[agentobs.TraceID]memoryTrace
+	tombstones    map[agentobs.TraceID]PurgeCommand
+	purgeCommands map[string]PurgeCommand
 }
 
 type memoryTrace struct {
@@ -24,7 +26,10 @@ type memoryTrace struct {
 }
 
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{traces: make(map[agentobs.TraceID]memoryTrace)}
+	return &MemoryStore{
+		traces: make(map[agentobs.TraceID]memoryTrace), tombstones: make(map[agentobs.TraceID]PurgeCommand),
+		purgeCommands: make(map[string]PurgeCommand),
+	}
 }
 
 func (s *MemoryStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk) (int, error) {
@@ -33,12 +38,36 @@ func (s *MemoryStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk) (i
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, tombstoned := s.tombstones[chunk.Trace.TraceID]; tombstoned {
+		return 0, &ChunkError{Code: CodeTombstoned, Err: errors.New("Collector Trace is tombstoned")}
+	}
 	merged, committedThrough, err := validateAndMergeTraceChunk(ctx, s.traces[chunk.Trace.TraceID], chunk)
 	if err != nil {
 		return 0, err
 	}
 	s.traces[chunk.Trace.TraceID] = merged
 	return committedThrough, nil
+}
+
+func (s *MemoryStore) TombstoneTrace(_ context.Context, command PurgeCommand) error {
+	if s == nil {
+		return errors.New("nil Collector Memory Store")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if existing, exists := s.purgeCommands[command.CommandID]; exists {
+		if existing != command {
+			return &PurgeCommandError{Code: CodeIdentityConflict, Err: errors.New("Collector purge command identity changed")}
+		}
+		return nil
+	}
+	if _, exists := s.tombstones[command.TraceID]; exists {
+		s.purgeCommands[command.CommandID] = command
+		return nil
+	}
+	s.tombstones[command.TraceID] = command
+	s.purgeCommands[command.CommandID] = command
+	return nil
 }
 
 func validateAndMergeTraceChunk(ctx context.Context, existing memoryTrace, chunk TraceChunk) (memoryTrace, int, error) {

@@ -111,8 +111,12 @@ func run(ctx context.Context, config collectorConfig) error {
 	if err != nil {
 		return err
 	}
+	purger, err := collector.NewPurger(collector.PurgerConfig{ProducerID: config.ProducerID, Store: store})
+	if err != nil {
+		return err
+	}
 	handler, err := collector.NewHTTPHandler(collector.HTTPConfig{
-		Ingestor: ingestor, ServiceToken: config.ServiceToken, MaxBodyBytes: config.MaxBodyBytes,
+		Ingestor: ingestor, Purger: purger, ServiceToken: config.ServiceToken, MaxBodyBytes: config.MaxBodyBytes,
 		Readiness: pool.Ping,
 	})
 	if err != nil {

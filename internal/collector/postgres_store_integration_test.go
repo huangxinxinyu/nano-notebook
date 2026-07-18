@@ -205,6 +205,63 @@ func TestPostgresStoreRejectsRawRecordMutation(t *testing.T) {
 	}
 }
 
+func TestPostgresStorePersistsUnknownTraceTombstoneAndPurgeWork(t *testing.T) {
+	ctx := context.Background()
+	pool := openObservabilityTestPool(t, ctx)
+	t.Cleanup(func() {
+		if pool != nil {
+			pool.Close()
+		}
+	})
+	resetObservabilityTestSchema(t, ctx, pool)
+	store := collector.NewPostgresStore(pool)
+	purger, err := collector.NewPurger(collector.PurgerConfig{ProducerID: "nano-worker", Store: store})
+	if err != nil {
+		t.Fatalf("NewPurger: %v", err)
+	}
+	batch := collector.PurgeBatch{
+		ProtocolVersion: collector.ProtocolVersion, BatchID: "purge-batch-pg", ProducerID: "nano-worker",
+		CreatedAt: time.Unix(1_700_000_200, 0).UTC(),
+		Commands: []collector.PurgeCommand{{
+			CommandID: "purge-command-pg", CommandVersion: 1, Kind: collector.CommandPurgeTrace,
+			TraceID: "trace-1", RunID: "run-1", RequestedAt: time.Unix(1_700_000_100, 0).UTC(),
+		}},
+	}
+	if result, err := purger.Purge(ctx, batch); err != nil || result.Commands[0].Status != collector.PurgeAcknowledged {
+		t.Fatalf("Purge result = %#v, error = %v", result, err)
+	}
+
+	pool.Close()
+	pool = nil
+	reopened := openObservabilityTestPool(t, ctx)
+	t.Cleanup(reopened.Close)
+	store = collector.NewPostgresStore(reopened)
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+	ingestResult, err := ingestor.Ingest(ctx, validCollectorBatch(t))
+	if err != nil {
+		t.Fatalf("late Ingest: %v", err)
+	}
+	if got := ingestResult.Chunks[0]; got.Status != collector.ChunkRejected || got.Code != collector.CodeTombstoned {
+		t.Fatalf("late Ingest result = %#v", got)
+	}
+	var tombstones, purgeWork, traces int
+	if err := reopened.QueryRow(ctx, `select count(*) from obs_trace_tombstones where trace_id = 'trace-1'`).Scan(&tombstones); err != nil {
+		t.Fatalf("count tombstones: %v", err)
+	}
+	if err := reopened.QueryRow(ctx, `select count(*) from obs_purge_queue where trace_id = 'trace-1'`).Scan(&purgeWork); err != nil {
+		t.Fatalf("count purge work: %v", err)
+	}
+	if err := reopened.QueryRow(ctx, `select count(*) from obs_traces where trace_id = 'trace-1'`).Scan(&traces); err != nil {
+		t.Fatalf("count traces: %v", err)
+	}
+	if tombstones != 1 || purgeWork != 1 || traces != 0 {
+		t.Fatalf("tombstone/purge/trace counts = %d/%d/%d", tombstones, purgeWork, traces)
+	}
+}
+
 func openObservabilityTestPool(t *testing.T, ctx context.Context) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("NANO_TEST_OBSERVABILITY_DATABASE_URL")

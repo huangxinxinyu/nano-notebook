@@ -9,6 +9,7 @@ import (
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -40,6 +41,16 @@ func (s *PostgresStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk) 
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
+	if err := lockTraceID(ctx, tx, chunk.Trace.TraceID); err != nil {
+		return 0, err
+	}
+	var tombstoned bool
+	if err := tx.QueryRow(ctx, `select exists(select 1 from obs_trace_tombstones where trace_id = $1)`, chunk.Trace.TraceID).Scan(&tombstoned); err != nil {
+		return 0, err
+	}
+	if tombstoned {
+		return 0, &ChunkError{Code: CodeTombstoned, Err: errors.New("Collector Trace is tombstoned")}
+	}
 
 	if _, err := tx.Exec(ctx, `
 		insert into obs_traces (
@@ -59,7 +70,7 @@ func (s *PostgresStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk) 
 	}
 	if existing.Tombstoned {
 		return 0, &ChunkError{
-			Code: CodeInvalidChunk, CommittedThrough: existing.CommittedThrough,
+			Code: CodeTombstoned, CommittedThrough: existing.CommittedThrough,
 			Err: errors.New("Collector Trace is tombstoned"),
 		}
 	}
@@ -96,6 +107,79 @@ func (s *PostgresStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk) 
 		return 0, err
 	}
 	return committedThrough, nil
+}
+
+func (s *PostgresStore) TombstoneTrace(ctx context.Context, command PurgeCommand) error {
+	if s == nil || s.pool == nil {
+		return errors.New("nil Collector PostgreSQL Store")
+	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := lockTraceID(ctx, tx, command.TraceID); err != nil {
+		return err
+	}
+	var existingTraceID agentobs.TraceID
+	var existingRunID string
+	var existingVersion int
+	var existingProducerID string
+	var existingRequestedAtUnixNano int64
+	err = tx.QueryRow(ctx, `
+		select trace_id, run_id, command_version, producer_id, requested_at_unix_nano
+		from obs_purge_commands where command_id = $1
+	`, command.CommandID).Scan(
+		&existingTraceID, &existingRunID, &existingVersion, &existingProducerID, &existingRequestedAtUnixNano,
+	)
+	if err == nil {
+		if existingTraceID != command.TraceID || existingRunID != command.RunID ||
+			existingVersion != command.CommandVersion || existingProducerID != command.ProducerID ||
+			existingRequestedAtUnixNano != command.RequestedAt.UnixNano() {
+			return &PurgeCommandError{Code: CodeIdentityConflict, Err: errors.New("Collector purge command identity changed")}
+		}
+		return tx.Commit(ctx)
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into obs_trace_tombstones (trace_id, run_id)
+		values ($1, $2)
+		on conflict (trace_id) do nothing
+	`, command.TraceID, command.RunID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into obs_purge_commands (
+			command_id, trace_id, run_id, command_version, producer_id, requested_at, requested_at_unix_nano
+		) values ($1, $2, $3, $4, $5, $6, $7)
+	`, command.CommandID, command.TraceID, command.RunID, command.CommandVersion,
+		command.ProducerID, command.RequestedAt, command.RequestedAt.UnixNano()); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return &PurgeCommandError{Code: CodeIdentityConflict, Err: errors.New("Collector purge command identity changed")}
+		}
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		update obs_traces set tombstoned_at = coalesce(tombstoned_at, now()), updated_at = now()
+		where trace_id = $1
+	`, command.TraceID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into obs_purge_queue (trace_id) values ($1)
+		on conflict (trace_id) do nothing
+	`, command.TraceID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func lockTraceID(ctx context.Context, tx pgx.Tx, traceID agentobs.TraceID) error {
+	_, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, traceID)
+	return err
 }
 
 func (s *PostgresStore) LoadTrace(ctx context.Context, traceID agentobs.TraceID) (StoredTrace, error) {

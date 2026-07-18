@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 )
@@ -225,6 +226,66 @@ func TestHTTPHandlerReturnsServiceUnavailableWhenStoreFails(t *testing.T) {
 	}
 	if got := response.Body.String(); !bytes.Contains([]byte(got), []byte(`"code":"collector_unavailable"`)) {
 		t.Fatalf("body = %s", got)
+	}
+}
+
+func TestHTTPHandlerAcknowledgesPurgeAndRejectsLateBatch(t *testing.T) {
+	store := collector.NewMemoryStore()
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+	purger, err := collector.NewPurger(collector.PurgerConfig{ProducerID: "nano-worker", Store: store})
+	if err != nil {
+		t.Fatalf("NewPurger: %v", err)
+	}
+	handler, err := collector.NewHTTPHandler(collector.HTTPConfig{
+		Ingestor: ingestor, Purger: purger, ServiceToken: "collector-secret", MaxBodyBytes: 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPHandler: %v", err)
+	}
+	purge := collector.PurgeBatch{
+		ProtocolVersion: collector.ProtocolVersion, BatchID: "purge-batch-http", ProducerID: "nano-worker",
+		CreatedAt: time.Unix(1_700_000_200, 0).UTC(),
+		Commands: []collector.PurgeCommand{{
+			CommandID: "purge-command-http", CommandVersion: 1, Kind: collector.CommandPurgeTrace,
+			TraceID: "trace-1", RunID: "run-1", RequestedAt: time.Unix(1_700_000_100, 0).UTC(),
+		}},
+	}
+	purgeBody, err := json.Marshal(purge)
+	if err != nil {
+		t.Fatalf("Marshal PurgeBatch: %v", err)
+	}
+	purgeRequest := httptest.NewRequest(http.MethodPost, "/internal/agent-observability/v1/purges", bytes.NewReader(purgeBody))
+	purgeRequest.Header.Set("Authorization", "Bearer collector-secret")
+	purgeResponse := httptest.NewRecorder()
+	handler.ServeHTTP(purgeResponse, purgeRequest)
+	if purgeResponse.Code != http.StatusOK {
+		t.Fatalf("purge status = %d, body = %s", purgeResponse.Code, purgeResponse.Body.String())
+	}
+	var purgeResult collector.PurgeBatchResult
+	if err := json.NewDecoder(purgeResponse.Body).Decode(&purgeResult); err != nil {
+		t.Fatalf("Decode PurgeBatchResult: %v", err)
+	}
+	if len(purgeResult.Commands) != 1 || purgeResult.Commands[0].Status != collector.PurgeAcknowledged {
+		t.Fatalf("PurgeBatchResult = %#v", purgeResult)
+	}
+
+	lateBody, err := json.Marshal(validCollectorBatch(t))
+	if err != nil {
+		t.Fatalf("Marshal late Batch: %v", err)
+	}
+	lateRequest := httptest.NewRequest(http.MethodPost, "/internal/agent-observability/v1/batches", bytes.NewReader(lateBody))
+	lateRequest.Header.Set("Authorization", "Bearer collector-secret")
+	lateResponse := httptest.NewRecorder()
+	handler.ServeHTTP(lateResponse, lateRequest)
+	var lateResult collector.BatchResult
+	if err := json.NewDecoder(lateResponse.Body).Decode(&lateResult); err != nil {
+		t.Fatalf("Decode late BatchResult: %v", err)
+	}
+	if lateResponse.Code != http.StatusOK || lateResult.Chunks[0].Code != collector.CodeTombstoned {
+		t.Fatalf("late status/result = %d/%#v", lateResponse.Code, lateResult)
 	}
 }
 

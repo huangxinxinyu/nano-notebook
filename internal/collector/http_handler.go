@@ -13,6 +13,7 @@ import (
 
 type HTTPConfig struct {
 	Ingestor     *Ingestor
+	Purger       *Purger
 	ServiceToken string
 	MaxBodyBytes int64
 	Readiness    func(context.Context) error
@@ -20,6 +21,7 @@ type HTTPConfig struct {
 
 type httpHandler struct {
 	ingestor     *Ingestor
+	purger       *Purger
 	serviceToken string
 	maxBodyBytes int64
 	readiness    func(context.Context) error
@@ -32,11 +34,55 @@ func NewHTTPHandler(config HTTPConfig) (http.Handler, error) {
 	}
 	handler := &httpHandler{
 		ingestor: config.Ingestor, serviceToken: config.ServiceToken, maxBodyBytes: config.MaxBodyBytes,
-		readiness: config.Readiness, mux: http.NewServeMux(),
+		purger: config.Purger, readiness: config.Readiness, mux: http.NewServeMux(),
 	}
 	handler.mux.HandleFunc("/internal/agent-observability/v1/batches", handler.batches)
+	handler.mux.HandleFunc("/internal/agent-observability/v1/purges", handler.purges)
 	handler.mux.HandleFunc("/internal/agent-observability/v1/health", handler.health)
 	return handler, nil
+}
+
+func (h *httpHandler) purges(w http.ResponseWriter, r *http.Request) {
+	if !h.authorized(r) {
+		writeHTTPJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]string{"code": "unauthorized"}})
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeHTTPJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
+		return
+	}
+	if h.purger == nil {
+		writeHTTPJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]string{"code": "collector_unavailable"}})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var batch PurgeBatch
+	if err := decoder.Decode(&batch); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			writeHTTPJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": map[string]string{"code": "batch_too_large"}})
+			return
+		}
+		writeHTTPJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_batch"}})
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		writeHTTPJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_batch"}})
+		return
+	}
+	result, err := h.purger.Purge(r.Context(), batch)
+	if err != nil {
+		if errors.Is(err, ErrInvalidBatch) {
+			writeHTTPJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_batch"}})
+			return
+		}
+		w.Header().Set("Retry-After", "1")
+		writeHTTPJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]string{"code": "collector_unavailable"}})
+		return
+	}
+	writeHTTPJSON(w, http.StatusOK, result)
 }
 
 func (h *httpHandler) health(w http.ResponseWriter, r *http.Request) {

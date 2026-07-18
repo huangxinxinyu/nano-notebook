@@ -36,6 +36,23 @@ create index if not exists obs_traces_run_idx on obs_traces(run_id);
 create index if not exists obs_traces_chat_idx on obs_traces(chat_id);
 create index if not exists obs_traces_notebook_idx on obs_traces(notebook_id);
 
+create table if not exists obs_trace_tombstones (
+	trace_id text primary key check (char_length(trace_id) between 1 and 128),
+	run_id text not null check (char_length(run_id) between 1 and 128),
+	tombstoned_at timestamptz not null default now()
+);
+
+create table if not exists obs_purge_commands (
+	command_id text primary key check (char_length(command_id) between 1 and 160),
+	trace_id text not null references obs_trace_tombstones(trace_id) on delete restrict,
+	run_id text not null check (char_length(run_id) between 1 and 128),
+	command_version integer not null check (command_version = 1),
+	producer_id text not null check (char_length(producer_id) between 1 and 160),
+	requested_at timestamptz not null,
+	requested_at_unix_nano bigint not null,
+	created_at timestamptz not null default now()
+);
+
 create table if not exists obs_trace_records (
 	trace_id text not null references obs_traces(trace_id) on delete cascade,
 	sequence integer not null check (sequence >= 1),
@@ -87,4 +104,19 @@ create table if not exists obs_projection_queue (
 create index if not exists obs_projection_queue_ready_idx
 	on obs_projection_queue(available_at, trace_id)
 	where lease_token is null;
+
+create table if not exists obs_purge_queue (
+	trace_id text primary key references obs_trace_tombstones(trace_id) on delete cascade,
+	stage text not null default 'pending' check (stage in ('pending', 'objects_removed', 'content_removed')),
+	available_at timestamptz not null default now(),
+	attempt_count integer not null default 0 check (attempt_count >= 0),
+	lease_token text,
+	lease_expires_at timestamptz,
+	last_error_code text,
+	updated_at timestamptz not null default now()
+);
+
+create index if not exists obs_purge_queue_ready_idx
+	on obs_purge_queue(available_at, trace_id)
+	where stage != 'content_removed' and lease_token is null;
 `

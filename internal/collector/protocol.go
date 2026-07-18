@@ -28,6 +28,7 @@ const (
 	CodeInvalidChunk      = "invalid_chunk"
 	CodeInvalidLifecycle  = "invalid_lifecycle"
 	CodeSequenceGap       = "sequence_gap"
+	CodeTombstoned        = "tombstoned"
 	CodeUnsupportedSchema = "unsupported_schema"
 )
 
