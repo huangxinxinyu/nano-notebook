@@ -2,7 +2,9 @@ package collector_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -166,4 +168,42 @@ func TestHTTPHandlerRejectsTrailingJSONBeforeIngest(t *testing.T) {
 	if got := len(store.Records("trace-1")); got != 0 {
 		t.Fatalf("trailing request stored %d records", got)
 	}
+}
+
+func TestHTTPHandlerReturnsServiceUnavailableWhenStoreFails(t *testing.T) {
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{
+		ProducerID: "nano-worker",
+		Store:      unavailableStore{},
+	})
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+	handler, err := collector.NewHTTPHandler(collector.HTTPConfig{
+		Ingestor: ingestor, ServiceToken: "collector-secret", MaxBodyBytes: 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPHandler: %v", err)
+	}
+	body, err := json.Marshal(validCollectorBatch(t))
+	if err != nil {
+		t.Fatalf("Marshal Batch: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/internal/agent-observability/v1/batches", bytes.NewReader(body))
+	request.Header.Set("Authorization", "Bearer collector-secret")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if got := response.Body.String(); !bytes.Contains([]byte(got), []byte(`"code":"collector_unavailable"`)) {
+		t.Fatalf("body = %s", got)
+	}
+}
+
+type unavailableStore struct{}
+
+func (unavailableStore) CommitTraceChunk(context.Context, collector.TraceChunk) (int, error) {
+	return 0, errors.New("database unavailable")
 }

@@ -3,6 +3,7 @@ package collector_test
 import (
 	"context"
 	"encoding/hex"
+	"strings"
 	"testing"
 	"time"
 
@@ -150,6 +151,27 @@ func TestIngestorCommitsValidChunksWhenAnotherChunkHasInvalidEnvelope(t *testing
 	}
 	if got := len(store.Records("trace-valid-envelope")); got != 2 {
 		t.Fatalf("valid Trace stored %d records, want 2", got)
+	}
+}
+
+func TestIngestorRejectsOversizedTraceDescriptorWithoutRetryingStore(t *testing.T) {
+	store := collector.NewMemoryStore()
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+	batch := validCollectorBatch(t)
+	batch.Chunks[0].Trace.RunID = strings.Repeat("r", 129)
+
+	result, err := ingestor.Ingest(context.Background(), batch)
+	if err != nil {
+		t.Fatalf("Ingest transport error: %v", err)
+	}
+	if got := result.Chunks[0]; got.Status != collector.ChunkRejected || got.Code != collector.CodeInvalidChunk {
+		t.Fatalf("oversized descriptor result = %#v", got)
+	}
+	if got := len(store.Records("trace-1")); got != 0 {
+		t.Fatalf("oversized descriptor stored %d records", got)
 	}
 }
 

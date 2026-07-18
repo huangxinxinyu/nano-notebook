@@ -6,6 +6,8 @@ import (
 	"strings"
 )
 
+var ErrInvalidBatch = errors.New("Collector Batch envelope is invalid")
+
 type IngestorConfig struct {
 	ProducerID string
 	Store      Store
@@ -28,7 +30,7 @@ func (i *Ingestor) Ingest(ctx context.Context, batch Batch) (BatchResult, error)
 		return BatchResult{}, errors.New("nil Collector Ingestor")
 	}
 	if batch.ProtocolVersion != ProtocolVersion || strings.TrimSpace(batch.BatchID) == "" || batch.ProducerID != i.producerID || batch.CreatedAt.IsZero() || len(batch.Chunks) == 0 {
-		return BatchResult{}, errors.New("Collector Batch envelope is invalid")
+		return BatchResult{}, ErrInvalidBatch
 	}
 	result := BatchResult{BatchID: batch.BatchID, Chunks: make([]ChunkResult, 0, len(batch.Chunks))}
 	for _, chunk := range batch.Chunks {

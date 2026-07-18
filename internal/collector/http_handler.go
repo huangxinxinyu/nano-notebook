@@ -75,7 +75,12 @@ func (h *httpHandler) batches(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := h.ingestor.Ingest(r.Context(), batch)
 	if err != nil {
-		writeHTTPJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_batch"}})
+		if errors.Is(err, ErrInvalidBatch) {
+			writeHTTPJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_batch"}})
+			return
+		}
+		w.Header().Set("Retry-After", "1")
+		writeHTTPJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]string{"code": "collector_unavailable"}})
 		return
 	}
 	writeHTTPJSON(w, http.StatusOK, result)

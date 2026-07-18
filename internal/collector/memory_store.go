@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/memory"
@@ -26,28 +27,35 @@ func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{traces: make(map[agentobs.TraceID]memoryTrace)}
 }
 
-func (s *MemoryStore) CommitTraceChunk(_ context.Context, chunk TraceChunk) (int, error) {
+func (s *MemoryStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk) (int, error) {
 	if s == nil {
 		return 0, errors.New("nil Collector Memory Store")
 	}
-	if err := validateTraceDescriptor(chunk.Trace); err != nil {
-		return 0, &ChunkError{Code: CodeInvalidChunk, Err: err}
-	}
-	if chunk.FirstSequence < 1 || len(chunk.Records) == 0 {
-		return 0, &ChunkError{Code: CodeInvalidChunk, Err: errors.New("Collector Trace Chunk is empty or unsequenced")}
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	existing := s.traces[chunk.Trace.TraceID]
+	merged, committedThrough, err := validateAndMergeTraceChunk(ctx, s.traces[chunk.Trace.TraceID], chunk)
+	if err != nil {
+		return 0, err
+	}
+	s.traces[chunk.Trace.TraceID] = merged
+	return committedThrough, nil
+}
+
+func validateAndMergeTraceChunk(ctx context.Context, existing memoryTrace, chunk TraceChunk) (memoryTrace, int, error) {
+	if err := validateTraceDescriptor(chunk.Trace); err != nil {
+		return memoryTrace{}, 0, &ChunkError{Code: CodeInvalidChunk, Err: err}
+	}
+	if chunk.FirstSequence < 1 || len(chunk.Records) == 0 {
+		return memoryTrace{}, 0, &ChunkError{Code: CodeInvalidChunk, Err: errors.New("Collector Trace Chunk is empty or unsequenced")}
+	}
 	if len(existing.records) > 0 && existing.descriptor != chunk.Trace {
-		return 0, &ChunkError{
+		return memoryTrace{}, 0, &ChunkError{
 			Code: CodeIdentityConflict, CommittedThrough: len(existing.records),
 			Err: errors.New("Collector Trace descriptor changed"),
 		}
 	}
 	if chunk.FirstSequence > len(existing.records)+1 {
-		return 0, &ChunkError{
+		return memoryTrace{}, 0, &ChunkError{
 			Code: CodeSequenceGap, CommittedThrough: len(existing.records), Retryable: true,
 			Err: errors.New("Collector Trace Chunk sequence is not contiguous"),
 		}
@@ -55,59 +63,58 @@ func (s *MemoryStore) CommitTraceChunk(_ context.Context, chunk TraceChunk) (int
 
 	validator := memory.New()
 	for _, stored := range existing.records {
-		if err := validator.Export(context.Background(), stored.Record); err != nil {
-			return 0, fmt.Errorf("validate stored Collector record: %w", err)
+		if err := validator.Export(ctx, stored.Record); err != nil {
+			return memoryTrace{}, 0, fmt.Errorf("validate stored Collector record: %w", err)
 		}
 	}
 	candidate := append([]SequencedRecord(nil), existing.records...)
 	for index, envelope := range chunk.Records {
 		sequence := chunk.FirstSequence + index
 		if envelope.Sequence != sequence || envelope.Record.TraceID != chunk.Trace.TraceID || envelope.Record.SchemaVersion != chunk.Trace.SchemaVersion || envelope.Record.SemanticConventionVersion != chunk.Trace.SemanticConventionVersion {
-			return 0, &ChunkError{
+			return memoryTrace{}, 0, &ChunkError{
 				Code: CodeInvalidChunk, CommittedThrough: len(existing.records),
 				Err: errors.New("Collector record changed its Trace envelope"),
 			}
 		}
 		hash, err := envelope.Record.CanonicalHash()
 		if err != nil {
-			return 0, &ChunkError{Code: CodeInvalidChunk, CommittedThrough: len(existing.records), Err: err}
+			return memoryTrace{}, 0, &ChunkError{Code: CodeInvalidChunk, CommittedThrough: len(existing.records), Err: err}
 		}
 		if envelope.CanonicalSHA256 != hex.EncodeToString(hash[:]) {
-			return 0, &ChunkError{
+			return memoryTrace{}, 0, &ChunkError{
 				Code: CodeCanonicalHash, CommittedThrough: len(existing.records), Err: agentobs.ErrIdentityConflict,
 			}
 		}
 		if sequence <= len(existing.records) {
 			stored := existing.records[sequence-1]
 			if stored.CanonicalSHA256 != envelope.CanonicalSHA256 {
-				return 0, &ChunkError{
+				return memoryTrace{}, 0, &ChunkError{
 					Code: CodeIdentityConflict, CommittedThrough: len(existing.records), Err: agentobs.ErrIdentityConflict,
 				}
 			}
 			continue
 		}
 		if sequence != len(candidate)+1 {
-			return 0, &ChunkError{
+			return memoryTrace{}, 0, &ChunkError{
 				Code: CodeSequenceGap, CommittedThrough: len(existing.records), Retryable: true,
 				Err: errors.New("Collector Trace Chunk sequence is not contiguous"),
 			}
 		}
 		if sequence == 1 && (envelope.Record.Kind != agentobs.RecordSpanStarted || envelope.Record.SpanID != chunk.Trace.RootSpanID || envelope.Record.ParentSpanID != "") {
-			return 0, &ChunkError{
+			return memoryTrace{}, 0, &ChunkError{
 				Code: CodeInvalidLifecycle, CommittedThrough: len(existing.records),
 				Err: fmt.Errorf("%w: first Collector record is not the Trace root", agentobs.ErrLifecycle),
 			}
 		}
-		if err := validator.Export(context.Background(), envelope.Record); err != nil {
+		if err := validator.Export(ctx, envelope.Record); err != nil {
 			if errors.Is(err, agentobs.ErrLifecycle) || errors.Is(err, agentobs.ErrUnresolvedLink) || errors.Is(err, agentobs.ErrLimitExceeded) {
-				return 0, &ChunkError{Code: CodeInvalidLifecycle, CommittedThrough: len(existing.records), Err: err}
+				return memoryTrace{}, 0, &ChunkError{Code: CodeInvalidLifecycle, CommittedThrough: len(existing.records), Err: err}
 			}
-			return 0, err
+			return memoryTrace{}, 0, err
 		}
 		candidate = append(candidate, cloneSequencedRecord(envelope))
 	}
-	s.traces[chunk.Trace.TraceID] = memoryTrace{descriptor: chunk.Trace, records: candidate}
-	return candidate[len(candidate)-1].Sequence, nil
+	return memoryTrace{descriptor: chunk.Trace, records: candidate}, candidate[len(candidate)-1].Sequence, nil
 }
 
 func (s *MemoryStore) Records(traceID agentobs.TraceID) []SequencedRecord {
@@ -125,10 +132,20 @@ func (s *MemoryStore) Records(traceID agentobs.TraceID) []SequencedRecord {
 }
 
 func validateTraceDescriptor(trace TraceDescriptor) error {
-	if strings.TrimSpace(string(trace.TraceID)) == "" || strings.TrimSpace(trace.RunID) == "" || strings.TrimSpace(trace.ChatID) == "" || strings.TrimSpace(trace.NotebookID) == "" || strings.TrimSpace(string(trace.RootSpanID)) == "" || strings.TrimSpace(trace.AgentName) == "" || trace.SchemaVersion < 1 || trace.SemanticConventionVersion < 1 {
+	if !validDescriptorText(string(trace.TraceID), 128) ||
+		!validDescriptorText(trace.RunID, 128) ||
+		!validDescriptorText(trace.ChatID, 128) ||
+		!validDescriptorText(trace.NotebookID, 128) ||
+		!validDescriptorText(string(trace.RootSpanID), 128) ||
+		!validDescriptorText(trace.AgentName, 160) ||
+		trace.SchemaVersion < 1 || trace.SemanticConventionVersion < 1 {
 		return errors.New("Collector Trace descriptor is incomplete")
 	}
 	return nil
+}
+
+func validDescriptorText(value string, maxRunes int) bool {
+	return strings.TrimSpace(value) != "" && utf8.ValidString(value) && utf8.RuneCountInString(value) <= maxRunes
 }
 
 func cloneSequencedRecord(envelope SequencedRecord) SequencedRecord {
