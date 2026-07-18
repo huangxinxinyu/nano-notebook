@@ -29,6 +29,21 @@ func TestMigrationsInstallInternalTraceSchema(t *testing.T) {
 			"parent_span_id", "name", "target_trace_id", "target_span_id", "occurred_at",
 			"payload_version", "payload", "payload_sha256", "created_at",
 		},
+		"agent_trace_refs": {
+			"trace_id", "run_id", "chat_id", "notebook_id", "root_span_id", "agent_name",
+			"schema_version", "semantic_convention_version", "next_sequence", "collector_cursor",
+			"terminal_sequence", "delivery_state", "lease_token", "lease_expires_at",
+			"next_attempt_at", "attempt_count", "last_error_code", "quarantined_at",
+		},
+		"agentobs_outbox_records": {
+			"trace_id", "sequence_no", "identity_key", "record_kind", "span_id",
+			"parent_span_id", "name", "target_trace_id", "target_span_id", "occurred_at",
+			"occurred_at_unix_nano", "payload_version", "payload", "payload_sha256",
+			"canonical_sha256", "encoded_bytes",
+		},
+		"agentobs_outbox_capacity": {
+			"singleton", "max_records", "current_records", "max_staged_ciphertext_bytes", "current_staged_ciphertext_bytes",
+		},
 	}
 	for table, columns := range wantColumns {
 		var found int
@@ -68,6 +83,40 @@ func TestMigrationsInstallInternalTraceSchema(t *testing.T) {
 			t.Errorf("%s access rls=%t worker=%t/%t/%t/%t app=%t/%t", table, rls, workerSelect, workerInsert, workerUpdate, workerDelete, appSelect, appInsert)
 		}
 	}
+	for _, table := range []string{"agent_trace_refs", "agentobs_outbox_records"} {
+		var rls, workerSelect, workerInsert, workerUpdate, workerDelete, appSelect, appInsert, appUpdate, appDelete bool
+		if err := api.db.Pool().QueryRow(ctx, `
+			select c.relrowsecurity,
+				has_table_privilege('nano_worker', c.oid, 'SELECT'),
+				has_table_privilege('nano_worker', c.oid, 'INSERT'),
+				has_table_privilege('nano_worker', c.oid, 'UPDATE'),
+				has_table_privilege('nano_worker', c.oid, 'DELETE'),
+				has_table_privilege('nano_app', c.oid, 'SELECT'),
+				has_table_privilege('nano_app', c.oid, 'INSERT'),
+				has_table_privilege('nano_app', c.oid, 'UPDATE'),
+				has_table_privilege('nano_app', c.oid, 'DELETE')
+			from pg_class c
+			join pg_namespace n on n.oid = c.relnamespace
+			where n.nspname = 'public' and c.relname = $1`, table).Scan(
+			&rls, &workerSelect, &workerInsert, &workerUpdate, &workerDelete,
+			&appSelect, &appInsert, &appUpdate, &appDelete,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if !rls || !workerSelect || !workerInsert || !workerUpdate || !workerDelete || appSelect || !appInsert || appUpdate || appDelete {
+			t.Errorf("%s access rls=%t worker=%t/%t/%t/%t app=%t/%t/%t/%t", table, rls, workerSelect, workerInsert, workerUpdate, workerDelete, appSelect, appInsert, appUpdate, appDelete)
+		}
+	}
+	var appCapacity, workerCapacity bool
+	if err := api.db.Pool().QueryRow(ctx, `
+		select has_table_privilege('nano_app', 'agentobs_outbox_capacity', 'SELECT'),
+			has_table_privilege('nano_worker', 'agentobs_outbox_capacity', 'SELECT')
+	`).Scan(&appCapacity, &workerCapacity); err != nil {
+		t.Fatal(err)
+	}
+	if appCapacity || workerCapacity {
+		t.Errorf("capacity ledger direct reads app=%t worker=%t, want false/false", appCapacity, workerCapacity)
+	}
 }
 
 func TestTraceRLSAllowsOwnedBlindInsertWithoutApplicationRead(t *testing.T) {
@@ -82,7 +131,7 @@ func TestTraceRLSAllowsOwnedBlindInsertWithoutApplicationRead(t *testing.T) {
 	if err := api.db.Pool().QueryRow(ctx, `select id from identity_users where canonical_email = 'trace-intruder@example.com'`).Scan(&intruderID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := api.db.Pool().Exec(ctx, `delete from agent_traces where run_id = $1`, runID); err != nil {
+	if _, err := api.db.Pool().Exec(ctx, `delete from agent_trace_refs where run_id = $1`, runID); err != nil {
 		t.Fatal(err)
 	}
 	root := traceRecord(agentobs.RecordSpanStarted, "trace-owned", "root-owned", "root-start", "agent.execution")
@@ -98,7 +147,7 @@ func TestTraceRLSAllowsOwnedBlindInsertWithoutApplicationRead(t *testing.T) {
 	}
 	if err := api.db.WithRequestPrincipal(ctx, ownerID, func(tx pgx.Tx) error {
 		var count int
-		return tx.QueryRow(ctx, `select count(*) from agent_traces where run_id = $1`, runID).Scan(&count)
+		return tx.QueryRow(ctx, `select count(*) from agent_trace_refs where run_id = $1`, runID).Scan(&count)
 	}); err == nil {
 		t.Fatal("application role read internal Trace table")
 	}
@@ -108,6 +157,17 @@ func TestTraceRLSAllowsOwnedBlindInsertWithoutApplicationRead(t *testing.T) {
 	}
 	if trace.TraceID != root.TraceID || len(trace.Records) != 1 {
 		t.Fatalf("internal Trace = %#v", trace)
+	}
+	tx, err := api.db.Pool().Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `set local role nano_app`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(ctx, `select nano_advance_agent_trace_ref($1, 2, 'event', $2)`, trace.TraceID, trace.RootSpanID); err == nil {
+		t.Fatal("application role advanced Trace ref without a request principal")
 	}
 }
 
@@ -122,7 +182,10 @@ func TestMigrationsUpgradePopulatedSprint3DatabaseWithEmptyTraceHistory(t *testi
 		t.Fatal(err)
 	}
 	activeRunID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c405")
-	if _, err := api.db.Pool().Exec(ctx, `drop table agent_trace_records, agent_traces cascade`); err != nil {
+	if _, err := api.db.Pool().Exec(ctx, `
+		drop table agentobs_outbox_records, agent_trace_refs, agentobs_outbox_capacity,
+			agent_trace_records, agent_traces cascade
+	`); err != nil {
 		t.Fatal(err)
 	}
 	if err := app.RunMigrations(ctx, api.db); err != nil {
@@ -169,7 +232,10 @@ func TestMigrationsAdoptRunningSprint3RunAtControlledBoundary(t *testing.T) {
 	if err != nil || !ok || before.AttemptNo != 1 {
 		t.Fatalf("pre-migration claim = %#v ok=%t err=%v", before, ok, err)
 	}
-	if _, err := api.db.Pool().Exec(ctx, `drop table agent_trace_records, agent_traces cascade`); err != nil {
+	if _, err := api.db.Pool().Exec(ctx, `
+		drop table agentobs_outbox_records, agent_trace_refs, agentobs_outbox_capacity,
+			agent_trace_records, agent_traces cascade
+	`); err != nil {
 		t.Fatal(err)
 	}
 	if err := app.RunMigrations(ctx, api.db); err != nil {
@@ -201,18 +267,63 @@ func TestMigrationsAdoptRunningSprint3RunAtControlledBoundary(t *testing.T) {
 	}
 }
 
-func TestTraceSchemaRejectsInvalidLifecycleAndCascades(t *testing.T) {
+func TestLegacyTraceBackfillRejectsPayloadHashDrift(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "trace-backfill-drift@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c407")
+	ctx := context.Background()
+	if _, err := api.db.Pool().Exec(ctx, `
+		insert into agent_traces(trace_id, run_id, root_span_id, schema_version, created_at)
+		select trace_id, run_id, root_span_id, schema_version, created_at
+		from agent_trace_refs where run_id = $1
+	`, runID); err != nil {
+		t.Fatalf("seed legacy Trace envelope: %v", err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `
+		insert into agent_trace_records(
+			trace_id, sequence_no, identity_key, record_kind, span_id, parent_span_id,
+			name, target_trace_id, target_span_id, occurred_at, payload_version,
+			payload, payload_sha256, created_at
+		)
+		select trace_id, sequence_no, identity_key, record_kind, span_id, parent_span_id,
+			name, target_trace_id, target_span_id, occurred_at, payload_version,
+			payload, payload_sha256, created_at
+		from agentobs_outbox_records
+		where trace_id = (select trace_id from agent_trace_refs where run_id = $1)
+		order by sequence_no
+	`, runID); err != nil {
+		t.Fatalf("seed legacy Trace records: %v", err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `
+		update agent_trace_records
+		set payload_sha256 = repeat('0', 64)
+		where trace_id = (select trace_id from agent_trace_refs where run_id = $1)
+			and sequence_no = 1
+	`, runID); err != nil {
+		t.Fatalf("corrupt legacy Trace hash: %v", err)
+	}
+	err := app.RunMigrations(ctx, api.db)
+	if err == nil || !strings.Contains(err.Error(), "payload hash mismatch") {
+		t.Fatalf("RunMigrations error = %v, want payload hash mismatch", err)
+	}
+}
+
+func TestOutboxSchemaRejectsInvalidLifecycleAndCascades(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "trace-constraints@example.com")
 	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c401")
 	ctx := context.Background()
 	const traceID = "trace-constraints"
 	const rootSpanID = "span-root"
-	if _, err := api.db.Pool().Exec(ctx, `delete from agent_traces where run_id = $1`, runID); err != nil {
+	if _, err := api.db.Pool().Exec(ctx, `delete from agent_trace_refs where run_id = $1`, runID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := api.db.Pool().Exec(ctx, `
-		insert into agent_traces(trace_id, run_id, root_span_id, schema_version)
-		values($1, $2, $3, 1)`, traceID, runID, rootSpanID); err != nil {
+		insert into agent_trace_refs(
+			trace_id, run_id, chat_id, notebook_id, root_span_id, agent_name,
+			schema_version, semantic_convention_version
+		)
+		select $1, r.id, r.chat_id, c.notebook_id, $3, 'nano-research-agent', 1, 1
+		from agent_runs r join chat_chats c on c.id = r.chat_id
+		where r.id = $2`, traceID, runID, rootSpanID); err != nil {
 		t.Fatal(err)
 	}
 	payload := `{"semantic_convention_version":1,"attributes":[]}`
@@ -228,15 +339,27 @@ func TestTraceSchemaRejectsInvalidLifecycleAndCascades(t *testing.T) {
 		if targetSpan != "" {
 			targetSpanValue = targetSpan
 		}
-		_, err := api.db.Pool().Exec(ctx, `
-			insert into agent_trace_records(
+		tx, err := api.db.Pool().Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		_, err = tx.Exec(ctx, `
+			insert into agentobs_outbox_records(
 				trace_id, sequence_no, identity_key, record_kind, span_id,
 				parent_span_id, name, target_trace_id, target_span_id,
-				occurred_at, payload_version, payload, payload_sha256
+				occurred_at, occurred_at_unix_nano, payload_version, payload,
+				payload_sha256, canonical_sha256, encoded_bytes
 			)
-			values($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), 1, $10::jsonb, $11)`,
+			values($1, $2, $3, $4, $5, $6, $7, $8, $9, now(), 1, 1, $10::jsonb, $11, $11, 1)`,
 			traceID, sequence, identity, kind, spanID, parent, name, targetTraceValue, targetSpanValue, payload, hash)
-		return err
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `select nano_advance_agent_trace_ref($1, $2, $3, $4)`, traceID, sequence, kind, spanID); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
 	}
 
 	if err := insert(1, "bad-root", "span_started", "not-the-root", "", "agent.execution", "", ""); err == nil {
@@ -276,14 +399,14 @@ func TestTraceSchemaRejectsInvalidLifecycleAndCascades(t *testing.T) {
 	if _, err := api.db.Pool().Exec(ctx, `delete from agent_runs where id = $1`, runID); err != nil {
 		t.Fatalf("delete parent Run: %v", err)
 	}
-	var traces, records int
-	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_traces where run_id = $1`, runID).Scan(&traces); err != nil {
+	var refs, records int
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_trace_refs where run_id = $1`, runID).Scan(&refs); err != nil {
 		t.Fatal(err)
 	}
-	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_trace_records where trace_id = $1`, traceID).Scan(&records); err != nil {
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agentobs_outbox_records where trace_id = $1`, traceID).Scan(&records); err != nil {
 		t.Fatal(err)
 	}
-	if traces != 0 || records != 0 {
-		t.Fatalf("cascade retained traces/records = %d/%d", traces, records)
+	if refs != 0 || records != 0 {
+		t.Fatalf("cascade retained refs/records = %d/%d", refs, records)
 	}
 }

@@ -264,8 +264,8 @@ func TestEveryCheckpointKindReconcilesCommitAcknowledgementLossAndRejectsConflic
 	var acceptanceEvents int
 	if err := api.db.Pool().QueryRow(ctx, `
 		select count(*)
-		from agent_trace_records r
-		join agent_traces t on t.trace_id = r.trace_id
+		from agentobs_outbox_records r
+		join agent_trace_refs t on t.trace_id = r.trace_id
 		where t.run_id = $1 and r.record_kind = 'event' and r.name = $2`, runID, agent.TraceEventCheckpointAccepted).Scan(&acceptanceEvents); err != nil {
 		t.Fatal(err)
 	}
@@ -453,8 +453,8 @@ func TestCheckpointAppendRetriesAbsentWriteWhileAttemptRemainsCurrent(t *testing
 	var eventCount int
 	if err := api.db.Pool().QueryRow(ctx, `
 		select count(*)
-		from agent_trace_records r
-		join agent_traces t on t.trace_id = r.trace_id
+		from agentobs_outbox_records r
+		join agent_trace_refs t on t.trace_id = r.trace_id
 		where t.run_id = $1 and r.record_kind = 'event' and r.name = $2`, runID, agent.TraceEventCheckpointAccepted).Scan(&eventCount); err != nil {
 		t.Fatal(err)
 	}

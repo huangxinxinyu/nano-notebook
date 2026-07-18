@@ -163,7 +163,7 @@ func (r *AttemptTraceRecorder) reconcile(ctx context.Context, record agentobs.Re
 	defer tx.Rollback(ctx)
 	var traceID agentobs.TraceID
 	var schemaVersion int
-	if err := tx.QueryRow(ctx, `select trace_id, schema_version from agent_traces where run_id = $1`, r.attempt.RunID).Scan(&traceID, &schemaVersion); err != nil {
+	if err := tx.QueryRow(ctx, `select trace_id, schema_version from agent_trace_refs where run_id = $1`, r.attempt.RunID).Scan(&traceID, &schemaVersion); err != nil {
 		return false, false, err
 	}
 	if traceID != record.TraceID || schemaVersion != record.SchemaVersion {

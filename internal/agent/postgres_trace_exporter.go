@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -75,8 +77,14 @@ func CreateTraceInTx(ctx context.Context, tx pgx.Tx, runID string, root agentobs
 		return fmt.Errorf("%w: Trace root must be a root Span start", agentobs.ErrLifecycle)
 	}
 	if _, err := tx.Exec(ctx, `
-		insert into agent_traces(trace_id, run_id, root_span_id, schema_version)
-		values($1, $2, $3, $4)`, root.TraceID, runID, root.SpanID, root.SchemaVersion); err != nil {
+		insert into agent_trace_refs(
+			trace_id, run_id, chat_id, notebook_id, root_span_id, agent_name,
+			schema_version, semantic_convention_version
+		)
+		select $1, r.id, r.chat_id, c.notebook_id, $2, 'nano-research-agent', $3, $4
+		from agent_runs r join chat_chats c on c.id = r.chat_id
+		where r.id = $5
+	`, root.TraceID, root.SpanID, root.SchemaVersion, root.SemanticConventionVersion, runID); err != nil {
 		return err
 	}
 	return insertTraceRecord(ctx, tx, 1, root)
@@ -125,9 +133,11 @@ func (e *PostgresTraceExporter) exportOnce(ctx context.Context, record agentobs.
 	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, "agent_trace:"+string(record.TraceID)); err != nil {
 		return err
 	}
-	var schemaVersion int
+	var schemaVersion, sequence int
 	if err := tx.QueryRow(ctx, `
-		select schema_version from agent_traces where trace_id = $1`, record.TraceID).Scan(&schemaVersion); err != nil {
+		select schema_version, next_sequence
+		from agent_trace_refs where trace_id = $1
+		for update`, record.TraceID).Scan(&schemaVersion, &sequence); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrTraceNotFound
 		}
@@ -143,12 +153,6 @@ func (e *PostgresTraceExporter) exportOnce(ctx context.Context, record agentobs.
 	if found {
 		return reconcileTraceRecord(existing, record)
 	}
-	var sequence int
-	if err := tx.QueryRow(ctx, `
-		select coalesce(max(sequence_no), 0) + 1
-		from agent_trace_records where trace_id = $1`, record.TraceID).Scan(&sequence); err != nil {
-		return err
-	}
 	if err := insertTraceRecord(ctx, tx, sequence, record); err != nil {
 		return classifyTraceDatabaseError(err)
 	}
@@ -162,7 +166,7 @@ func (e *PostgresTraceExporter) reconcile(ctx context.Context, record agentobs.R
 	}
 	defer tx.Rollback(ctx)
 	var schemaVersion int
-	if err := tx.QueryRow(ctx, `select schema_version from agent_traces where trace_id = $1`, record.TraceID).Scan(&schemaVersion); err != nil {
+	if err := tx.QueryRow(ctx, `select schema_version from agent_trace_refs where trace_id = $1`, record.TraceID).Scan(&schemaVersion); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, ErrTraceNotFound
 		}
@@ -216,7 +220,7 @@ func LoadDurableTraceByRun(ctx context.Context, db DBTX, runID string) (DurableT
 	var trace DurableTrace
 	if err := db.QueryRow(ctx, `
 		select trace_id, run_id, root_span_id, schema_version, created_at
-		from agent_traces where run_id = $1`, runID).Scan(
+		from agent_trace_refs where run_id = $1`, runID).Scan(
 		&trace.TraceID, &trace.RunID, &trace.RootSpanID, &trace.SchemaVersion, &trace.CreatedAt,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -231,7 +235,7 @@ func LoadDurableTrace(ctx context.Context, db DBTX, traceID agentobs.TraceID) (D
 	var trace DurableTrace
 	if err := db.QueryRow(ctx, `
 		select trace_id, run_id, root_span_id, schema_version, created_at
-		from agent_traces where trace_id = $1`, traceID).Scan(
+		from agent_trace_refs where trace_id = $1`, traceID).Scan(
 		&trace.TraceID, &trace.RunID, &trace.RootSpanID, &trace.SchemaVersion, &trace.CreatedAt,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -247,7 +251,7 @@ func loadDurableTraceRecords(ctx context.Context, db DBTX, trace DurableTrace) (
 		select sequence_no, identity_key, record_kind, span_id, parent_span_id,
 			name, target_trace_id, target_span_id, occurred_at, payload_version,
 			payload::text, payload_sha256
-		from agent_trace_records
+		from agentobs_outbox_records
 		where trace_id = $1
 		order by sequence_no`, trace.TraceID)
 	if err != nil {
@@ -280,17 +284,35 @@ func insertTraceRecord(ctx context.Context, db DBTX, sequence int, record agento
 		return err
 	}
 	payloadHash := sha256.Sum256(payload)
-	_, err = db.Exec(ctx, `
-		insert into agent_trace_records(
+	canonicalHash, err := record.CanonicalHash()
+	if err != nil {
+		return err
+	}
+	encodedRecord, err := json.Marshal(collector.SequencedRecord{
+		Sequence: sequence, Record: record, CanonicalSHA256: hex.EncodeToString(canonicalHash[:]),
+	})
+	if err != nil {
+		return err
+	}
+	encodedBytes := len(encodedRecord)
+	if _, err := db.Exec(ctx, `
+		insert into agentobs_outbox_records(
 			trace_id, sequence_no, identity_key, record_kind, span_id,
 			parent_span_id, name, target_trace_id, target_span_id,
-			occurred_at, payload_version, payload, payload_sha256
+			occurred_at, occurred_at_unix_nano, payload_version, payload,
+			payload_sha256, canonical_sha256, encoded_bytes
+		) values (
+			$1, $2, $3, $4, $5, nullif($6, ''), $7, nullif($8, ''), nullif($9, ''),
+			$10, $11, $12, $13::jsonb, $14, $15, $16
 		)
-		values($1, $2, $3, $4, $5, nullif($6, ''), $7, nullif($8, ''), nullif($9, ''), $10, $11, $12::jsonb, $13)`,
-		record.TraceID, sequence, record.IdentityKey, record.Kind, record.SpanID,
+	`, record.TraceID, sequence, record.IdentityKey, record.Kind, record.SpanID,
 		record.ParentSpanID, record.Name, record.TargetTraceID, record.TargetSpanID,
-		record.OccurredAt, record.PayloadVersion, string(payload), hex.EncodeToString(payloadHash[:]),
-	)
+		record.OccurredAt, record.OccurredAt.UnixNano(), record.PayloadVersion, string(payload),
+		hex.EncodeToString(payloadHash[:]), hex.EncodeToString(canonicalHash[:]), encodedBytes); err != nil {
+		return err
+	}
+	_, err = db.Exec(ctx, `select nano_advance_agent_trace_ref($1, $2, $3, $4)`,
+		record.TraceID, sequence, record.Kind, record.SpanID)
 	return err
 }
 
@@ -302,7 +324,7 @@ const selectTraceRecordColumns = `
 func traceRecordByIdentity(ctx context.Context, db DBTX, traceID agentobs.TraceID, identity string, schemaVersion int) (agentobs.Record, bool, error) {
 	record, _, err := scanTraceRecord(db.QueryRow(ctx, `
 		select `+selectTraceRecordColumns+`
-		from agent_trace_records
+		from agentobs_outbox_records
 		where trace_id = $1 and identity_key = $2`, traceID, identity), traceID, schemaVersion)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return agentobs.Record{}, false, nil
@@ -414,8 +436,11 @@ func validateLoadedTrace(ctx context.Context, db DBTX, trace DurableTrace) error
 			var exists bool
 			if err := db.QueryRow(ctx, `
 				select exists(
-					select 1 from agent_trace_records
+					select 1 from agentobs_outbox_records
 					where trace_id = $1 and span_id = $2 and record_kind = 'span_started'
+					union all
+					select 1 from agent_trace_refs
+					where trace_id = $1 and root_span_id = $2
 				)`, record.TargetTraceID, record.TargetSpanID).Scan(&exists); err != nil {
 				return err
 			}

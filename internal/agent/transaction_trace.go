@@ -30,7 +30,7 @@ func NewRunTraceRecorder(ctx context.Context, tx pgx.Tx, runID string) (*RunTrac
 	recorder.runID = runID
 	if err := tx.QueryRow(ctx, `
 		select trace_id, root_span_id, schema_version
-		from agent_traces where run_id = $1`, runID).Scan(
+		from agent_trace_refs where run_id = $1`, runID).Scan(
 		&recorder.traceID, &recorder.rootSpanID, &recorder.schemaVersion,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -42,8 +42,9 @@ func NewRunTraceRecorder(ctx context.Context, tx pgx.Tx, runID string) (*RunTrac
 		return nil, err
 	}
 	if err := tx.QueryRow(ctx, `
-		select coalesce(max(sequence_no), 0)
-		from agent_trace_records where trace_id = $1`, recorder.traceID).Scan(&recorder.sequence); err != nil {
+		select next_sequence - 1
+		from agent_trace_refs where trace_id = $1
+		for update`, recorder.traceID).Scan(&recorder.sequence); err != nil {
 		return nil, err
 	}
 	if recorder.sequence < 1 {
@@ -94,9 +95,9 @@ func (r *RunTraceRecorder) SpanContextByIdentity(ctx context.Context, identityKe
 	} else {
 		traceID = r.traceID
 		err = r.tx.QueryRow(ctx, `
-		select span_id
-		from agent_trace_records
-		where trace_id = $1 and identity_key = $2 and record_kind = 'span_started'`, r.traceID, identityKey).Scan(&spanID)
+			select span_id
+			from agentobs_outbox_records
+			where trace_id = $1 and identity_key = $2 and record_kind = 'span_started'`, r.traceID, identityKey).Scan(&spanID)
 	}
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

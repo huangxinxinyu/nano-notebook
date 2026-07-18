@@ -2,6 +2,7 @@ package collector_test
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -80,6 +81,42 @@ func TestHTTPHandlerIngestsAuthorizedBatchAndReturnsChunkACK(t *testing.T) {
 	}
 	if got := len(store.Records("trace-1")); got != 2 {
 		t.Fatalf("authorized request stored %d records, want 2", got)
+	}
+}
+
+func TestHTTPHandlerIngestsBoundedGzipBatch(t *testing.T) {
+	store := collector.NewMemoryStore()
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+	handler, err := collector.NewHTTPHandler(collector.HTTPConfig{
+		Ingestor: ingestor, ServiceToken: "collector-secret", MaxBodyBytes: 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPHandler: %v", err)
+	}
+	var body bytes.Buffer
+	compressor := gzip.NewWriter(&body)
+	if err := json.NewEncoder(compressor).Encode(validCollectorBatch(t)); err != nil {
+		t.Fatalf("compress Batch: %v", err)
+	}
+	if err := compressor.Close(); err != nil {
+		t.Fatalf("close compressed Batch: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/internal/agent-observability/v1/batches", &body)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Content-Encoding", "gzip")
+	request.Header.Set("Authorization", "Bearer collector-secret")
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if got := len(store.Records("trace-1")); got != 2 {
+		t.Fatalf("gzip request stored %d records, want 2", got)
 	}
 }
 

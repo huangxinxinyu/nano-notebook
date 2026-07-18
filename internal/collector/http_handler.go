@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -55,8 +56,13 @@ func (h *httpHandler) purges(w http.ResponseWriter, r *http.Request) {
 		writeHTTPJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]string{"code": "collector_unavailable"}})
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
-	decoder := json.NewDecoder(r.Body)
+	body, err := h.boundedRequestBody(w, r)
+	if err != nil {
+		writeHTTPJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_batch"}})
+		return
+	}
+	defer body.Close()
+	decoder := json.NewDecoder(body)
 	decoder.DisallowUnknownFields()
 	var batch PurgeBatch
 	if err := decoder.Decode(&batch); err != nil {
@@ -114,8 +120,13 @@ func (h *httpHandler) batches(w http.ResponseWriter, r *http.Request) {
 		writeHTTPJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
-	decoder := json.NewDecoder(r.Body)
+	body, err := h.boundedRequestBody(w, r)
+	if err != nil {
+		writeHTTPJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]string{"code": "invalid_batch"}})
+		return
+	}
+	defer body.Close()
+	decoder := json.NewDecoder(body)
 	decoder.DisallowUnknownFields()
 	var batch Batch
 	if err := decoder.Decode(&batch); err != nil {
@@ -142,6 +153,35 @@ func (h *httpHandler) batches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeHTTPJSON(w, http.StatusOK, result)
+}
+
+type boundedGzipBody struct {
+	io.ReadCloser
+	compressed io.ReadCloser
+}
+
+func (b *boundedGzipBody) Close() error {
+	return errors.Join(b.ReadCloser.Close(), b.compressed.Close())
+}
+
+func (h *httpHandler) boundedRequestBody(w http.ResponseWriter, r *http.Request) (io.ReadCloser, error) {
+	compressed := http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
+	encoding := strings.TrimSpace(strings.ToLower(r.Header.Get("Content-Encoding")))
+	switch encoding {
+	case "":
+		return compressed, nil
+	case "gzip":
+		decompressor, err := gzip.NewReader(compressed)
+		if err != nil {
+			_ = compressed.Close()
+			return nil, err
+		}
+		decompressed := http.MaxBytesReader(w, decompressor, h.maxBodyBytes)
+		return &boundedGzipBody{ReadCloser: decompressed, compressed: compressed}, nil
+	default:
+		_ = compressed.Close()
+		return nil, errors.New("unsupported Collector content encoding")
+	}
 }
 
 func (h *httpHandler) authorized(r *http.Request) bool {

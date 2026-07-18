@@ -19,7 +19,7 @@ func TestPostgresTraceExporterRoundTripsAndReconcilesRecords(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "trace-exporter@example.com")
 	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c402")
 	ctx := context.Background()
-	if _, err := api.db.Pool().Exec(ctx, `delete from agent_traces where run_id = $1`, runID); err != nil {
+	if _, err := api.db.Pool().Exec(ctx, `delete from agent_trace_refs where run_id = $1`, runID); err != nil {
 		t.Fatal(err)
 	}
 	root := traceRecord(agentobs.RecordSpanStarted, "trace-exporter", "root", "root-start", "agent.execution")
@@ -71,7 +71,7 @@ func TestPostgresTraceExporterRoundTripsAndReconcilesRecords(t *testing.T) {
 		t.Fatalf("round-trip typed attributes = %#v", got)
 	}
 	if _, err := api.db.Pool().Exec(ctx, `
-		update agent_trace_records
+		update agentobs_outbox_records
 		set payload = jsonb_set(payload, '{attributes,0,bool}', 'true'::jsonb)
 		where trace_id = $1 and identity_key = $2`, root.TraceID, event.IdentityKey); err != nil {
 		t.Fatal(err)
@@ -90,14 +90,14 @@ func TestPostgresTraceExporterRoundTripsAndReconcilesRecords(t *testing.T) {
 func TestPostgresTraceExporterConformance(t *testing.T) {
 	api, _, _, chatID := newChatFixture(t, "trace-conformance@example.com")
 	ctx := context.Background()
-	if _, err := api.db.Pool().Exec(ctx, `truncate agent_trace_records, agent_traces`); err != nil {
+	if _, err := api.db.Pool().Exec(ctx, `truncate agentobs_outbox_records, agent_trace_refs; update agentobs_outbox_capacity set current_records = 0 where singleton`); err != nil {
 		t.Fatal(err)
 	}
 
 	exportertest.Run(t, exportertest.Harness{
 		New: func(t *testing.T) agentobs.Exporter {
 			t.Helper()
-			if _, err := api.db.Pool().Exec(ctx, `truncate agent_trace_records, agent_traces`); err != nil {
+			if _, err := api.db.Pool().Exec(ctx, `truncate agentobs_outbox_records, agent_trace_refs; update agentobs_outbox_capacity set current_records = 0 where singleton`); err != nil {
 				t.Fatal(err)
 			}
 			exporter, err := agent.NewPostgresTraceExporter(api.db.Pool())
@@ -131,7 +131,7 @@ func TestPostgresTraceExporterReconcilesUncertainCommit(t *testing.T) {
 			api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "trace-uncertain-"+string(rune('a'+index))+"@example.com")
 			runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c41"+string(rune('0'+index)))
 			ctx := context.Background()
-			if _, err := api.db.Pool().Exec(ctx, `delete from agent_traces where run_id = $1`, runID); err != nil {
+			if _, err := api.db.Pool().Exec(ctx, `delete from agent_trace_refs where run_id = $1`, runID); err != nil {
 				t.Fatal(err)
 			}
 			root := traceRecord(agentobs.RecordSpanStarted, agentobs.TraceID("trace-uncertain-"+string(rune('a'+index))), "root", "root-start", "agent.execution")
@@ -171,7 +171,7 @@ func TestPostgresTraceExporterReconcilesUncertainCommit(t *testing.T) {
 			}
 			var count int
 			if err := api.db.Pool().QueryRow(ctx, `
-				select count(*) from agent_trace_records
+				select count(*) from agentobs_outbox_records
 				where trace_id = $1 and identity_key = $2`, root.TraceID, event.IdentityKey).Scan(&count); err != nil {
 				t.Fatal(err)
 			}
@@ -228,9 +228,14 @@ func (e *provisioningTraceExporter) ensureEnvelope(ctx context.Context, root age
 		return err
 	}
 	if _, err := e.pool.Exec(ctx, `
-		insert into agent_traces(trace_id, run_id, root_span_id, schema_version)
-		values($1, $2, $3, $4)
-		on conflict (trace_id) do nothing`, root.TraceID, runID, root.SpanID, root.SchemaVersion); err != nil {
+		insert into agent_trace_refs(
+			trace_id, run_id, chat_id, notebook_id, root_span_id, agent_name,
+			schema_version, semantic_convention_version
+		)
+		select $1, r.id, r.chat_id, c.notebook_id, $2, 'conformance-agent', $3, $4
+		from agent_runs r join chat_chats c on c.id = r.chat_id
+		where r.id = $5
+		on conflict (trace_id) do nothing`, root.TraceID, root.SpanID, root.SchemaVersion, root.SemanticConventionVersion, runID); err != nil {
 		return err
 	}
 	return nil
