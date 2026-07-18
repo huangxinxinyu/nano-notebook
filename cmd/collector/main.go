@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
+	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/telemetry"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -27,6 +28,8 @@ type collectorConfig struct {
 	ServiceToken     string
 	ProducerID       string
 	MaxBodyBytes     int64
+	ReplayStagingS3  objectstore.S3Config
+	ReplayS3         objectstore.S3Config
 }
 
 func main() {
@@ -57,6 +60,14 @@ func loadConfig() (collectorConfig, error) {
 	if err != nil {
 		return collectorConfig{}, err
 	}
+	stagingUseTLS, err := envBool("NANO_REPLAY_STAGING_S3_USE_TLS", false)
+	if err != nil {
+		return collectorConfig{}, err
+	}
+	replayUseTLS, err := envBool("NANO_REPLAY_S3_USE_TLS", false)
+	if err != nil {
+		return collectorConfig{}, err
+	}
 	config := collectorConfig{
 		DatabaseURL:      env("NANO_COLLECTOR_DATABASE_URL", "postgres://nano_observability:nano-observability@localhost:55432/nano_observability?sslmode=disable"),
 		DatabaseMaxConns: maxConns,
@@ -65,11 +76,29 @@ func loadConfig() (collectorConfig, error) {
 		ServiceToken:     env("NANO_COLLECTOR_SERVICE_TOKEN", "nano-local-collector-token"),
 		ProducerID:       env("NANO_COLLECTOR_PRODUCER_ID", "nano-worker"),
 		MaxBodyBytes:     maxBodyBytes,
+		ReplayStagingS3: objectstore.S3Config{
+			Endpoint:        env("NANO_REPLAY_STAGING_S3_ENDPOINT", "127.0.0.1:59000"),
+			AccessKeyID:     env("NANO_REPLAY_STAGING_S3_ACCESS_KEY_ID", "nano"),
+			SecretAccessKey: env("NANO_REPLAY_STAGING_S3_SECRET_ACCESS_KEY", "nano-password"),
+			Bucket:          env("NANO_REPLAY_STAGING_S3_BUCKET", "nano-agent-replay-staging"),
+			Region:          env("NANO_REPLAY_STAGING_S3_REGION", "us-east-1"), UseTLS: stagingUseTLS,
+		},
+		ReplayS3: objectstore.S3Config{
+			Endpoint:        env("NANO_REPLAY_S3_ENDPOINT", "127.0.0.1:59000"),
+			AccessKeyID:     env("NANO_REPLAY_S3_ACCESS_KEY_ID", "nano"),
+			SecretAccessKey: env("NANO_REPLAY_S3_SECRET_ACCESS_KEY", "nano-password"),
+			Bucket:          env("NANO_REPLAY_S3_BUCKET", "nano-agent-replay"),
+			Region:          env("NANO_REPLAY_S3_REGION", "us-east-1"), UseTLS: replayUseTLS,
+		},
 	}
 	if strings.TrimSpace(config.DatabaseURL) == "" || strings.TrimSpace(config.Addr) == "" ||
 		strings.TrimSpace(config.ServiceToken) == "" || strings.TrimSpace(config.ProducerID) == "" ||
 		config.DatabaseMaxConns < 1 || config.DatabaseMinConns < 0 ||
-		config.DatabaseMinConns > config.DatabaseMaxConns || config.MaxBodyBytes < 1 {
+		config.DatabaseMinConns > config.DatabaseMaxConns || config.MaxBodyBytes < 1 ||
+		strings.TrimSpace(config.ReplayStagingS3.Endpoint) == "" || strings.TrimSpace(config.ReplayStagingS3.AccessKeyID) == "" ||
+		strings.TrimSpace(config.ReplayStagingS3.SecretAccessKey) == "" || strings.TrimSpace(config.ReplayStagingS3.Bucket) == "" ||
+		strings.TrimSpace(config.ReplayS3.Endpoint) == "" || strings.TrimSpace(config.ReplayS3.AccessKeyID) == "" ||
+		strings.TrimSpace(config.ReplayS3.SecretAccessKey) == "" || strings.TrimSpace(config.ReplayS3.Bucket) == "" {
 		return collectorConfig{}, errors.New("Collector configuration is incomplete or inconsistent")
 	}
 	return config, nil
@@ -106,7 +135,30 @@ func run(ctx context.Context, config collectorConfig) error {
 	}()
 	telemetry.StartupSpan(ctx, "nano-collector")
 
-	store := collector.NewPostgresStore(pool)
+	stagingObjects, err := objectstore.NewS3Store(config.ReplayStagingS3)
+	if err != nil {
+		return fmt.Errorf("configure Collector staging object Store: %w", err)
+	}
+	replayObjects, err := objectstore.NewS3Store(config.ReplayS3)
+	if err != nil {
+		return fmt.Errorf("configure Collector Replay object Store: %w", err)
+	}
+	if err := stagingObjects.CheckReady(ctx); err != nil {
+		return fmt.Errorf("check Collector staging object Store: %w", err)
+	}
+	if err := replayObjects.CheckReady(ctx); err != nil {
+		return fmt.Errorf("check Collector Replay object Store: %w", err)
+	}
+	store, err := collector.NewPostgresStoreWithReplay(pool, stagingObjects, replayObjects)
+	if err != nil {
+		return err
+	}
+	replayMaintenance, err := collector.NewReplayMaintenance(pool, replayObjects, collector.ReplayMaintenanceConfig{
+		ReportError: func(err error) { slog.Error("Collector Replay maintenance failed", "error", err) },
+	})
+	if err != nil {
+		return err
+	}
 	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: config.ProducerID, Store: store})
 	if err != nil {
 		return err
@@ -117,7 +169,9 @@ func run(ctx context.Context, config collectorConfig) error {
 	}
 	handler, err := collector.NewHTTPHandler(collector.HTTPConfig{
 		Ingestor: ingestor, Purger: purger, ServiceToken: config.ServiceToken, MaxBodyBytes: config.MaxBodyBytes,
-		Readiness: pool.Ping,
+		Readiness: func(readyCtx context.Context) error {
+			return errors.Join(pool.Ping(readyCtx), stagingObjects.CheckReady(readyCtx), replayObjects.CheckReady(readyCtx))
+		},
 	})
 	if err != nil {
 		return err
@@ -135,7 +189,13 @@ func run(ctx context.Context, config collectorConfig) error {
 	}
 	slog.Info("Collector listening", "addr", config.Addr, "producer_id", config.ProducerID,
 		"database_max_connections", config.DatabaseMaxConns, "max_body_bytes", config.MaxBodyBytes)
-	return service.Run(ctx, listener)
+	maintenanceCtx, cancelMaintenance := context.WithCancel(ctx)
+	maintenanceDone := make(chan error, 1)
+	go func() { maintenanceDone <- replayMaintenance.Run(maintenanceCtx) }()
+	serviceErr := service.Run(ctx, listener)
+	cancelMaintenance()
+	maintenanceErr := <-maintenanceDone
+	return errors.Join(serviceErr, maintenanceErr)
 }
 
 func envInt32(key string, fallback int32) (int32, error) {
@@ -158,6 +218,18 @@ func envInt64(key string, fallback int64) (int64, error) {
 	parsed, err := strconv.ParseInt(value, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("parse %s: %w", key, err)
+	}
+	return parsed, nil
+}
+
+func envBool(key string, fallback bool) (bool, error) {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("parse %s: %w", key, err)
 	}
 	return parsed, nil
 }

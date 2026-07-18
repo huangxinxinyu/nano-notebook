@@ -22,6 +22,7 @@ type PostgresRuntime struct {
 	newMessageID func() string
 	commit       func(context.Context, pgx.Tx) error
 	telemetry    agentobs.Exporter
+	replayStager ReplayStager
 }
 
 type RuntimeOption func(*PostgresRuntime)
@@ -38,6 +39,19 @@ func WithBestEffortTraceExporter(exporter agentobs.Exporter) RuntimeOption {
 	return func(runtime *PostgresRuntime) {
 		runtime.telemetry = exporter
 	}
+}
+
+func WithReplayStager(stager ReplayStager) RuntimeOption {
+	return func(runtime *PostgresRuntime) {
+		runtime.replayStager = stager
+	}
+}
+
+func (r *PostgresRuntime) ReplayStager() ReplayStager {
+	if r == nil {
+		return nil
+	}
+	return r.replayStager
 }
 
 func NewPostgresRuntime(pool *pgxpool.Pool, systemPrompt string, newMessageID func() string, options ...RuntimeOption) *PostgresRuntime {

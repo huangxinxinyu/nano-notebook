@@ -591,6 +591,230 @@ create trigger agentobs_outbox_records_release_capacity
 	after delete on agentobs_outbox_records
 	for each row execute function release_agentobs_outbox_record_capacity();
 
+create table if not exists agentobs_replay_staging (
+	attachment_id uuid primary key,
+	trace_id text not null references agent_trace_refs(trace_id) on delete cascade,
+	identity_key text not null check (char_length(identity_key) between 1 and 200),
+	class text not null check (class in ('model_request', 'model_decision', 'action_input', 'action_result')),
+	schema_version integer not null check (schema_version = 1),
+	plaintext_sha256 text not null check (plaintext_sha256 ~ '^[0-9a-f]{64}$'),
+	object_key text not null unique check (char_length(object_key) between 1 and 512),
+	ciphertext_bytes integer not null check (ciphertext_bytes between 1 and 2097152),
+	ciphertext_sha256 text not null check (ciphertext_sha256 ~ '^[0-9a-f]{64}$'),
+	compression text not null check (compression = 'gzip'),
+	encryption text not null check (encryption = 'aes-256-gcm'),
+	key_id text not null check (char_length(key_id) between 1 and 160),
+	wrapped_key bytea not null check (octet_length(wrapped_key) between 1 and 1024),
+	nonce bytea not null check (octet_length(nonce) between 1 and 64),
+	record_sequence integer,
+	state text not null default 'staged' check (state in ('staged', 'attached')),
+	expires_at timestamptz not null,
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now(),
+	unique (trace_id, identity_key),
+	foreign key (trace_id, record_sequence)
+		references agentobs_outbox_records(trace_id, sequence_no) on delete restrict,
+	constraint agentobs_replay_staging_attachment_shape_check check (
+		(state = 'staged' and record_sequence is null)
+		or (state = 'attached' and record_sequence is not null and record_sequence >= 1)
+	)
+);
+
+create index if not exists agentobs_replay_staging_expiry_idx
+	on agentobs_replay_staging(expires_at, attachment_id);
+
+create unique index if not exists agentobs_replay_staging_record_class_idx
+	on agentobs_replay_staging(trace_id, record_sequence, class)
+	where state = 'attached';
+
+create or replace function reserve_agentobs_replay_staging_capacity()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+	trace_attachment_count integer;
+	trace_ciphertext_bytes bigint;
+begin
+	perform 1 from agent_trace_refs where trace_id = new.trace_id for update;
+	if not found then
+		raise exception using errcode = '23514', message = 'Replay Trace reference does not exist';
+	end if;
+	select count(*), coalesce(sum(ciphertext_bytes), 0)
+	into trace_attachment_count, trace_ciphertext_bytes
+	from agentobs_replay_staging where trace_id = new.trace_id;
+	if trace_attachment_count >= 32 then
+		raise exception using errcode = '54000', message = 'Replay Attachment count limit exceeded';
+	end if;
+	if trace_ciphertext_bytes + new.ciphertext_bytes > 16777216 then
+		raise exception using errcode = '54000', message = 'Replay Trace ciphertext limit exceeded';
+	end if;
+	update agentobs_outbox_capacity
+	set current_staged_ciphertext_bytes = current_staged_ciphertext_bytes + new.ciphertext_bytes,
+		updated_at = now()
+	where singleton
+	  and current_staged_ciphertext_bytes + new.ciphertext_bytes <= max_staged_ciphertext_bytes;
+	if not found then
+		raise exception using errcode = '54000', message = 'Replay staged ciphertext limit exceeded';
+	end if;
+	return new;
+end
+$$;
+revoke all on function reserve_agentobs_replay_staging_capacity() from public;
+
+create or replace function release_agentobs_replay_staging_capacity()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+begin
+	update agentobs_outbox_capacity
+	set current_staged_ciphertext_bytes = greatest(current_staged_ciphertext_bytes - old.ciphertext_bytes, 0),
+		updated_at = now()
+	where singleton;
+	return old;
+end
+$$;
+revoke all on function release_agentobs_replay_staging_capacity() from public;
+
+drop trigger if exists agentobs_replay_staging_reserve_capacity on agentobs_replay_staging;
+create trigger agentobs_replay_staging_reserve_capacity
+	before insert on agentobs_replay_staging
+	for each row execute function reserve_agentobs_replay_staging_capacity();
+
+drop trigger if exists agentobs_replay_staging_release_capacity on agentobs_replay_staging;
+create trigger agentobs_replay_staging_release_capacity
+	after delete on agentobs_replay_staging
+	for each row execute function release_agentobs_replay_staging_capacity();
+
+create table if not exists agentobs_outbox_commands (
+	command_id text primary key check (char_length(command_id) between 1 and 200),
+	command_version integer not null check (command_version = 1),
+	command_kind text not null check (command_kind = 'purge_trace'),
+	trace_id text not null unique check (char_length(trace_id) between 1 and 160),
+	run_id text not null check (char_length(run_id) between 1 and 160),
+	requested_at timestamptz not null,
+	requested_at_unix_nano bigint not null,
+	delivery_state text not null default 'ready' check (delivery_state in ('ready', 'leased', 'acknowledged', 'quarantined')),
+	lease_token uuid,
+	lease_expires_at timestamptz,
+	next_attempt_at timestamptz not null default now(),
+	attempt_count integer not null default 0 check (attempt_count >= 0),
+	last_error_code text,
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now(),
+	constraint agentobs_outbox_commands_delivery_shape_check check (
+		(delivery_state = 'leased' and lease_token is not null and lease_expires_at is not null)
+		or (delivery_state != 'leased' and lease_token is null and lease_expires_at is null)
+	)
+);
+
+create index if not exists agentobs_outbox_commands_ready_idx
+	on agentobs_outbox_commands(next_attempt_at, created_at, command_id)
+	where delivery_state = 'ready';
+
+create table if not exists agentobs_outbox_command_objects (
+	command_id text not null references agentobs_outbox_commands(command_id) on delete cascade,
+	object_key text not null check (char_length(object_key) between 1 and 512),
+	primary key (command_id, object_key)
+);
+
+create or replace function enqueue_agentobs_trace_purge(trace_identity text, run_identity text)
+returns void
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+	command_identity text;
+	requested timestamptz;
+begin
+	command_identity := 'purge/' || trace_identity;
+	requested := clock_timestamp();
+	insert into agentobs_outbox_commands(
+		command_id, command_version, command_kind, trace_id, run_id,
+		requested_at, requested_at_unix_nano
+	) values (
+		command_identity, 1, 'purge_trace', trace_identity, run_identity,
+		requested, (extract(epoch from requested) * 1000000000)::bigint
+	) on conflict (trace_id) do nothing;
+	insert into agentobs_outbox_command_objects(command_id, object_key)
+	select command_identity, object_key
+	from agentobs_replay_staging
+	where trace_id = trace_identity
+	on conflict do nothing;
+end
+$$;
+revoke all on function enqueue_agentobs_trace_purge(text, text) from public;
+
+create or replace function enqueue_agentobs_run_purge()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+	trace_ref record;
+begin
+	for trace_ref in select trace_id, run_id from agent_trace_refs where run_id = old.id loop
+		perform enqueue_agentobs_trace_purge(trace_ref.trace_id, trace_ref.run_id);
+	end loop;
+	return old;
+end
+$$;
+revoke all on function enqueue_agentobs_run_purge() from public;
+
+create or replace function enqueue_agentobs_chat_purges()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+	trace_ref record;
+begin
+	for trace_ref in select trace_id, run_id from agent_trace_refs where chat_id = old.id loop
+		perform enqueue_agentobs_trace_purge(trace_ref.trace_id, trace_ref.run_id);
+	end loop;
+	return old;
+end
+$$;
+revoke all on function enqueue_agentobs_chat_purges() from public;
+
+create or replace function enqueue_agentobs_notebook_purges()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+	trace_ref record;
+begin
+	for trace_ref in select trace_id, run_id from agent_trace_refs where notebook_id = old.id loop
+		perform enqueue_agentobs_trace_purge(trace_ref.trace_id, trace_ref.run_id);
+	end loop;
+	return old;
+end
+$$;
+revoke all on function enqueue_agentobs_notebook_purges() from public;
+
+drop trigger if exists agent_runs_enqueue_observability_purge on agent_runs;
+create trigger agent_runs_enqueue_observability_purge
+	before delete on agent_runs
+	for each row execute function enqueue_agentobs_run_purge();
+
+drop trigger if exists chat_chats_enqueue_observability_purges on chat_chats;
+create trigger chat_chats_enqueue_observability_purges
+	before delete on chat_chats
+	for each row execute function enqueue_agentobs_chat_purges();
+
+drop trigger if exists notebook_notebooks_enqueue_observability_purges on notebook_notebooks;
+create trigger notebook_notebooks_enqueue_observability_purges
+	before delete on notebook_notebooks
+	for each row execute function enqueue_agentobs_notebook_purges();
+
 create table if not exists agent_jobs (
 	id text primary key,
 	kind text not null check (kind = 'agent_run'),
@@ -736,6 +960,9 @@ alter table agent_traces enable row level security;
 alter table agent_trace_records enable row level security;
 alter table agent_trace_refs enable row level security;
 alter table agentobs_outbox_records enable row level security;
+alter table agentobs_replay_staging enable row level security;
+alter table agentobs_outbox_commands enable row level security;
+alter table agentobs_outbox_command_objects enable row level security;
 alter table agent_jobs enable row level security;
 
 grant usage on schema public to nano_app, nano_worker;
@@ -771,6 +998,10 @@ grant select, insert on agent_traces, agent_trace_records to nano_worker;
 revoke all on agent_trace_refs, agentobs_outbox_records from nano_app, nano_worker;
 grant insert on agent_trace_refs, agentobs_outbox_records to nano_app;
 grant select, insert, update, delete on agent_trace_refs, agentobs_outbox_records to nano_worker;
+revoke all on agentobs_replay_staging from nano_app, nano_worker;
+grant select, insert, update, delete on agentobs_replay_staging to nano_worker;
+revoke all on agentobs_outbox_commands, agentobs_outbox_command_objects from nano_app, nano_worker;
+grant select, insert, update, delete on agentobs_outbox_commands, agentobs_outbox_command_objects to nano_worker;
 
 drop policy if exists identity_users_owner on identity_users;
 create policy identity_users_owner on identity_users
@@ -1060,6 +1291,18 @@ create policy agentobs_outbox_records_app_insert on agentobs_outbox_records
 
 drop policy if exists agentobs_outbox_records_worker on agentobs_outbox_records;
 create policy agentobs_outbox_records_worker on agentobs_outbox_records
+	for all to nano_worker using (true) with check (true);
+
+drop policy if exists agentobs_replay_staging_worker on agentobs_replay_staging;
+create policy agentobs_replay_staging_worker on agentobs_replay_staging
+	for all to nano_worker using (true) with check (true);
+
+drop policy if exists agentobs_outbox_commands_worker on agentobs_outbox_commands;
+create policy agentobs_outbox_commands_worker on agentobs_outbox_commands
+	for all to nano_worker using (true) with check (true);
+
+drop policy if exists agentobs_outbox_command_objects_worker on agentobs_outbox_command_objects;
+create policy agentobs_outbox_command_objects_worker on agentobs_outbox_command_objects
 	for all to nano_worker using (true) with check (true);
 
 drop policy if exists agent_jobs_private on agent_jobs;

@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
+	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -26,6 +27,7 @@ type Config struct {
 	BaseBackoff     time.Duration
 	MaxBackoff      time.Duration
 	RetryJitter     func() float64
+	StagingObjects  objectstore.Store
 }
 
 func (c Config) withDefaults() Config {
@@ -61,8 +63,9 @@ func (c Config) validate() error {
 }
 
 type PostgresStore struct {
-	pool   *pgxpool.Pool
-	config Config
+	pool           *pgxpool.Pool
+	config         Config
+	stagingObjects objectstore.Store
 }
 
 type ClaimedBatch struct {
@@ -78,7 +81,7 @@ func NewPostgresStore(pool *pgxpool.Pool, config Config) (*PostgresStore, error)
 	if err := config.validate(); err != nil {
 		return nil, err
 	}
-	return &PostgresStore{pool: pool, config: config}, nil
+	return &PostgresStore{pool: pool, config: config, stagingObjects: config.StagingObjects}, nil
 }
 
 type traceRef struct {
@@ -222,6 +225,40 @@ func (s *PostgresStore) ClaimBatch(ctx context.Context) (ClaimedBatch, bool, err
 		if len(chunk.Records) == 0 {
 			break
 		}
+		firstSequence := chunk.Records[0].Sequence
+		lastSequence := chunk.Records[len(chunk.Records)-1].Sequence
+		attachmentRows, err := tx.Query(ctx, `
+			select attachment_id::text, record_sequence, class, schema_version,
+				plaintext_sha256, object_key, ciphertext_bytes, ciphertext_sha256,
+				compression, encryption, key_id, wrapped_key, nonce, expires_at
+			from agentobs_replay_staging
+			where trace_id = $1 and state = 'attached'
+				and record_sequence between $2 and $3
+			order by record_sequence, class, attachment_id
+		`, ref.traceID, firstSequence, lastSequence)
+		if err != nil {
+			return ClaimedBatch{}, false, fmt.Errorf("load Outbox Replay Attachments for Trace %s: %w", ref.traceID, err)
+		}
+		for attachmentRows.Next() {
+			var attachment collector.AttachmentDescriptor
+			if err := attachmentRows.Scan(
+				&attachment.AttachmentID, &attachment.RecordSequence, &attachment.Class,
+				&attachment.SchemaVersion, &attachment.PlaintextSHA256,
+				&attachment.StagingObjectKey, &attachment.CiphertextBytes,
+				&attachment.CiphertextSHA256, &attachment.Compression,
+				&attachment.Encryption, &attachment.KeyID, &attachment.WrappedKey,
+				&attachment.Nonce, &attachment.ExpiresAt,
+			); err != nil {
+				attachmentRows.Close()
+				return ClaimedBatch{}, false, err
+			}
+			chunk.Attachments = append(chunk.Attachments, attachment)
+		}
+		if err := attachmentRows.Err(); err != nil {
+			attachmentRows.Close()
+			return ClaimedBatch{}, false, err
+		}
+		attachmentRows.Close()
 		terminalUrgent = terminalUrgent || ref.terminalSequence != nil
 		batch.Chunks = append(batch.Chunks, chunk)
 	}
@@ -269,6 +306,41 @@ func (s *PostgresStore) ApplyResult(ctx context.Context, claimed ClaimedBatch, r
 			return fmt.Errorf("Collector Batch result repeats Trace %s", chunkResult.TraceID)
 		}
 		resultsByTrace[chunkResult.TraceID] = chunkResult
+	}
+	for _, chunk := range claimed.Batch.Chunks {
+		chunkResult, exists := resultsByTrace[chunk.Trace.TraceID]
+		if !exists {
+			return fmt.Errorf("Collector Batch result omits Trace %s", chunk.Trace.TraceID)
+		}
+		if len(chunk.Records) == 0 {
+			return fmt.Errorf("claimed Trace %s has no records", chunk.Trace.TraceID)
+		}
+		lastSequence := chunk.Records[len(chunk.Records)-1].Sequence
+		switch chunkResult.Status {
+		case collector.ChunkCommitted:
+			if chunkResult.Code != "" || chunkResult.CommittedThrough != lastSequence {
+				return fmt.Errorf("committed Collector result for Trace %s is invalid", chunk.Trace.TraceID)
+			}
+		case collector.ChunkRetryable, collector.ChunkRejected:
+			if chunkResult.Code == "" || chunkResult.CommittedThrough != chunk.FirstSequence-1 {
+				return fmt.Errorf("non-committed Collector result for Trace %s is invalid", chunk.Trace.TraceID)
+			}
+		default:
+			return fmt.Errorf("unsupported Collector result status %q", chunkResult.Status)
+		}
+	}
+	for _, chunk := range claimed.Batch.Chunks {
+		if resultsByTrace[chunk.Trace.TraceID].Status != collector.ChunkCommitted {
+			continue
+		}
+		if len(chunk.Attachments) > 0 && s.stagingObjects == nil {
+			return errors.New("Outbox Replay staging object store is unavailable")
+		}
+		for _, attachment := range chunk.Attachments {
+			if err := s.stagingObjects.Delete(ctx, attachment.StagingObjectKey); err != nil {
+				return fmt.Errorf("delete acknowledged Replay staging object: %w", err)
+			}
+		}
 	}
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
@@ -321,6 +393,18 @@ func (s *PostgresStore) ApplyResult(ctx context.Context, claimed ClaimedBatch, r
 				where trace_id = $1
 			`, chunk.Trace.TraceID, chunkResult.CommittedThrough, deliveryState); err != nil {
 				return err
+			}
+			for _, attachment := range chunk.Attachments {
+				result, err := tx.Exec(ctx, `
+					delete from agentobs_replay_staging
+					where attachment_id = $1 and trace_id = $2 and record_sequence = $3
+				`, attachment.AttachmentID, chunk.Trace.TraceID, attachment.RecordSequence)
+				if err != nil {
+					return err
+				}
+				if result.RowsAffected() != 1 {
+					return fmt.Errorf("Outbox Replay Attachment %s is no longer authoritative", attachment.AttachmentID)
+				}
 			}
 			if terminalSequence != nil && chunkResult.CommittedThrough >= *terminalSequence {
 				if _, err := tx.Exec(ctx, `delete from agentobs_outbox_records where trace_id = $1`, chunk.Trace.TraceID); err != nil {

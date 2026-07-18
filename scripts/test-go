@@ -6,7 +6,9 @@ cd "$ROOT"
 
 export NANO_TEST_DATABASE_URL="${NANO_TEST_DATABASE_URL:-postgres://nano:nano@localhost:55432/nano_test?sslmode=disable}"
 export NANO_TEST_OBSERVABILITY_DATABASE_URL="${NANO_TEST_OBSERVABILITY_DATABASE_URL:-postgres://nano_observability:nano-observability@localhost:55432/nano_observability_test?sslmode=disable}"
-docker compose -f infra/compose/compose.yaml up -d postgres >/dev/null
+export NANO_TEST_S3_ENDPOINT="${NANO_TEST_S3_ENDPOINT:-127.0.0.1:59000}"
+docker compose -f infra/compose/compose.yaml up -d postgres minio minio-init >/dev/null
+docker compose -f infra/compose/compose.yaml wait minio-init >/dev/null
 
 postgres_ready() {
   docker compose -f infra/compose/compose.yaml exec -T postgres pg_isready -h 127.0.0.1 -p 5432 -U nano -d nano >/dev/null 2>&1

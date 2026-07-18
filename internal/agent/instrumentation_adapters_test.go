@@ -11,6 +11,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/memory"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/semconv"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
+	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 )
 
 func TestModelAdapterRecordsNormalizedMetadataWithoutContent(t *testing.T) {
@@ -48,6 +49,40 @@ func TestModelAdapterRecordsNormalizedMetadataWithoutContent(t *testing.T) {
 	}
 }
 
+func TestModelAdapterStagesReplayAndBindsBothSidesOfThePhysicalCall(t *testing.T) {
+	tracer, exporter, ctx := instrumentationTestTracer(t)
+	stager := &recordingReplayStager{}
+	model := outcomeModelFunc(func(context.Context, models.ModelRequest) (models.ModelOutcome, error) {
+		return models.ModelOutcome{
+			ModelDecision: models.ModelDecision{Final: &models.FinalDraft{Text: "answer"}},
+			Metadata: models.ModelCallMetadata{
+				RequestedModel: "aliyun/qwen-flash", ResultKind: models.ModelResultFinalDraft,
+			},
+		}, nil
+	})
+	_, err := InvokeDecisionModel(ctx, tracer, model, models.ModelRequest{
+		Model: "aliyun/qwen-flash", Messages: []models.ModelMessage{{Role: models.RoleUser, Content: "question"}},
+	}, 1, ModelTraceOptions{
+		StartIdentity:    "run/run-1/attempt/1/model/1/start",
+		RequestIdentity:  "run/run-1/attempt/1/model/1/replay/request",
+		DecisionIdentity: "run/run-1/attempt/1/model/1/replay/decision",
+		ReplayStager:     stager,
+	})
+	if err != nil {
+		t.Fatalf("InvokeDecisionModel: %v", err)
+	}
+	if len(stager.requests) != 2 || stager.requests[0].Payload.Class != replay.ClassModelRequest || stager.requests[1].Payload.Class != replay.ClassModelDecision {
+		t.Fatalf("staged Replay requests = %#v", stager.requests)
+	}
+	records := exporter.Records()
+	if got := stringAttribute(records[2], replay.ModelRequestAttachmentKey); got != "attachment-model_request" {
+		t.Fatalf("Model start Replay Attachment = %q", got)
+	}
+	if got := stringAttribute(records[3], replay.ModelDecisionAttachmentKey); got != "attachment-model_decision" {
+		t.Fatalf("Model terminal Replay Attachment = %q", got)
+	}
+}
+
 func TestActionAdapterPreservesDomainResultAndRecordsPhysicalExecution(t *testing.T) {
 	tracer, exporter, ctx := instrumentationTestTracer(t)
 	_, prior, err := tracer.StartSpan(ctx, agentobs.SpanStart{Name: "agent.action"})
@@ -73,6 +108,32 @@ func TestActionAdapterPreservesDomainResultAndRecordsPhysicalExecution(t *testin
 		if strings.Contains(string(payload), "not-for-trace") {
 			t.Fatalf("raw Action input entered Trace: %s", payload)
 		}
+	}
+}
+
+func TestActionAdapterStagesReplayAndBindsBothSidesOfThePhysicalCall(t *testing.T) {
+	tracer, exporter, ctx := instrumentationTestTracer(t)
+	stager := &recordingReplayStager{}
+	_, err := InvokeAgentAction(ctx, tracer, adapterAction{}, "decision:1/action:0", ActionRequest{
+		Input: json.RawMessage(`{"timezone":"Asia/Shanghai"}`),
+	}, ActionTraceOptions{
+		StartIdentity:  "run/run-1/attempt/1/action/0/start",
+		InputIdentity:  "run/run-1/attempt/1/action/0/replay/input",
+		ResultIdentity: "run/run-1/attempt/1/action/0/replay/result",
+		ReplayStager:   stager,
+	})
+	if err != nil {
+		t.Fatalf("InvokeAgentAction: %v", err)
+	}
+	if len(stager.requests) != 2 || stager.requests[0].Payload.Class != replay.ClassActionInput || stager.requests[1].Payload.Class != replay.ClassActionResult {
+		t.Fatalf("staged Replay requests = %#v", stager.requests)
+	}
+	records := exporter.Records()
+	if got := stringAttribute(records[2], replay.ActionInputAttachmentKey); got != "attachment-action_input" {
+		t.Fatalf("Action start Replay Attachment = %q", got)
+	}
+	if got := stringAttribute(records[3], replay.ActionResultAttachmentKey); got != "attachment-action_result" {
+		t.Fatalf("Action terminal Replay Attachment = %q", got)
 	}
 }
 
@@ -166,6 +227,19 @@ type cancellingAdapterAction struct{ adapterAction }
 
 func (cancellingAdapterAction) Execute(context.Context, ActionRequest) (ActionResult, error) {
 	return ActionResult{}, context.Canceled
+}
+
+type recordingReplayStager struct {
+	requests []replay.StageRequest
+	err      error
+}
+
+func (s *recordingReplayStager) Stage(_ context.Context, request replay.StageRequest) (replay.StagedAttachment, error) {
+	s.requests = append(s.requests, request)
+	if s.err != nil {
+		return replay.StagedAttachment{}, s.err
+	}
+	return replay.StagedAttachment{AttachmentID: "attachment-" + string(request.Payload.Class)}, nil
 }
 
 func stringAttribute(record agentobs.Record, key string) string {

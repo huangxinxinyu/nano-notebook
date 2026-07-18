@@ -20,6 +20,14 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 	t.Setenv("NANO_OUTBOX_POLL_INTERVAL", "125ms")
 	t.Setenv("NANO_OUTBOX_MAX_DELAY", "333ms")
 	t.Setenv("NANO_OUTBOX_HTTP_TIMEOUT", "7s")
+	t.Setenv("NANO_REPLAY_STAGING_S3_ENDPOINT", "staging.internal:9000")
+	t.Setenv("NANO_REPLAY_STAGING_S3_ACCESS_KEY_ID", "worker-staging-key")
+	t.Setenv("NANO_REPLAY_STAGING_S3_SECRET_ACCESS_KEY", "worker-staging-secret")
+	t.Setenv("NANO_REPLAY_STAGING_S3_BUCKET", "worker-staging")
+	t.Setenv("NANO_REPLAY_STAGING_S3_REGION", "cn-test-1")
+	t.Setenv("NANO_REPLAY_STAGING_S3_USE_TLS", "true")
+	t.Setenv("NANO_REPLAY_KEY_ID", "replay-key-7")
+	t.Setenv("NANO_REPLAY_KEK_BASE64", "bmFuby1sb2NhbC1kZXYta2VrLTAwMDAwMDAwMDAwMDA=")
 
 	config, err := loadWorkerConfig()
 	if err != nil {
@@ -36,6 +44,11 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 	}
 	if config.LeaseDuration != 20*time.Second || config.PollInterval != 125*time.Millisecond || config.MaxDelay != 333*time.Millisecond || config.HTTPTimeout != 7*time.Second {
 		t.Fatalf("Sender timing = %#v", config)
+	}
+	if config.ReplayStagingS3.Endpoint != "staging.internal:9000" || config.ReplayStagingS3.AccessKeyID != "worker-staging-key" ||
+		config.ReplayStagingS3.SecretAccessKey != "worker-staging-secret" || config.ReplayStagingS3.Bucket != "worker-staging" ||
+		config.ReplayStagingS3.Region != "cn-test-1" || !config.ReplayStagingS3.UseTLS || config.ReplayKeyID != "replay-key-7" || len(config.ReplayKEK) != 32 {
+		t.Fatalf("Replay staging config = %#v", config)
 	}
 }
 

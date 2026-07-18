@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -9,8 +10,10 @@ import (
 	"sync"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/memory"
+	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 )
 
 type MemoryStore struct {
@@ -21,8 +24,9 @@ type MemoryStore struct {
 }
 
 type memoryTrace struct {
-	descriptor TraceDescriptor
-	records    []SequencedRecord
+	descriptor  TraceDescriptor
+	records     []SequencedRecord
+	attachments map[string]AttachmentDescriptor
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -76,6 +80,18 @@ func validateAndMergeTraceChunk(ctx context.Context, existing memoryTrace, chunk
 	}
 	if chunk.FirstSequence < 1 || len(chunk.Records) == 0 {
 		return memoryTrace{}, 0, &ChunkError{Code: CodeInvalidChunk, Err: errors.New("Collector Trace Chunk is empty or unsequenced")}
+	}
+	if err := validateAttachmentDescriptors(chunk); err != nil {
+		return memoryTrace{}, 0, &ChunkError{Code: CodeInvalidChunk, CommittedThrough: len(existing.records), Err: err}
+	}
+	for _, attachment := range chunk.Attachments {
+		stored, exists := existing.attachments[attachment.AttachmentID]
+		if exists && !sameAttachmentIdentity(stored, attachment) {
+			return memoryTrace{}, 0, &ChunkError{
+				Code: CodeIdentityConflict, CommittedThrough: len(existing.records),
+				Err: errors.New("Collector Replay Attachment identity changed"),
+			}
+		}
 	}
 	if len(existing.records) > 0 && existing.descriptor != chunk.Trace {
 		return memoryTrace{}, 0, &ChunkError{
@@ -143,7 +159,98 @@ func validateAndMergeTraceChunk(ctx context.Context, existing memoryTrace, chunk
 		}
 		candidate = append(candidate, cloneSequencedRecord(envelope))
 	}
-	return memoryTrace{descriptor: chunk.Trace, records: candidate}, candidate[len(candidate)-1].Sequence, nil
+	attachments := make(map[string]AttachmentDescriptor, len(existing.attachments)+len(chunk.Attachments))
+	for attachmentID, attachment := range existing.attachments {
+		attachments[attachmentID] = cloneAttachmentDescriptor(attachment)
+	}
+	for _, attachment := range chunk.Attachments {
+		attachments[attachment.AttachmentID] = cloneAttachmentDescriptor(attachment)
+	}
+	return memoryTrace{descriptor: chunk.Trace, records: candidate, attachments: attachments}, candidate[len(candidate)-1].Sequence, nil
+}
+
+func sameAttachmentIdentity(left, right AttachmentDescriptor) bool {
+	return left.AttachmentID == right.AttachmentID &&
+		left.RecordSequence == right.RecordSequence &&
+		left.Class == right.Class &&
+		left.SchemaVersion == right.SchemaVersion &&
+		left.PlaintextSHA256 == right.PlaintextSHA256 &&
+		left.CiphertextBytes == right.CiphertextBytes &&
+		left.CiphertextSHA256 == right.CiphertextSHA256 &&
+		left.Compression == right.Compression &&
+		left.Encryption == right.Encryption &&
+		left.KeyID == right.KeyID &&
+		bytes.Equal(left.WrappedKey, right.WrappedKey) &&
+		bytes.Equal(left.Nonce, right.Nonce) &&
+		left.ExpiresAt.UnixNano() == right.ExpiresAt.UnixNano()
+}
+
+func cloneAttachmentDescriptor(attachment AttachmentDescriptor) AttachmentDescriptor {
+	attachment.WrappedKey = append([]byte(nil), attachment.WrappedKey...)
+	attachment.Nonce = append([]byte(nil), attachment.Nonce...)
+	return attachment
+}
+
+func validateAttachmentDescriptors(chunk TraceChunk) error {
+	if len(chunk.Attachments) > 32 {
+		return errors.New("Collector Trace Chunk has too many Replay Attachments")
+	}
+	byID := make(map[string]AttachmentDescriptor, len(chunk.Attachments))
+	byRecordClass := make(map[string]struct{}, len(chunk.Attachments))
+	firstSequence := chunk.FirstSequence
+	lastSequence := firstSequence + len(chunk.Records) - 1
+	for _, attachment := range chunk.Attachments {
+		if _, err := uuid.Parse(attachment.AttachmentID); err != nil ||
+			attachment.RecordSequence < firstSequence || attachment.RecordSequence > lastSequence ||
+			!attachment.Class.Valid() || attachment.SchemaVersion != 1 ||
+			!validSHA256(attachment.PlaintextSHA256) ||
+			!validDescriptorText(attachment.StagingObjectKey, 512) ||
+			attachment.CiphertextBytes < 1 || attachment.CiphertextBytes > replay.MaxCiphertextBytes ||
+			!validSHA256(attachment.CiphertextSHA256) || attachment.Compression != replay.CompressionGZIP ||
+			attachment.Encryption != replay.EncryptionAES256GCM || !validDescriptorText(attachment.KeyID, 160) ||
+			len(attachment.WrappedKey) < 1 || len(attachment.WrappedKey) > 1024 ||
+			len(attachment.Nonce) < 1 || len(attachment.Nonce) > 64 || attachment.ExpiresAt.IsZero() {
+			return errors.New("Collector Replay Attachment descriptor is invalid")
+		}
+		if _, duplicate := byID[attachment.AttachmentID]; duplicate {
+			return errors.New("Collector Replay Attachment identity is duplicated")
+		}
+		recordClass := fmt.Sprintf("%d/%s", attachment.RecordSequence, attachment.Class)
+		if _, duplicate := byRecordClass[recordClass]; duplicate {
+			return errors.New("Collector Replay Attachment record class is duplicated")
+		}
+		byID[attachment.AttachmentID] = attachment
+		byRecordClass[recordClass] = struct{}{}
+	}
+	for index, envelope := range chunk.Records {
+		references, err := replay.AttachmentReferences(envelope.Record.Attributes)
+		if err != nil {
+			return err
+		}
+		for _, reference := range references {
+			descriptor, found := byID[reference.AttachmentID]
+			if !found || descriptor.Class != reference.Class || descriptor.RecordSequence != firstSequence+index {
+				return errors.New("Collector record Replay Attachment does not resolve")
+			}
+		}
+	}
+	for _, descriptor := range byID {
+		record := chunk.Records[descriptor.RecordSequence-firstSequence].Record
+		references, _ := replay.AttachmentReferences(record.Attributes)
+		found := false
+		for _, reference := range references {
+			found = found || (reference.AttachmentID == descriptor.AttachmentID && reference.Class == descriptor.Class)
+		}
+		if !found {
+			return errors.New("Collector Replay Attachment is not referenced by its record")
+		}
+	}
+	return nil
+}
+
+func validSHA256(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == 32
 }
 
 func (s *MemoryStore) Records(traceID agentobs.TraceID) []SequencedRecord {

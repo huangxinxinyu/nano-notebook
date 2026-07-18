@@ -90,14 +90,14 @@ func TestPostgresTraceExporterRoundTripsAndReconcilesRecords(t *testing.T) {
 func TestPostgresTraceExporterConformance(t *testing.T) {
 	api, _, _, chatID := newChatFixture(t, "trace-conformance@example.com")
 	ctx := context.Background()
-	if _, err := api.db.Pool().Exec(ctx, `truncate agentobs_outbox_records, agent_trace_refs; update agentobs_outbox_capacity set current_records = 0 where singleton`); err != nil {
+	if _, err := api.db.Pool().Exec(ctx, `truncate agentobs_replay_staging, agentobs_outbox_records, agent_trace_refs; update agentobs_outbox_capacity set current_records = 0, current_staged_ciphertext_bytes = 0 where singleton`); err != nil {
 		t.Fatal(err)
 	}
 
 	exportertest.Run(t, exportertest.Harness{
 		New: func(t *testing.T) agentobs.Exporter {
 			t.Helper()
-			if _, err := api.db.Pool().Exec(ctx, `truncate agentobs_outbox_records, agent_trace_refs; update agentobs_outbox_capacity set current_records = 0 where singleton`); err != nil {
+			if _, err := api.db.Pool().Exec(ctx, `truncate agentobs_replay_staging, agentobs_outbox_records, agent_trace_refs; update agentobs_outbox_capacity set current_records = 0, current_staged_ciphertext_bytes = 0 where singleton`); err != nil {
 				t.Fatal(err)
 			}
 			exporter, err := agent.NewPostgresTraceExporter(api.db.Pool())

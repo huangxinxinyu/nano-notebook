@@ -90,6 +90,35 @@ create trigger obs_trace_records_immutable_update
 	before update on obs_trace_records
 	for each row execute function obs_reject_trace_record_update();
 
+create table if not exists obs_payload_refs (
+	attachment_id uuid primary key,
+	trace_id text not null references obs_traces(trace_id) on delete cascade,
+	record_sequence integer not null,
+	class text not null check (class in ('model_request', 'model_decision', 'action_input', 'action_result')),
+	schema_version integer not null check (schema_version = 1),
+	plaintext_sha256 text not null check (plaintext_sha256 ~ '^[0-9a-f]{64}$'),
+	object_key text not null unique check (char_length(object_key) between 1 and 512),
+	ciphertext_bytes integer not null check (ciphertext_bytes between 1 and 2097152),
+	ciphertext_sha256 text not null check (ciphertext_sha256 ~ '^[0-9a-f]{64}$'),
+	compression text not null check (compression = 'gzip'),
+	encryption text not null check (encryption = 'aes-256-gcm'),
+	key_id text not null check (char_length(key_id) between 1 and 160),
+	wrapped_key bytea not null check (octet_length(wrapped_key) between 1 and 1024),
+	nonce bytea not null check (octet_length(nonce) between 1 and 64),
+	state text not null default 'available' check (state in ('available', 'expired', 'purged')),
+	expires_at timestamptz not null,
+	expires_at_unix_nano bigint not null,
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now(),
+	unique (trace_id, record_sequence, class),
+	foreign key (trace_id, record_sequence)
+		references obs_trace_records(trace_id, sequence) on delete restrict
+);
+
+create index if not exists obs_payload_refs_expiry_idx
+	on obs_payload_refs(expires_at, attachment_id)
+	where state = 'available';
+
 create table if not exists obs_projection_queue (
 	trace_id text primary key references obs_traces(trace_id) on delete cascade,
 	target_sequence integer not null check (target_sequence >= 1),

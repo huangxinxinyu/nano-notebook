@@ -1,13 +1,20 @@
 package collector_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
+	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
+	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -203,6 +210,146 @@ func TestPostgresStoreRejectsRawRecordMutation(t *testing.T) {
 	if stored.Records[1].Record.Name != "nano.run.admitted" {
 		t.Fatalf("raw Collector record changed: %#v", stored.Records[1])
 	}
+}
+
+func TestPostgresStoreTakesOpaqueReplayCustodyBeforeACKAndReconcilesWithoutStaging(t *testing.T) {
+	ctx := context.Background()
+	pool := openObservabilityTestPool(t, ctx)
+	t.Cleanup(pool.Close)
+	resetObservabilityTestSchema(t, ctx, pool)
+	producerObjects := objectstore.NewMemoryStore()
+	collectorObjects := objectstore.NewMemoryStore()
+	ciphertext := bytes.Repeat([]byte{0xa5}, 256)
+	if err := producerObjects.Put(ctx, "producer-staging/attachment-1", ciphertext); err != nil {
+		t.Fatal(err)
+	}
+	store, err := collector.NewPostgresStoreWithReplay(pool, producerObjects, collectorObjects)
+	if err != nil {
+		t.Fatalf("NewPostgresStoreWithReplay: %v", err)
+	}
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := collectorBatchWithReplay(t, ciphertext)
+	result, err := ingestor.Ingest(ctx, batch)
+	if err != nil || result.Chunks[0].Status != collector.ChunkCommitted || result.Chunks[0].CommittedThrough != 2 {
+		t.Fatalf("Replay Ingest result=%#v err=%v", result, err)
+	}
+	var objectKey, ciphertextHash string
+	var payloadRows, ciphertextColumns int
+	if err := pool.QueryRow(ctx, `
+		select object_key, ciphertext_sha256 from obs_payload_refs
+		where attachment_id = $1
+	`, batch.Chunks[0].Attachments[0].AttachmentID).Scan(&objectKey, &ciphertextHash); err != nil {
+		t.Fatalf("load Replay ref: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `select count(*) from obs_payload_refs where trace_id = 'trace-1'`).Scan(&payloadRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `
+		select count(*) from information_schema.columns
+		where table_schema = 'public' and table_name = 'obs_payload_refs'
+			and column_name in ('ciphertext', 'plaintext', 'payload')
+	`).Scan(&ciphertextColumns); err != nil {
+		t.Fatal(err)
+	}
+	storedCiphertext, err := collectorObjects.Get(ctx, objectKey, replay.MaxCiphertextBytes)
+	if err != nil {
+		t.Fatalf("load Collector Replay object: %v", err)
+	}
+	if payloadRows != 1 || ciphertextColumns != 0 || ciphertextHash != batch.Chunks[0].Attachments[0].CiphertextSHA256 || !bytes.Equal(storedCiphertext, ciphertext) {
+		t.Fatalf("Collector Replay custody rows=%d ciphertext_columns=%d hash=%s bytes=%d", payloadRows, ciphertextColumns, ciphertextHash, len(storedCiphertext))
+	}
+	if err := producerObjects.Delete(ctx, batch.Chunks[0].Attachments[0].StagingObjectKey); err != nil {
+		t.Fatal(err)
+	}
+	resend, err := ingestor.Ingest(ctx, batch)
+	if err != nil || resend.Chunks[0].Status != collector.ChunkCommitted || resend.Chunks[0].CommittedThrough != 2 {
+		t.Fatalf("Replay resend without staging result=%#v err=%v", resend, err)
+	}
+}
+
+func TestPostgresStoreTreatsMissingReplayStagingObjectAsRetryableDependency(t *testing.T) {
+	ctx := context.Background()
+	pool := openObservabilityTestPool(t, ctx)
+	t.Cleanup(pool.Close)
+	resetObservabilityTestSchema(t, ctx, pool)
+	producerObjects := objectstore.NewMemoryStore()
+	collectorObjects := objectstore.NewMemoryStore()
+	store, err := collector.NewPostgresStoreWithReplay(pool, producerObjects, collectorObjects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ingestor, _ := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
+	batch := collectorBatchWithReplay(t, bytes.Repeat([]byte{0xa5}, 256))
+	result, err := ingestor.Ingest(ctx, batch)
+	if err != nil {
+		t.Fatalf("Ingest transport error: %v", err)
+	}
+	if got := result.Chunks[0]; got.Status != collector.ChunkRetryable || got.Code != collector.CodeAttachmentUnavailable || got.CommittedThrough != 0 {
+		t.Fatalf("missing staging result = %#v", got)
+	}
+	var traces, payloads int
+	if err := pool.QueryRow(ctx, `select count(*) from obs_traces`).Scan(&traces); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `select count(*) from obs_payload_refs`).Scan(&payloads); err != nil {
+		t.Fatal(err)
+	}
+	if traces != 0 || payloads != 0 || collectorObjects.Len() != 0 {
+		t.Fatalf("missing staging persisted traces/payloads/objects = %d/%d/%d", traces, payloads, collectorObjects.Len())
+	}
+}
+
+func TestPostgresStoreRejectsOversizedReplayStagingObjectAsIntegrityFailure(t *testing.T) {
+	ctx := context.Background()
+	pool := openObservabilityTestPool(t, ctx)
+	t.Cleanup(pool.Close)
+	resetObservabilityTestSchema(t, ctx, pool)
+	producerObjects := objectstore.NewMemoryStore()
+	collectorObjects := objectstore.NewMemoryStore()
+	expected := bytes.Repeat([]byte{0xa5}, 256)
+	if err := producerObjects.Put(ctx, "producer-staging/attachment-1", append(expected, 0xff)); err != nil {
+		t.Fatal(err)
+	}
+	store, err := collector.NewPostgresStoreWithReplay(pool, producerObjects, collectorObjects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ingestor, _ := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
+	result, err := ingestor.Ingest(ctx, collectorBatchWithReplay(t, expected))
+	if err != nil {
+		t.Fatalf("Ingest transport error: %v", err)
+	}
+	if got := result.Chunks[0]; got.Status != collector.ChunkRejected || got.Code != collector.CodeAttachmentIntegrity || got.CommittedThrough != 0 {
+		t.Fatalf("oversized staging result = %#v", got)
+	}
+	if collectorObjects.Len() != 0 {
+		t.Fatalf("oversized staging persisted %d Collector objects", collectorObjects.Len())
+	}
+}
+
+func collectorBatchWithReplay(t *testing.T, ciphertext []byte) collector.Batch {
+	t.Helper()
+	batch := validCollectorBatch(t)
+	const attachmentID = "019bf000-0000-7000-8000-000000000101"
+	batch.Chunks[0].Records[1].Record.Attributes = append(
+		batch.Chunks[0].Records[1].Record.Attributes,
+		agentobs.String(replay.ModelRequestAttachmentKey, attachmentID),
+	)
+	batch.Chunks[0].Records[1] = collectorEnvelope(t, 2, batch.Chunks[0].Records[1].Record)
+	ciphertextDigest := sha256.Sum256(ciphertext)
+	batch.Chunks[0].Attachments = []collector.AttachmentDescriptor{{
+		AttachmentID: attachmentID, RecordSequence: 2, Class: replay.ClassModelRequest,
+		SchemaVersion: 1, PlaintextSHA256: strings.Repeat("b", 64),
+		StagingObjectKey: "producer-staging/attachment-1", CiphertextBytes: len(ciphertext),
+		CiphertextSHA256: hex.EncodeToString(ciphertextDigest[:]), Compression: replay.CompressionGZIP,
+		Encryption: replay.EncryptionAES256GCM, KeyID: "dev-key-v1",
+		WrappedKey: bytes.Repeat([]byte{0xc3}, 60), Nonce: bytes.Repeat([]byte{0xd4}, 12),
+		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	}}
+	return batch
 }
 
 func TestPostgresStorePersistsUnknownTraceTombstoneAndPurgeWork(t *testing.T) {

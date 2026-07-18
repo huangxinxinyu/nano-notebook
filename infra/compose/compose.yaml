@@ -47,11 +47,21 @@ services:
         condition: service_healthy
       observability-init:
         condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
     environment:
       NANO_COLLECTOR_ADDR: ":8082"
       NANO_COLLECTOR_DATABASE_URL: postgres://nano_observability:nano-observability@postgres:5432/nano_observability?sslmode=disable
       NANO_COLLECTOR_SERVICE_TOKEN: nano-local-collector-token
       NANO_COLLECTOR_PRODUCER_ID: nano-worker
+      NANO_REPLAY_STAGING_S3_ENDPOINT: minio:9000
+      NANO_REPLAY_STAGING_S3_ACCESS_KEY_ID: nano
+      NANO_REPLAY_STAGING_S3_SECRET_ACCESS_KEY: nano-password
+      NANO_REPLAY_STAGING_S3_BUCKET: nano-agent-replay-staging
+      NANO_REPLAY_S3_ENDPOINT: minio:9000
+      NANO_REPLAY_S3_ACCESS_KEY_ID: nano
+      NANO_REPLAY_S3_SECRET_ACCESS_KEY: nano-password
+      NANO_REPLAY_S3_BUCKET: nano-agent-replay
       OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
     ports:
       - "58082:8082"
@@ -77,6 +87,18 @@ services:
       retries: 20
     volumes:
       - minio-data:/data
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        mc alias set local http://minio:9000 nano nano-password
+        mc mb --ignore-existing local/nano-agent-replay-staging
+        mc mb --ignore-existing local/nano-agent-replay
 
   qdrant:
     image: qdrant/qdrant:v1.15.1

@@ -1,20 +1,26 @@
 package collector
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
+	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type PostgresStore struct {
-	pool *pgxpool.Pool
+	pool           *pgxpool.Pool
+	stagingObjects objectstore.Store
+	replayObjects  objectstore.Store
 }
 
 type StoredTrace struct {
@@ -29,12 +35,33 @@ func NewPostgresStore(pool *pgxpool.Pool) *PostgresStore {
 	return &PostgresStore{pool: pool}
 }
 
+func NewPostgresStoreWithReplay(pool *pgxpool.Pool, stagingObjects, replayObjects objectstore.Store) (*PostgresStore, error) {
+	if pool == nil || stagingObjects == nil || replayObjects == nil {
+		return nil, errors.New("Collector Replay Store dependencies are incomplete")
+	}
+	return &PostgresStore{pool: pool, stagingObjects: stagingObjects, replayObjects: replayObjects}, nil
+}
+
 func (s *PostgresStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk) (int, error) {
 	if s == nil || s.pool == nil {
 		return 0, errors.New("nil Collector PostgreSQL Store")
 	}
 	if err := validateTraceDescriptor(chunk.Trace); err != nil {
 		return 0, &ChunkError{Code: CodeInvalidChunk, Err: err}
+	}
+	if err := validateAttachmentDescriptors(chunk); err != nil {
+		return 0, &ChunkError{Code: CodeInvalidChunk, Err: err}
+	}
+	var tombstoned bool
+	if err := s.pool.QueryRow(ctx, `select exists(select 1 from obs_trace_tombstones where trace_id = $1)`, chunk.Trace.TraceID).Scan(&tombstoned); err != nil {
+		return 0, err
+	}
+	if tombstoned {
+		return 0, &ChunkError{Code: CodeTombstoned, Err: errors.New("Collector Trace is tombstoned")}
+	}
+	preparedAttachments, err := s.prepareReplayAttachments(ctx, chunk)
+	if err != nil {
+		return 0, err
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -44,7 +71,6 @@ func (s *PostgresStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk) 
 	if err := lockTraceID(ctx, tx, chunk.Trace.TraceID); err != nil {
 		return 0, err
 	}
-	var tombstoned bool
 	if err := tx.QueryRow(ctx, `select exists(select 1 from obs_trace_tombstones where trace_id = $1)`, chunk.Trace.TraceID).Scan(&tombstoned); err != nil {
 		return 0, err
 	}
@@ -86,6 +112,9 @@ func (s *PostgresStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk) 
 	if err := insertTraceRecords(ctx, tx, newRecords); err != nil {
 		return 0, err
 	}
+	if err := insertPayloadRefs(ctx, tx, chunk.Trace.TraceID, preparedAttachments); err != nil {
+		return 0, err
+	}
 	if _, err := tx.Exec(ctx, `
 		update obs_traces
 		set committed_sequence = $2, updated_at = now()
@@ -107,6 +136,157 @@ func (s *PostgresStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk) 
 		return 0, err
 	}
 	return committedThrough, nil
+}
+
+type preparedAttachment struct {
+	descriptor AttachmentDescriptor
+	objectKey  string
+}
+
+func (s *PostgresStore) prepareReplayAttachments(ctx context.Context, chunk TraceChunk) ([]preparedAttachment, error) {
+	if len(chunk.Attachments) == 0 {
+		return nil, nil
+	}
+	if s.stagingObjects == nil || s.replayObjects == nil {
+		return nil, &ChunkError{Code: CodeAttachmentUnavailable, Retryable: true, Err: errors.New("Collector Replay object stores are unavailable")}
+	}
+	prepared := make([]preparedAttachment, 0, len(chunk.Attachments))
+	for _, descriptor := range chunk.Attachments {
+		objectKey := "agent-replay/" + descriptor.AttachmentID
+		existing, found, err := loadPayloadRef(ctx, s.pool, descriptor.AttachmentID)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			if err := reconcilePayloadRef(existing, chunk.Trace.TraceID, descriptor, objectKey); err != nil {
+				return nil, err
+			}
+			info, statErr := s.replayObjects.Stat(ctx, objectKey)
+			if statErr == nil && info.Size == int64(descriptor.CiphertextBytes) {
+				prepared = append(prepared, preparedAttachment{descriptor: descriptor, objectKey: objectKey})
+				continue
+			}
+		}
+		ciphertext, err := s.stagingObjects.Get(ctx, descriptor.StagingObjectKey, int64(descriptor.CiphertextBytes))
+		if err != nil {
+			if errors.Is(err, objectstore.ErrObjectTooLarge) {
+				return nil, &ChunkError{
+					Code: CodeAttachmentIntegrity,
+					Err:  errors.New("Collector Replay ciphertext exceeds its declared size"),
+				}
+			}
+			return nil, &ChunkError{
+				Code: CodeAttachmentUnavailable, Retryable: true,
+				Err: fmt.Errorf("Collector Replay staging object unavailable: %w", err),
+			}
+		}
+		if len(ciphertext) != descriptor.CiphertextBytes {
+			return nil, &ChunkError{Code: CodeAttachmentIntegrity, Err: errors.New("Collector Replay ciphertext size changed")}
+		}
+		digest := sha256.Sum256(ciphertext)
+		if !bytes.Equal([]byte(descriptor.CiphertextSHA256), []byte(hex.EncodeToString(digest[:]))) {
+			return nil, &ChunkError{Code: CodeAttachmentIntegrity, Err: errors.New("Collector Replay ciphertext hash changed")}
+		}
+		if err := s.replayObjects.Put(ctx, objectKey, ciphertext); err != nil {
+			return nil, &ChunkError{
+				Code: CodeAttachmentUnavailable, Retryable: true,
+				Err: fmt.Errorf("store Collector Replay object: %w", err),
+			}
+		}
+		prepared = append(prepared, preparedAttachment{descriptor: descriptor, objectKey: objectKey})
+	}
+	return prepared, nil
+}
+
+type storedPayloadRef struct {
+	attachmentID     string
+	traceID          agentobs.TraceID
+	recordSequence   int
+	class            replay.Class
+	schemaVersion    int
+	plaintextSHA256  string
+	objectKey        string
+	ciphertextBytes  int
+	ciphertextSHA256 string
+	compression      string
+	encryption       string
+	keyID            string
+	wrappedKey       []byte
+	nonce            []byte
+	expiresAtNano    int64
+}
+
+func loadPayloadRef(ctx context.Context, query postgresQuerier, attachmentID string) (storedPayloadRef, bool, error) {
+	var stored storedPayloadRef
+	err := query.QueryRow(ctx, `
+		select attachment_id::text, trace_id, record_sequence, class, schema_version,
+			plaintext_sha256, object_key, ciphertext_bytes, ciphertext_sha256,
+			compression, encryption, key_id, wrapped_key, nonce, expires_at_unix_nano
+		from obs_payload_refs where attachment_id = $1
+	`, attachmentID).Scan(
+		&stored.attachmentID, &stored.traceID, &stored.recordSequence, &stored.class,
+		&stored.schemaVersion, &stored.plaintextSHA256, &stored.objectKey,
+		&stored.ciphertextBytes, &stored.ciphertextSHA256, &stored.compression,
+		&stored.encryption, &stored.keyID, &stored.wrappedKey, &stored.nonce, &stored.expiresAtNano,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return storedPayloadRef{}, false, nil
+	}
+	if err != nil {
+		return storedPayloadRef{}, false, err
+	}
+	return stored, true, nil
+}
+
+func reconcilePayloadRef(stored storedPayloadRef, traceID agentobs.TraceID, descriptor AttachmentDescriptor, objectKey string) error {
+	if stored.attachmentID != descriptor.AttachmentID || stored.traceID != traceID || stored.recordSequence != descriptor.RecordSequence ||
+		stored.class != descriptor.Class || stored.schemaVersion != descriptor.SchemaVersion ||
+		stored.plaintextSHA256 != descriptor.PlaintextSHA256 || stored.objectKey != objectKey ||
+		stored.ciphertextBytes != descriptor.CiphertextBytes || stored.ciphertextSHA256 != descriptor.CiphertextSHA256 ||
+		stored.compression != descriptor.Compression || stored.encryption != descriptor.Encryption ||
+		stored.keyID != descriptor.KeyID || !bytes.Equal(stored.wrappedKey, descriptor.WrappedKey) ||
+		!bytes.Equal(stored.nonce, descriptor.Nonce) || stored.expiresAtNano != descriptor.ExpiresAt.UnixNano() {
+		return &ChunkError{Code: CodeIdentityConflict, Err: errors.New("Collector Replay Attachment identity changed")}
+	}
+	return nil
+}
+
+func insertPayloadRefs(ctx context.Context, tx pgx.Tx, traceID agentobs.TraceID, attachments []preparedAttachment) error {
+	for _, prepared := range attachments {
+		descriptor := prepared.descriptor
+		if _, err := tx.Exec(ctx, `
+			insert into obs_payload_refs(
+				attachment_id, trace_id, record_sequence, class, schema_version,
+				plaintext_sha256, object_key, ciphertext_bytes, ciphertext_sha256,
+				compression, encryption, key_id, wrapped_key, nonce,
+				expires_at, expires_at_unix_nano
+			) values (
+				$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+			)
+			on conflict (attachment_id) do nothing
+		`, descriptor.AttachmentID, traceID, descriptor.RecordSequence,
+			descriptor.Class, descriptor.SchemaVersion, descriptor.PlaintextSHA256,
+			prepared.objectKey, descriptor.CiphertextBytes, descriptor.CiphertextSHA256,
+			descriptor.Compression, descriptor.Encryption, descriptor.KeyID,
+			descriptor.WrappedKey, descriptor.Nonce, descriptor.ExpiresAt, descriptor.ExpiresAt.UnixNano()); err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+				return &ChunkError{Code: CodeIdentityConflict, Err: errors.New("Collector Replay Attachment identity conflicts with stored metadata")}
+			}
+			return err
+		}
+		stored, found, err := loadPayloadRef(ctx, tx, descriptor.AttachmentID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return errors.New("Collector Replay Attachment metadata was not committed")
+		}
+		if err := reconcilePayloadRef(stored, traceID, descriptor, prepared.objectKey); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *PostgresStore) TombstoneTrace(ctx context.Context, command PurgeCommand) error {

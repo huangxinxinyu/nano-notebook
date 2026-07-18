@@ -13,6 +13,7 @@ import (
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
+	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -310,6 +311,24 @@ func insertTraceRecord(ctx context.Context, db DBTX, sequence int, record agento
 		record.OccurredAt, record.OccurredAt.UnixNano(), record.PayloadVersion, string(payload),
 		hex.EncodeToString(payloadHash[:]), hex.EncodeToString(canonicalHash[:]), encodedBytes); err != nil {
 		return err
+	}
+	attachmentReferences, err := replay.AttachmentReferences(record.Attributes)
+	if err != nil {
+		return fmt.Errorf("%w: %v", agentobs.ErrUnresolvedLink, err)
+	}
+	for _, reference := range attachmentReferences {
+		result, err := db.Exec(ctx, `
+			update agentobs_replay_staging
+			set state = 'attached', record_sequence = $4, updated_at = now()
+			where attachment_id = $1 and trace_id = $2 and class = $3
+			  and (state = 'staged' or (state = 'attached' and record_sequence = $4))
+		`, reference.AttachmentID, record.TraceID, reference.Class, sequence)
+		if err != nil {
+			return err
+		}
+		if result.RowsAffected() != 1 {
+			return fmt.Errorf("%w: Replay Attachment %s does not resolve", agentobs.ErrUnresolvedLink, reference.AttachmentID)
+		}
 	}
 	_, err = db.Exec(ctx, `select nano_advance_agent_trace_ref($1, $2, $3, $4)`,
 		record.TraceID, sequence, record.Kind, record.SpanID)

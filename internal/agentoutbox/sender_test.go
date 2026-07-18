@@ -74,6 +74,45 @@ func TestSenderPostsAuthenticatedBatchAndAppliesCollectorResult(t *testing.T) {
 	}
 }
 
+func TestSenderPrioritizesPurgeCommandsAheadOfOrdinaryTraceDelivery(t *testing.T) {
+	claimed := agentoutbox.ClaimedPurgeBatch{
+		LeaseToken: "019bf000-0000-7000-8000-000000000011",
+		Batch: collector.PurgeBatch{
+			ProtocolVersion: collector.ProtocolVersion, BatchID: "purge-batch-sender", ProducerID: "nano-worker",
+			CreatedAt: time.Now().UTC(), Commands: []collector.PurgeCommand{{
+				CommandID: "purge/trace-sender", CommandVersion: 1, Kind: collector.CommandPurgeTrace,
+				TraceID: "trace-sender", RunID: "run-sender", RequestedAt: time.Now().UTC(),
+			}},
+		},
+	}
+	store := &purgeSenderStore{purgeClaimed: claimed, purgeOK: true}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/agent-observability/v1/purges" || r.Header.Get("Authorization") != "Bearer collector-secret" {
+			t.Errorf("purge request = %s auth=%q", r.URL.Path, r.Header.Get("Authorization"))
+		}
+		var batch collector.PurgeBatch
+		if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.NewEncoder(w).Encode(collector.PurgeBatchResult{
+			BatchID:  batch.BatchID,
+			Commands: []collector.PurgeCommandResult{{TraceID: batch.Commands[0].TraceID, Status: collector.PurgeAcknowledged}},
+		})
+	}))
+	defer server.Close()
+	sender, err := agentoutbox.NewSender(store, agentoutbox.SenderConfig{
+		Endpoint:     server.URL + "/internal/agent-observability/v1/batches",
+		ServiceToken: "collector-secret", HTTPClient: server.Client(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempted, err := sender.SendOnce(context.Background())
+	if err != nil || !attempted || store.purgeApplyCalls != 1 || store.claimCalls != 0 {
+		t.Fatalf("SendOnce attempted=%t err=%v purge_apply=%d ordinary_claims=%d", attempted, err, store.purgeApplyCalls, store.claimCalls)
+	}
+}
+
 func TestSenderTurnsTemporaryHTTPFailuresIntoRetryableTraceResults(t *testing.T) {
 	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
@@ -280,6 +319,30 @@ type senderStore struct {
 	applyCalls      int
 	applied         collector.BatchResult
 	applyErr        error
+}
+
+type purgeSenderStore struct {
+	senderStore
+	purgeClaimed    agentoutbox.ClaimedPurgeBatch
+	purgeOK         bool
+	purgeApplyCalls int
+	purgeReleases   int
+}
+
+func (s *purgeSenderStore) ClaimPurgeBatch(context.Context) (agentoutbox.ClaimedPurgeBatch, bool, error) {
+	return s.purgeClaimed, s.purgeOK, nil
+}
+
+func (s *purgeSenderStore) ApplyPurgeResult(_ context.Context, _ agentoutbox.ClaimedPurgeBatch, _ collector.PurgeBatchResult) error {
+	s.purgeApplyCalls++
+	s.purgeOK = false
+	return nil
+}
+
+func (s *purgeSenderStore) ReleasePurgeBatch(context.Context, agentoutbox.ClaimedPurgeBatch, string) error {
+	s.purgeReleases++
+	s.purgeOK = false
+	return nil
 }
 
 func assertSenderRetryResult(t *testing.T, store *senderStore, claimed agentoutbox.ClaimedBatch) {

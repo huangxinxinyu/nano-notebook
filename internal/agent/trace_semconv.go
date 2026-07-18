@@ -22,6 +22,10 @@ func TraceActionStartIdentity(runID string, attemptNo int, logicalActionID strin
 	return fmt.Sprintf("run/%s/attempt/%d/action/%s/start", runID, attemptNo, logicalActionID)
 }
 
+func TraceModelStartIdentity(runID string, attemptNo, decisionNo int) string {
+	return fmt.Sprintf("run/%s/attempt/%d/model/%d/start", runID, attemptNo, decisionNo)
+}
+
 const (
 	TraceEventRunAdmitted        = "nano.run.admitted"
 	TraceEventRunTerminal        = "nano.run.terminal"

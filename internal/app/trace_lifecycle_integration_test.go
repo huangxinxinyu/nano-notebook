@@ -763,7 +763,7 @@ func TestRetryCreatesSeparateTraceLinkedToPriorRootAndReplays(t *testing.T) {
 func TestAdmissionRollsBackRunJobAndMessageWhenRequiredTraceWriteFails(t *testing.T) {
 	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "trace-admission-failure@example.com")
 	ctx := context.Background()
-	if _, err := api.db.Pool().Exec(ctx, `drop table agentobs_outbox_records`); err != nil {
+	if _, err := api.db.Pool().Exec(ctx, `drop table agentobs_replay_staging, agentobs_outbox_records`); err != nil {
 		t.Fatal(err)
 	}
 	const messageID = "0190cdd2-5f2d-7ad8-b3f5-1b588788c421"
@@ -964,7 +964,7 @@ func TestRequiredModelStartFailureDoesNotCallGateway(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("claim = %#v ok=%t err=%v", claimed, ok, err)
 	}
-	if _, err := api.db.Pool().Exec(ctx, `drop table agentobs_outbox_records`); err != nil {
+	if _, err := api.db.Pool().Exec(ctx, `drop table agentobs_replay_staging, agentobs_outbox_records`); err != nil {
 		t.Fatal(err)
 	}
 	model := &recordingModelClient{result: models.ModelDecision{Final: &models.FinalDraft{Text: "must not be called"}}}

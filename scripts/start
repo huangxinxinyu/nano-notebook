@@ -14,6 +14,7 @@ export NANO_CHAT_MODEL="${NANO_CHAT_MODEL:-aliyun/qwen-flash}"
 export NANO_BIFROST_URL="${NANO_BIFROST_URL:-http://127.0.0.1:56666}"
 
 docker compose -f infra/compose/compose.yaml up -d
+docker compose -f infra/compose/compose.yaml wait minio-init >/dev/null
 for i in $(seq 1 60); do
   if docker compose -f infra/compose/compose.yaml exec -T postgres pg_isready -U nano -d nano >/dev/null 2>&1; then
     break

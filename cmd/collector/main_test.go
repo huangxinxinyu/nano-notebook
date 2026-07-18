@@ -10,6 +10,14 @@ func TestLoadConfigUsesDedicatedCollectorDatabaseAndPool(t *testing.T) {
 	t.Setenv("NANO_COLLECTOR_ADDR", ":18082")
 	t.Setenv("NANO_COLLECTOR_SERVICE_TOKEN", "test-service-token")
 	t.Setenv("NANO_COLLECTOR_PRODUCER_ID", "test-worker")
+	t.Setenv("NANO_REPLAY_STAGING_S3_ENDPOINT", "staging.internal:9000")
+	t.Setenv("NANO_REPLAY_STAGING_S3_ACCESS_KEY_ID", "collector-staging-reader")
+	t.Setenv("NANO_REPLAY_STAGING_S3_SECRET_ACCESS_KEY", "staging-reader-secret")
+	t.Setenv("NANO_REPLAY_STAGING_S3_BUCKET", "worker-staging")
+	t.Setenv("NANO_REPLAY_S3_ENDPOINT", "replay.internal:9000")
+	t.Setenv("NANO_REPLAY_S3_ACCESS_KEY_ID", "collector-replay-writer")
+	t.Setenv("NANO_REPLAY_S3_SECRET_ACCESS_KEY", "replay-writer-secret")
+	t.Setenv("NANO_REPLAY_S3_BUCKET", "collector-replay")
 
 	config, err := loadConfig()
 	if err != nil {
@@ -23,6 +31,10 @@ func TestLoadConfigUsesDedicatedCollectorDatabaseAndPool(t *testing.T) {
 	}
 	if config.Addr != ":18082" || config.ServiceToken != "test-service-token" || config.ProducerID != "test-worker" {
 		t.Fatalf("Collector config = %#v", config)
+	}
+	if config.ReplayStagingS3.Endpoint != "staging.internal:9000" || config.ReplayStagingS3.AccessKeyID != "collector-staging-reader" || config.ReplayStagingS3.Bucket != "worker-staging" ||
+		config.ReplayS3.Endpoint != "replay.internal:9000" || config.ReplayS3.AccessKeyID != "collector-replay-writer" || config.ReplayS3.Bucket != "collector-replay" {
+		t.Fatalf("Collector Replay config = %#v", config)
 	}
 }
 

@@ -37,6 +37,10 @@ type ActionRetryTraceRuntime interface {
 	PreviousActionSpan(context.Context, Attempt, string) (agentobs.SpanContext, bool, error)
 }
 
+type ReplayTraceRuntime interface {
+	ReplayStager() ReplayStager
+}
+
 type Controller struct {
 	runtime  ControllerRuntime
 	model    DecisionModel
@@ -102,7 +106,12 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		}
 		var outcome models.ModelOutcome
 		if tracer != nil {
-			outcome, err = InvokeDecisionModel(ctx, tracer, c.model, request, prefix.AcceptedDecisions+1)
+			decisionNo := prefix.AcceptedDecisions + 1
+			modelIdentity := TraceModelStartIdentity(attempt.RunID, attempt.AttemptNo, decisionNo)
+			outcome, err = InvokeDecisionModel(ctx, tracer, c.model, request, decisionNo, ModelTraceOptions{
+				StartIdentity: modelIdentity, RequestIdentity: modelIdentity + "/replay/request",
+				DecisionIdentity: modelIdentity + "/replay/decision", ReplayStager: c.replayStager(),
+			})
 		} else {
 			outcome, err = c.model.Decide(ctx, request)
 		}
@@ -181,7 +190,11 @@ func (c *Controller) executeAction(
 	var result ActionResult
 	var err error
 	if tracer != nil {
-		options := ActionTraceOptions{StartIdentity: TraceActionStartIdentity(attempt.RunID, attempt.AttemptNo, action.ActionID)}
+		startIdentity := TraceActionStartIdentity(attempt.RunID, attempt.AttemptNo, action.ActionID)
+		options := ActionTraceOptions{
+			StartIdentity: startIdentity, InputIdentity: startIdentity + "/replay/input",
+			ResultIdentity: startIdentity + "/replay/result", ReplayStager: c.replayStager(),
+		}
 		if retryRuntime, ok := c.runtime.(ActionRetryTraceRuntime); ok {
 			prior, found, priorErr := retryRuntime.PreviousActionSpan(ctx, attempt, action.ActionID)
 			if priorErr != nil {
@@ -226,6 +239,14 @@ func (c *Controller) executeAction(
 		return c.handleRuntimeError(ctx, attempt, err)
 	}
 	return nil
+}
+
+func (c *Controller) replayStager() ReplayStager {
+	runtime, ok := c.runtime.(ReplayTraceRuntime)
+	if !ok {
+		return nil
+	}
+	return runtime.ReplayStager()
 }
 
 func firstIncompleteAction(prefix CheckpointPrefix) (AcceptedProposal, AcceptedAction, bool) {

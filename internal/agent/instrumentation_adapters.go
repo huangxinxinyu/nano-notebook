@@ -7,16 +7,33 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/instrumentation"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/semconv"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
+	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 )
 
-func InvokeDecisionModel(ctx context.Context, tracer *agentobs.Tracer, model DecisionModel, request models.ModelRequest, decisionOrdinal int) (models.ModelOutcome, error) {
+type ReplayStager interface {
+	Stage(context.Context, replay.StageRequest) (replay.StagedAttachment, error)
+}
+
+type ModelTraceOptions struct {
+	StartIdentity    string
+	RequestIdentity  string
+	DecisionIdentity string
+	ReplayStager     ReplayStager
+}
+
+func InvokeDecisionModel(ctx context.Context, tracer *agentobs.Tracer, model DecisionModel, request models.ModelRequest, decisionOrdinal int, optionValues ...ModelTraceOptions) (models.ModelOutcome, error) {
 	if model == nil {
 		return models.ModelOutcome{}, errors.New("nil Decision Model")
+	}
+	var options ModelTraceOptions
+	if len(optionValues) > 0 {
+		options = optionValues[0]
 	}
 	startAttributes := []agentobs.Attribute{
 		agentobs.String(semconv.OperationNameKey, "decide"),
@@ -27,23 +44,52 @@ func InvokeDecisionModel(ctx context.Context, tracer *agentobs.Tracer, model Dec
 		agentobs.Bool(semconv.ActionDefinitionsKey, len(request.ActionDefinitions) > 0),
 		agentobs.Int64(semconv.ActionDefinitionCountKey, int64(len(request.ActionDefinitions))),
 	}
-	return instrumentation.Invoke(ctx, tracer, agentobs.SpanStart{Name: semconv.ModelCall, Attributes: startAttributes}, func(callContext context.Context) (models.ModelOutcome, error) {
+	if options.ReplayStager != nil {
+		payload, err := EncodeModelRequestReplay(request)
+		if err != nil {
+			return models.ModelOutcome{}, &instrumentation.RecordingError{Phase: instrumentation.RecordingStart, Err: err}
+		}
+		attachmentID, err := stageReplayAttachment(ctx, options.ReplayStager, options.RequestIdentity, payload)
+		if err != nil {
+			return models.ModelOutcome{}, &instrumentation.RecordingError{Phase: instrumentation.RecordingStart, Err: err}
+		}
+		startAttributes = append(startAttributes, agentobs.String(replay.ModelRequestAttachmentKey, attachmentID))
+	}
+	var decisionAttachmentID string
+	return instrumentation.Invoke(ctx, tracer, agentobs.SpanStart{IdentityKey: options.StartIdentity, Name: semconv.ModelCall, Attributes: startAttributes}, func(callContext context.Context) (models.ModelOutcome, error) {
 		outcome, err := model.Decide(callContext, request)
 		if err == nil {
 			if metadataErr := outcome.Metadata.Validate(); metadataErr != nil {
 				return outcome, &models.ModelError{Kind: models.ErrorInvalidResponse, Err: metadataErr}
 			}
+			if options.ReplayStager != nil {
+				payload, payloadErr := EncodeModelDecisionReplay(outcome.ModelDecision)
+				if payloadErr != nil {
+					return outcome, &instrumentation.RecordingError{Phase: instrumentation.RecordingTerminal, Err: payloadErr}
+				}
+				decisionAttachmentID, payloadErr = stageReplayAttachment(callContext, options.ReplayStager, options.DecisionIdentity, payload)
+				if payloadErr != nil {
+					return outcome, &instrumentation.RecordingError{Phase: instrumentation.RecordingTerminal, Err: payloadErr}
+				}
+			}
 		}
 		return outcome, err
 	}, func(outcome models.ModelOutcome, callErr error) agentobs.SpanEnd {
-		return modelTerminal(outcome.Metadata, callErr)
+		terminal := modelTerminal(outcome.Metadata, callErr)
+		if decisionAttachmentID != "" {
+			terminal.Attributes = append(terminal.Attributes, agentobs.String(replay.ModelDecisionAttachmentKey, decisionAttachmentID))
+		}
+		return terminal
 	})
 }
 
 type ActionTraceOptions struct {
-	StartIdentity string
-	LinkIdentity  string
-	RetryTarget   *agentobs.SpanContext
+	StartIdentity  string
+	LinkIdentity   string
+	RetryTarget    *agentobs.SpanContext
+	InputIdentity  string
+	ResultIdentity string
+	ReplayStager   ReplayStager
 }
 
 func InvokeAgentAction(ctx context.Context, tracer *agentobs.Tracer, action Action, logicalActionID string, request ActionRequest, optionValues ...ActionTraceOptions) (ActionResult, error) {
@@ -55,13 +101,26 @@ func InvokeAgentAction(ctx context.Context, tracer *agentobs.Tracer, action Acti
 	if len(optionValues) > 0 {
 		options = optionValues[0]
 	}
+	startAttributes := []agentobs.Attribute{
+		agentobs.String(semconv.ActionNameKey, name),
+		agentobs.String(semconv.ActionLogicalIDKey, logicalActionID),
+	}
+	if options.ReplayStager != nil {
+		payload, err := EncodeActionInputReplay(name, logicalActionID, request)
+		if err != nil {
+			return ActionResult{}, &instrumentation.RecordingError{Phase: instrumentation.RecordingStart, Err: err}
+		}
+		attachmentID, err := stageReplayAttachment(ctx, options.ReplayStager, options.InputIdentity, payload)
+		if err != nil {
+			return ActionResult{}, &instrumentation.RecordingError{Phase: instrumentation.RecordingStart, Err: err}
+		}
+		startAttributes = append(startAttributes, agentobs.String(replay.ActionInputAttachmentKey, attachmentID))
+	}
+	var resultAttachmentID string
 	return instrumentation.Invoke(ctx, tracer, agentobs.SpanStart{
 		IdentityKey: options.StartIdentity,
 		Name:        semconv.AgentAction,
-		Attributes: []agentobs.Attribute{
-			agentobs.String(semconv.ActionNameKey, name),
-			agentobs.String(semconv.ActionLogicalIDKey, logicalActionID),
-		},
+		Attributes:  startAttributes,
 	}, func(callContext context.Context) (ActionResult, error) {
 		if options.RetryTarget != nil {
 			identity := options.LinkIdentity
@@ -74,7 +133,18 @@ func InvokeAgentAction(ctx context.Context, tracer *agentobs.Tracer, action Acti
 				return ActionResult{}, &instrumentation.RecordingError{Phase: instrumentation.RecordingLink, Err: err}
 			}
 		}
-		return action.Execute(callContext, request)
+		result, err := action.Execute(callContext, request)
+		if err == nil && options.ReplayStager != nil {
+			payload, payloadErr := EncodeActionResultReplay(name, logicalActionID, result)
+			if payloadErr != nil {
+				return result, &instrumentation.RecordingError{Phase: instrumentation.RecordingTerminal, Err: payloadErr}
+			}
+			resultAttachmentID, payloadErr = stageReplayAttachment(callContext, options.ReplayStager, options.ResultIdentity, payload)
+			if payloadErr != nil {
+				return result, &instrumentation.RecordingError{Phase: instrumentation.RecordingTerminal, Err: payloadErr}
+			}
+		}
+		return result, err
 	}, func(result ActionResult, callErr error) agentobs.SpanEnd {
 		status := agentobs.StatusOK
 		attributes := []agentobs.Attribute{agentobs.String(semconv.ActionNameKey, name)}
@@ -90,8 +160,28 @@ func InvokeAgentAction(ctx context.Context, tracer *agentobs.Tracer, action Acti
 				attributes = append(attributes, agentobs.String(semconv.ErrorKindKey, result.ErrorCode))
 			}
 		}
+		if resultAttachmentID != "" {
+			attributes = append(attributes, agentobs.String(replay.ActionResultAttachmentKey, resultAttachmentID))
+		}
 		return agentobs.SpanEnd{Name: semconv.AgentAction, Status: status, Attributes: attributes}
 	})
+}
+
+func stageReplayAttachment(ctx context.Context, stager ReplayStager, identityKey string, payload replay.PlainPayload) (string, error) {
+	span, ok := agentobs.SpanContextFromContext(ctx)
+	if !ok || strings.TrimSpace(identityKey) == "" {
+		return "", errors.New("Replay staging requires Trace and logical identity")
+	}
+	attachment, err := stager.Stage(ctx, replay.StageRequest{
+		TraceID: span.TraceID, IdentityKey: identityKey, Payload: payload,
+	})
+	if err != nil {
+		return "", err
+	}
+	if attachment.AttachmentID == "" {
+		return "", errors.New("Replay Stager returned an empty Attachment identity")
+	}
+	return attachment.AttachmentID, nil
 }
 
 func modelTerminal(metadata models.ModelCallMetadata, callErr error) agentobs.SpanEnd {

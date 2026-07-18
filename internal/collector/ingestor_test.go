@@ -1,6 +1,7 @@
 package collector_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"strings"
@@ -59,6 +60,29 @@ func TestIngestorAcknowledgesAnIdenticalTraceChunkResend(t *testing.T) {
 	}
 	if got := len(store.Records("trace-1")); got != 2 {
 		t.Fatalf("record count after resend = %d, want 2", got)
+	}
+}
+
+func TestIngestorRejectsReplayAttachmentMetadataMutationOnResend(t *testing.T) {
+	store := collector.NewMemoryStore()
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+	batch := collectorBatchWithReplay(t, bytes.Repeat([]byte{0xa5}, 256))
+	if _, err := ingestor.Ingest(context.Background(), batch); err != nil {
+		t.Fatalf("first Ingest: %v", err)
+	}
+
+	conflict := collectorBatchWithReplay(t, bytes.Repeat([]byte{0xa5}, 256))
+	conflict.BatchID = "batch-replay-conflict"
+	conflict.Chunks[0].Attachments[0].PlaintextSHA256 = strings.Repeat("c", 64)
+	result, err := ingestor.Ingest(context.Background(), conflict)
+	if err != nil {
+		t.Fatalf("conflicting Ingest transport error: %v", err)
+	}
+	if got := result.Chunks[0]; got.Status != collector.ChunkRejected || got.Code != collector.CodeIdentityConflict || got.CommittedThrough != 2 {
+		t.Fatalf("Replay conflict result = %#v", got)
 	}
 }
 
