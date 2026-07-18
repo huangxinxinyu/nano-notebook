@@ -7,6 +7,9 @@ cd "$ROOT"
 export NANO_DATABASE_URL="${NANO_DATABASE_URL:-postgres://nano:nano@localhost:55432/nano?sslmode=disable}"
 export NANO_CONTROL_PLANE_ADDR="${NANO_CONTROL_PLANE_ADDR:-:8080}"
 export NANO_WORKER_ADDR="${NANO_WORKER_ADDR:-:8081}"
+export NANO_COLLECTOR_ADDR="${NANO_COLLECTOR_ADDR:-:8082}"
+export NANO_COLLECTOR_DATABASE_URL="${NANO_COLLECTOR_DATABASE_URL:-postgres://nano_observability:nano-observability@localhost:55432/nano_observability?sslmode=disable}"
+export NANO_COLLECTOR_SERVICE_TOKEN="${NANO_COLLECTOR_SERVICE_TOKEN:-nano-local-collector-token}"
 export NANO_CHAT_MODEL="${NANO_CHAT_MODEL:-aliyun/qwen-flash}"
 export NANO_BIFROST_URL="${NANO_BIFROST_URL:-http://127.0.0.1:56666}"
 
@@ -17,6 +20,7 @@ for i in $(seq 1 60); do
   fi
   sleep 1
 done
+scripts/prepare-observability-db
 go run ./cmd/migrate
 
 cleanup() {
@@ -26,6 +30,7 @@ trap cleanup EXIT INT TERM
 
 go run ./cmd/control-plane &
 go run ./cmd/worker &
+go run ./cmd/collector &
 npm --prefix web run dev -- --host 127.0.0.1 &
 
 wait

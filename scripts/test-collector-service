@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+export NANO_DATABASE_URL="${NANO_DATABASE_URL:-postgres://nano:nano@localhost:55432/nano?sslmode=disable}"
+export NANO_COLLECTOR_DATABASE_URL="${NANO_COLLECTOR_DATABASE_URL:-postgres://nano_observability:nano-observability@localhost:55432/nano_observability?sslmode=disable}"
+export NANO_COLLECTOR_ADDR="${NANO_COLLECTOR_ADDR:-127.0.0.1:18082}"
+export NANO_COLLECTOR_SERVICE_TOKEN="${NANO_COLLECTOR_SERVICE_TOKEN:-nano-local-collector-token}"
+
+docker compose -f infra/compose/compose.yaml up -d postgres >/dev/null
+for _ in $(seq 1 60); do
+  if docker compose -f infra/compose/compose.yaml exec -T postgres pg_isready -U nano -d nano >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+scripts/prepare-observability-db
+go run ./cmd/migrate
+
+collector_tmp_dir="$(mktemp -d)"
+collector_pid=""
+cleanup() {
+  if [ -n "$collector_pid" ]; then
+    kill "$collector_pid" 2>/dev/null || true
+    wait "$collector_pid" 2>/dev/null || true
+  fi
+  rm -rf "$collector_tmp_dir"
+}
+trap cleanup EXIT INT TERM
+
+go build -o "$collector_tmp_dir/nano-collector" ./cmd/collector
+"$collector_tmp_dir/nano-collector" &
+collector_pid="$!"
+
+for _ in $(seq 1 60); do
+  if curl -fsS "http://$NANO_COLLECTOR_ADDR/internal/agent-observability/v1/health" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+curl -fsS "http://$NANO_COLLECTOR_ADDR/internal/agent-observability/v1/health"
+echo
+
+unauthorized_status="$(curl -sS -o /dev/null -w '%{http_code}' \
+  -H 'Content-Type: application/json' \
+  -d '{}' \
+  "http://$NANO_COLLECTOR_ADDR/internal/agent-observability/v1/batches")"
+if [ "$unauthorized_status" != "401" ]; then
+  echo "Collector unauthorized status was $unauthorized_status, want 401" >&2
+  exit 1
+fi

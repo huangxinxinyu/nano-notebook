@@ -1,24 +1,28 @@
 package collector
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 type HTTPConfig struct {
 	Ingestor     *Ingestor
 	ServiceToken string
 	MaxBodyBytes int64
+	Readiness    func(context.Context) error
 }
 
 type httpHandler struct {
 	ingestor     *Ingestor
 	serviceToken string
 	maxBodyBytes int64
+	readiness    func(context.Context) error
 	mux          *http.ServeMux
 }
 
@@ -28,7 +32,7 @@ func NewHTTPHandler(config HTTPConfig) (http.Handler, error) {
 	}
 	handler := &httpHandler{
 		ingestor: config.Ingestor, serviceToken: config.ServiceToken, maxBodyBytes: config.MaxBodyBytes,
-		mux: http.NewServeMux(),
+		readiness: config.Readiness, mux: http.NewServeMux(),
 	}
 	handler.mux.HandleFunc("/internal/agent-observability/v1/batches", handler.batches)
 	handler.mux.HandleFunc("/internal/agent-observability/v1/health", handler.health)
@@ -39,6 +43,14 @@ func (h *httpHandler) health(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeHTTPJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": map[string]string{"code": "method_not_allowed"}})
 		return
+	}
+	if h.readiness != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := h.readiness(ctx); err != nil {
+			writeHTTPJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "service": "collector"})
+			return
+		}
 	}
 	writeHTTPJSON(w, http.StatusOK, map[string]string{"status": "ready", "service": "collector"})
 }

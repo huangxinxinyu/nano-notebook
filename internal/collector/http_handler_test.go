@@ -107,6 +107,32 @@ func TestHTTPHandlerExposesCollectorHealthWithoutServiceCredential(t *testing.T)
 	}
 }
 
+func TestHTTPHandlerReportsNotReadyWhenReadinessCheckFails(t *testing.T) {
+	store := collector.NewMemoryStore()
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+	handler, err := collector.NewHTTPHandler(collector.HTTPConfig{
+		Ingestor: ingestor, ServiceToken: "collector-secret", MaxBodyBytes: 1024 * 1024,
+		Readiness: func(context.Context) error { return errors.New("database unavailable") },
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPHandler: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/internal/agent-observability/v1/health", nil)
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if got := response.Body.String(); !bytes.Contains([]byte(got), []byte(`"status":"not_ready"`)) {
+		t.Fatalf("health body = %s", got)
+	}
+}
+
 func TestHTTPHandlerRejectsOversizedBatchBeforeIngest(t *testing.T) {
 	store := collector.NewMemoryStore()
 	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
