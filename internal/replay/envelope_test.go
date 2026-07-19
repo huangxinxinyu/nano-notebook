@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/replay"
@@ -44,11 +47,33 @@ func TestSealerCompressesEnvelopeEncryptsAndAuthenticatesReplay(t *testing.T) {
 		t.Fatalf("opened Replay = %#v", opened)
 	}
 
-	tampered := sealed
-	tampered.Ciphertext = append([]byte(nil), sealed.Ciphertext...)
-	tampered.Ciphertext[len(tampered.Ciphertext)/2] ^= 0xff
-	if _, err := sealer.Open(context.Background(), tampered); !errors.Is(err, replay.ErrIntegrity) {
-		t.Fatalf("tampered Open error = %v, want ErrIntegrity", err)
+	tests := []struct {
+		name   string
+		mutate func(replay.SealedPayload) replay.SealedPayload
+	}{
+		{name: "ciphertext authentication", mutate: func(tampered replay.SealedPayload) replay.SealedPayload {
+			tampered.Ciphertext = append([]byte(nil), tampered.Ciphertext...)
+			tampered.Ciphertext[len(tampered.Ciphertext)/2] ^= 0xff
+			digest := sha256.Sum256(tampered.Ciphertext)
+			tampered.CiphertextSHA256 = hex.EncodeToString(digest[:])
+			return tampered
+		}},
+		{name: "ciphertext digest", mutate: func(tampered replay.SealedPayload) replay.SealedPayload {
+			tampered.CiphertextSHA256 = strings.Repeat("0", sha256.Size*2)
+			return tampered
+		}},
+		{name: "schema version", mutate: func(tampered replay.SealedPayload) replay.SealedPayload {
+			tampered.SchemaVersion = 2
+			return tampered
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			opened, err := sealer.Open(context.Background(), test.mutate(sealed))
+			if !errors.Is(err, replay.ErrIntegrity) || len(opened.Bytes) != 0 || opened.SHA256 != "" {
+				t.Fatalf("tampered Open = %#v, %v; want empty plaintext and ErrIntegrity", opened, err)
+			}
+		})
 	}
 }
 
