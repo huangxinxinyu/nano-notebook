@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -246,6 +247,76 @@ func TestPostgresStoreSerializesConcurrentIdenticalTraceChunks(t *testing.T) {
 	}
 	if stored.CommittedThrough != 2 || len(stored.Records) != 2 {
 		t.Fatalf("stored concurrent Trace = %#v", stored)
+	}
+}
+
+func TestPostgresStoreSerializesConcurrentDirectProducerRecords(t *testing.T) {
+	ctx := context.Background()
+	pool := openObservabilityTestPool(t, ctx)
+	t.Cleanup(pool.Close)
+	resetObservabilityTestSchema(t, ctx, pool)
+	store := collector.NewPostgresStore(pool)
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerIDPrefix: "nano-", Store: store})
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+	root := directCollectorBatch(t)
+	root.ProducerID = "nano-control-plane/one"
+	if _, err := ingestor.Ingest(ctx, root); err != nil {
+		t.Fatalf("root Ingest: %v", err)
+	}
+
+	start := make(chan struct{})
+	results := make(chan collector.BatchResult, 2)
+	errorsFound := make(chan error, 2)
+	var workers sync.WaitGroup
+	for index := range 2 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			batch := directCollectorBatch(t)
+			batch.BatchID = fmt.Sprintf("batch-direct-worker-%d", index)
+			batch.ProducerID = fmt.Sprintf("nano-worker/%d", index)
+			record := batch.Chunks[0].Records[1].Record
+			record.IdentityKey = fmt.Sprintf("run/run-1/concurrent/%d", index)
+			record.Name = fmt.Sprintf("nano.concurrent.%d", index)
+			batch.Chunks[0].Records = []collector.SequencedRecord{collectorEnvelope(t, 0, record)}
+			<-start
+			result, ingestErr := ingestor.Ingest(ctx, batch)
+			if ingestErr != nil {
+				errorsFound <- ingestErr
+				return
+			}
+			results <- result
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(errorsFound)
+	close(results)
+	for ingestErr := range errorsFound {
+		t.Errorf("concurrent Ingest: %v", ingestErr)
+	}
+	committed := map[int]bool{}
+	for result := range results {
+		if got := result.Chunks[0]; got.Status != collector.ChunkCommitted {
+			t.Errorf("concurrent result = %#v", got)
+		} else {
+			committed[got.CommittedThrough] = true
+		}
+	}
+	if t.Failed() {
+		return
+	}
+	if !committed[3] || !committed[4] {
+		t.Fatalf("concurrent high watermarks = %#v, want 3 and 4", committed)
+	}
+	stored, err := store.LoadTrace(ctx, "trace-1")
+	if err != nil {
+		t.Fatalf("LoadTrace: %v", err)
+	}
+	if stored.CommittedThrough != 4 || len(stored.Records) != 4 || stored.Records[2].Sequence != 3 || stored.Records[3].Sequence != 4 {
+		t.Fatalf("stored direct Trace = %#v", stored)
 	}
 }
 

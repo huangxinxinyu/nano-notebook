@@ -40,6 +40,125 @@ func TestIngestorCommitsContiguousTraceChunk(t *testing.T) {
 	}
 }
 
+func TestIngestorAssignsSequencesToDirectTraceRecords(t *testing.T) {
+	store := collector.NewMemoryStore()
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{
+		ProducerID: "nano-worker",
+		Store:      store,
+	})
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+
+	batch := validCollectorBatch(t)
+	batch.ProtocolVersion = collector.DirectProtocolVersion
+	batch.BatchID = "batch-direct"
+	batch.Chunks[0].SequenceAuthority = collector.SequenceAuthorityCollector
+	batch.Chunks[0].FirstSequence = 0
+	for index := range batch.Chunks[0].Records {
+		batch.Chunks[0].Records[index].Sequence = 0
+	}
+
+	result, err := ingestor.Ingest(context.Background(), batch)
+	if err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	if got := result.Chunks[0]; got.Status != collector.ChunkCommitted || got.CommittedThrough != 2 {
+		t.Fatalf("direct result = %#v", got)
+	}
+	stored := store.Records("trace-1")
+	if len(stored) != 2 || stored[0].Sequence != 1 || stored[1].Sequence != 2 {
+		t.Fatalf("Collector-assigned records = %#v", stored)
+	}
+}
+
+func TestIngestorReconcilesDirectRecordIdentityOnResend(t *testing.T) {
+	store := collector.NewMemoryStore()
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+	batch := directCollectorBatch(t)
+	if _, err := ingestor.Ingest(context.Background(), batch); err != nil {
+		t.Fatalf("first Ingest: %v", err)
+	}
+
+	batch.BatchID = "batch-direct-resend"
+	result, err := ingestor.Ingest(context.Background(), batch)
+	if err != nil {
+		t.Fatalf("resend Ingest: %v", err)
+	}
+	if got := result.Chunks[0]; got.Status != collector.ChunkCommitted || got.CommittedThrough != 2 {
+		t.Fatalf("resend result = %#v", got)
+	}
+	if got := len(store.Records("trace-1")); got != 2 {
+		t.Fatalf("records after resend = %d, want 2", got)
+	}
+}
+
+func TestIngestorRejectsConflictingDirectRecordIdentity(t *testing.T) {
+	store := collector.NewMemoryStore()
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+	batch := directCollectorBatch(t)
+	if _, err := ingestor.Ingest(context.Background(), batch); err != nil {
+		t.Fatalf("first Ingest: %v", err)
+	}
+
+	conflict := directCollectorBatch(t)
+	conflict.BatchID = "batch-direct-conflict"
+	conflict.Chunks[0].Records[1].Record.Name = "nano.run.changed"
+	conflict.Chunks[0].Records[1] = collectorEnvelope(t, 0, conflict.Chunks[0].Records[1].Record)
+	result, err := ingestor.Ingest(context.Background(), conflict)
+	if err != nil {
+		t.Fatalf("conflicting Ingest: %v", err)
+	}
+	if got := result.Chunks[0]; got.Status != collector.ChunkRejected || got.Code != collector.CodeIdentityConflict || got.CommittedThrough != 2 {
+		t.Fatalf("conflict result = %#v", got)
+	}
+	stored := store.Records("trace-1")
+	if len(stored) != 2 || stored[1].Record.Name != "nano.run.admitted" {
+		t.Fatalf("stored records changed after conflict: %#v", stored)
+	}
+}
+
+func TestIngestorAssignsOneSequenceAcrossDirectProducerInstances(t *testing.T) {
+	store := collector.NewMemoryStore()
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{
+		ProducerIDPrefix: "nano-",
+		Store:            store,
+	})
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+	first := directCollectorBatch(t)
+	first.ProducerID = "nano-control-plane/one"
+	if _, err := ingestor.Ingest(context.Background(), first); err != nil {
+		t.Fatalf("first Ingest: %v", err)
+	}
+
+	second := directCollectorBatch(t)
+	second.BatchID = "batch-direct-worker"
+	second.ProducerID = "nano-worker/two"
+	continued := second.Chunks[0].Records[1].Record
+	continued.IdentityKey = "run/run-1/worker-observed"
+	continued.Name = "nano.worker.observed"
+	second.Chunks[0].Records = []collector.SequencedRecord{collectorEnvelope(t, 0, continued)}
+	result, err := ingestor.Ingest(context.Background(), second)
+	if err != nil {
+		t.Fatalf("second Ingest: %v", err)
+	}
+	if got := result.Chunks[0]; got.Status != collector.ChunkCommitted || got.CommittedThrough != 3 {
+		t.Fatalf("second result = %#v", got)
+	}
+	stored := store.Records("trace-1")
+	if len(stored) != 3 || stored[2].Sequence != 3 || stored[2].Record.IdentityKey != continued.IdentityKey {
+		t.Fatalf("stored records = %#v", stored)
+	}
+}
+
 func TestIngestorAcknowledgesAnIdenticalTraceChunkResend(t *testing.T) {
 	store := collector.NewMemoryStore()
 	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
@@ -326,6 +445,19 @@ func TestIngestorRejectsUnsupportedRecordSchemaExplicitly(t *testing.T) {
 func validCollectorBatch(t *testing.T) collector.Batch {
 	t.Helper()
 	return collectorBatchFor(t, "1")
+}
+
+func directCollectorBatch(t *testing.T) collector.Batch {
+	t.Helper()
+	batch := validCollectorBatch(t)
+	batch.ProtocolVersion = collector.DirectProtocolVersion
+	batch.BatchID = "batch-direct"
+	batch.Chunks[0].SequenceAuthority = collector.SequenceAuthorityCollector
+	batch.Chunks[0].FirstSequence = 0
+	for index := range batch.Chunks[0].Records {
+		batch.Chunks[0].Records[index].Sequence = 0
+	}
+	return batch
 }
 
 func collectorBatchFor(t *testing.T, suffix string) collector.Batch {

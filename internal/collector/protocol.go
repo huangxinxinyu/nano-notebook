@@ -8,7 +8,17 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 )
 
-const ProtocolVersion = 1
+const (
+	ProtocolVersion       = 1
+	DirectProtocolVersion = 2
+)
+
+type SequenceAuthority string
+
+const (
+	SequenceAuthorityProducer  SequenceAuthority = "producer"
+	SequenceAuthorityCollector SequenceAuthority = "collector"
+)
 
 const (
 	SupportedRecordSchemaVersion = 1
@@ -56,10 +66,11 @@ type TraceDescriptor struct {
 }
 
 type TraceChunk struct {
-	Trace         TraceDescriptor        `json:"trace"`
-	FirstSequence int                    `json:"first_sequence"`
-	Records       []SequencedRecord      `json:"records"`
-	Attachments   []AttachmentDescriptor `json:"attachments,omitempty"`
+	Trace             TraceDescriptor        `json:"trace"`
+	SequenceAuthority SequenceAuthority      `json:"sequence_authority,omitempty"`
+	FirstSequence     int                    `json:"first_sequence"`
+	Records           []SequencedRecord      `json:"records"`
+	Attachments       []AttachmentDescriptor `json:"attachments,omitempty"`
 }
 
 type AttachmentDescriptor struct {

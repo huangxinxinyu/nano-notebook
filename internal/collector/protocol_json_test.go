@@ -52,3 +52,29 @@ func TestBatchJSONUsesExplicitSnakeCaseCanonicalRecordContract(t *testing.T) {
 		}
 	}
 }
+
+func TestDirectBatchJSONDeclaresCollectorSequenceAuthority(t *testing.T) {
+	batch := directCollectorBatch(t)
+	encoded, err := json.Marshal(batch)
+	if err != nil {
+		t.Fatalf("Marshal Batch: %v", err)
+	}
+	text := string(encoded)
+	for _, required := range []string{
+		`"protocol_version":2`, `"sequence_authority":"collector"`, `"first_sequence":0`, `"sequence":0`,
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("direct Batch JSON missing %s: %s", required, text)
+		}
+	}
+
+	var decoded collector.Batch
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("Unmarshal Batch: %v", err)
+	}
+	if decoded.ProtocolVersion != collector.DirectProtocolVersion ||
+		decoded.Chunks[0].SequenceAuthority != collector.SequenceAuthorityCollector ||
+		decoded.Chunks[0].FirstSequence != 0 || decoded.Chunks[0].Records[0].Sequence != 0 {
+		t.Fatalf("decoded direct Batch = %#v", decoded)
+	}
+}

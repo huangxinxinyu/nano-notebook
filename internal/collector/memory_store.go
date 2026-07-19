@@ -87,7 +87,8 @@ func validateAndMergeTraceChunk(ctx context.Context, existing memoryTrace, chunk
 	if err := validateTraceDescriptor(chunk.Trace); err != nil {
 		return memoryTrace{}, 0, &ChunkError{Code: CodeInvalidChunk, Err: err}
 	}
-	if chunk.FirstSequence < 1 || len(chunk.Records) == 0 {
+	collectorSequence := chunk.SequenceAuthority == SequenceAuthorityCollector
+	if (!collectorSequence && chunk.FirstSequence < 1) || (collectorSequence && chunk.FirstSequence != 0) || len(chunk.Records) == 0 {
 		return memoryTrace{}, 0, &ChunkError{Code: CodeInvalidChunk, Err: errors.New("Collector Trace Chunk is empty or unsequenced")}
 	}
 	if err := validateAttachmentDescriptors(chunk); err != nil {
@@ -108,7 +109,7 @@ func validateAndMergeTraceChunk(ctx context.Context, existing memoryTrace, chunk
 			Err: errors.New("Collector Trace descriptor changed"),
 		}
 	}
-	if chunk.FirstSequence > len(existing.records)+1 {
+	if !collectorSequence && chunk.FirstSequence > len(existing.records)+1 {
 		return memoryTrace{}, 0, &ChunkError{
 			Code: CodeSequenceGap, CommittedThrough: len(existing.records), Retryable: true,
 			Err: errors.New("Collector Trace Chunk sequence is not contiguous"),
@@ -134,9 +135,16 @@ func validateAndMergeTraceChunk(ctx context.Context, existing memoryTrace, chunk
 		}
 	}
 	candidate := append([]SequencedRecord(nil), existing.records...)
+	byIdentity := make(map[string]SequencedRecord, len(existing.records)+len(chunk.Records))
+	for _, stored := range existing.records {
+		byIdentity[stored.Record.IdentityKey] = stored
+	}
 	for index, envelope := range chunk.Records {
 		sequence := chunk.FirstSequence + index
-		if envelope.Sequence != sequence || envelope.Record.TraceID != chunk.Trace.TraceID || envelope.Record.SchemaVersion != chunk.Trace.SchemaVersion || envelope.Record.SemanticConventionVersion != chunk.Trace.SemanticConventionVersion {
+		if collectorSequence {
+			sequence = len(candidate) + 1
+		}
+		if (!collectorSequence && envelope.Sequence != sequence) || (collectorSequence && envelope.Sequence != 0) || envelope.Record.TraceID != chunk.Trace.TraceID || envelope.Record.SchemaVersion != chunk.Trace.SchemaVersion || envelope.Record.SemanticConventionVersion != chunk.Trace.SemanticConventionVersion {
 			return memoryTrace{}, 0, &ChunkError{
 				Code: CodeInvalidChunk, CommittedThrough: len(existing.records),
 				Err: errors.New("Collector record changed its Trace envelope"),
@@ -150,6 +158,17 @@ func validateAndMergeTraceChunk(ctx context.Context, existing memoryTrace, chunk
 			return memoryTrace{}, 0, &ChunkError{
 				Code: CodeCanonicalHash, CommittedThrough: len(existing.records), Err: agentobs.ErrIdentityConflict,
 			}
+		}
+		if collectorSequence {
+			if stored, found := byIdentity[envelope.Record.IdentityKey]; found {
+				if stored.CanonicalSHA256 != envelope.CanonicalSHA256 {
+					return memoryTrace{}, 0, &ChunkError{
+						Code: CodeIdentityConflict, CommittedThrough: len(existing.records), Err: agentobs.ErrIdentityConflict,
+					}
+				}
+				continue
+			}
+			envelope.Sequence = sequence
 		}
 		if sequence <= len(existing.records) {
 			stored := existing.records[sequence-1]
@@ -195,6 +214,7 @@ func validateAndMergeTraceChunk(ctx context.Context, existing memoryTrace, chunk
 			return memoryTrace{}, 0, err
 		}
 		candidate = append(candidate, cloneSequencedRecord(envelope))
+		byIdentity[envelope.Record.IdentityKey] = envelope
 	}
 	attachments := make(map[string]AttachmentDescriptor, len(existing.attachments)+len(chunk.Attachments))
 	for attachmentID, attachment := range existing.attachments {
