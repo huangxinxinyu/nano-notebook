@@ -285,11 +285,19 @@ func LoadProjectedTrace(ctx context.Context, pool *pgxpool.Pool, traceID agentob
 	if pool == nil || traceID == "" {
 		return ProjectedTrace{}, errors.New("Collector projected Trace query is invalid")
 	}
+	return loadProjectedTrace(ctx, pool, traceID, false)
+}
+
+func loadProjectedTrace(ctx context.Context, query postgresQuerier, traceID agentobs.TraceID, lockTrace bool) (ProjectedTrace, error) {
 	var result ProjectedTrace
 	var status string
 	var costAmount *float64
 	summary := &result.Projection.Summary
-	if err := pool.QueryRow(ctx, `
+	lockClause := ""
+	if lockTrace {
+		lockClause = " for share of t"
+	}
+	if err := query.QueryRow(ctx, `
 		select s.trace_id, s.run_id, s.chat_id, s.notebook_id, s.root_span_id, s.agent_name,
 			s.started_at_unix_nano, s.last_observed_unix_nano, s.ended_at_unix_nano,
 			s.duration_nanoseconds, s.status, s.active, s.models, s.input_tokens,
@@ -298,7 +306,7 @@ func LoadProjectedTrace(ctx context.Context, pool *pgxpool.Pool, traceID agentob
 			t.committed_sequence, t.projected_sequence
 		from obs_trace_summaries s join obs_traces t using (trace_id)
 		where s.trace_id = $1 and t.tombstoned_at is null
-	`, traceID).Scan(&summary.TraceID, &summary.RunID, &summary.ChatID, &summary.NotebookID,
+	`+lockClause, traceID).Scan(&summary.TraceID, &summary.RunID, &summary.ChatID, &summary.NotebookID,
 		&summary.RootSpanID, &summary.AgentName, &summary.StartedAtUnixNano,
 		&summary.LastObservedUnixNano, &summary.EndedAtUnixNano, &summary.DurationNanoseconds,
 		&status, &summary.Active, &summary.Models, &summary.InputTokens, &summary.OutputTokens,
@@ -309,7 +317,7 @@ func LoadProjectedTrace(ctx context.Context, pool *pgxpool.Pool, traceID agentob
 	}
 	summary.Status = agentobs.Status(status)
 	summary.Cost.Amount = costAmount
-	if err := loadProjectedChildren(ctx, pool, &result); err != nil {
+	if err := loadProjectedChildren(ctx, query, &result); err != nil {
 		return ProjectedTrace{}, err
 	}
 	canonical, err := json.Marshal(struct {
@@ -324,9 +332,9 @@ func LoadProjectedTrace(ctx context.Context, pool *pgxpool.Pool, traceID agentob
 	return result, nil
 }
 
-func loadProjectedChildren(ctx context.Context, pool *pgxpool.Pool, result *ProjectedTrace) error {
+func loadProjectedChildren(ctx context.Context, query postgresQuerier, result *ProjectedTrace) error {
 	traceID := result.Projection.Summary.TraceID
-	rows, err := pool.Query(ctx, `select span_id, parent_span_id, name, start_sequence, end_sequence, started_at_unix_nano, ended_at_unix_nano, duration_nanoseconds, status, start_attributes, end_attributes, replay_references, model_analysis from obs_spans where trace_id = $1 order by start_sequence`, traceID)
+	rows, err := query.Query(ctx, `select span_id, parent_span_id, name, start_sequence, end_sequence, started_at_unix_nano, ended_at_unix_nano, duration_nanoseconds, status, start_attributes, end_attributes, replay_references, model_analysis from obs_spans where trace_id = $1 order by start_sequence`, traceID)
 	if err != nil {
 		return err
 	}
@@ -364,14 +372,14 @@ func loadProjectedChildren(ctx context.Context, pool *pgxpool.Pool, result *Proj
 		return err
 	}
 	rows.Close()
-	if err := loadProjectedEvents(ctx, pool, result); err != nil {
+	if err := loadProjectedEvents(ctx, query, result); err != nil {
 		return err
 	}
-	return loadProjectedLinks(ctx, pool, result)
+	return loadProjectedLinks(ctx, query, result)
 }
 
-func loadProjectedEvents(ctx context.Context, pool *pgxpool.Pool, result *ProjectedTrace) error {
-	rows, err := pool.Query(ctx, `select sequence, span_id, name, occurred_at_unix_nano, attributes from obs_events where trace_id = $1 order by sequence`, result.Projection.Summary.TraceID)
+func loadProjectedEvents(ctx context.Context, query postgresQuerier, result *ProjectedTrace) error {
+	rows, err := query.Query(ctx, `select sequence, span_id, name, occurred_at_unix_nano, attributes from obs_events where trace_id = $1 order by sequence`, result.Projection.Summary.TraceID)
 	if err != nil {
 		return err
 	}
@@ -390,8 +398,8 @@ func loadProjectedEvents(ctx context.Context, pool *pgxpool.Pool, result *Projec
 	return rows.Err()
 }
 
-func loadProjectedLinks(ctx context.Context, pool *pgxpool.Pool, result *ProjectedTrace) error {
-	rows, err := pool.Query(ctx, `select sequence, span_id, name, target_trace_id, target_span_id, occurred_at_unix_nano, attributes from obs_links where trace_id = $1 order by sequence`, result.Projection.Summary.TraceID)
+func loadProjectedLinks(ctx context.Context, query postgresQuerier, result *ProjectedTrace) error {
+	rows, err := query.Query(ctx, `select sequence, span_id, name, target_trace_id, target_span_id, occurred_at_unix_nano, attributes from obs_links where trace_id = $1 order by sequence`, result.Projection.Summary.TraceID)
 	if err != nil {
 		return err
 	}

@@ -14,6 +14,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/replay"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -181,12 +182,20 @@ func (s *TraceQueryStore) Detail(ctx context.Context, traceID agentobs.TraceID) 
 	if s == nil || s.pool == nil || traceID == "" || len(traceID) > 128 {
 		return ProjectedTrace{}, errors.New("Collector Trace detail query is invalid")
 	}
-	result, err := LoadProjectedTrace(ctx, s.pool, traceID)
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return ProjectedTrace{}, err
+	}
+	defer tx.Rollback(ctx)
+	result, err := loadProjectedTrace(ctx, tx, traceID, true)
 	if err == nil {
+		if err := tx.Commit(ctx); err != nil {
+			return ProjectedTrace{}, fmt.Errorf("commit Collector Trace detail access boundary: %w", err)
+		}
 		return result, nil
 	}
 	var exists, tombstoned bool
-	if scanErr := s.pool.QueryRow(ctx, `select true, tombstoned_at is not null from obs_traces where trace_id = $1`, traceID).Scan(&exists, &tombstoned); scanErr != nil {
+	if scanErr := tx.QueryRow(ctx, `select true, tombstoned_at is not null from obs_traces where trace_id = $1`, traceID).Scan(&exists, &tombstoned); scanErr != nil {
 		return ProjectedTrace{}, ErrTraceNotFound
 	}
 	if exists && !tombstoned {
@@ -203,24 +212,31 @@ func (s *TraceQueryStore) Replay(ctx context.Context, traceID agentobs.TraceID, 
 	var result OpaqueReplay
 	var state, objectKey string
 	var ciphertextBytes int
+	var expired bool
 	result.TraceID, result.SpanID, result.AttachmentID = traceID, spanID, attachmentID
-	err := s.pool.QueryRow(ctx, `
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return OpaqueReplay{}, err
+	}
+	defer tx.Rollback(ctx)
+	err = tx.QueryRow(ctx, `
 		select p.class, p.schema_version, p.plaintext_sha256, p.object_key,
 			p.ciphertext_bytes, p.ciphertext_sha256, p.compression, p.encryption,
-			p.key_id, p.wrapped_key, p.nonce, p.state
+			p.key_id, p.wrapped_key, p.nonce, p.state, p.expires_at <= now()
 		from obs_payload_refs p
 		join obs_traces t on t.trace_id = p.trace_id and t.tombstoned_at is null
 		join obs_trace_records r on r.trace_id = p.trace_id and r.sequence = p.record_sequence
 		where p.trace_id = $1 and r.span_id = $2 and p.attachment_id = $3
+		for share of t
 	`, traceID, spanID, attachmentID).Scan(&result.Class, &result.Sealed.SchemaVersion,
 		&result.Sealed.PlaintextSHA256, &objectKey, &ciphertextBytes,
 		&result.Sealed.CiphertextSHA256, &result.Sealed.Compression, &result.Sealed.Encryption,
-		&result.Sealed.KeyID, &result.Sealed.WrappedKey, &result.Sealed.Nonce, &state)
+		&result.Sealed.KeyID, &result.Sealed.WrappedKey, &result.Sealed.Nonce, &state, &expired)
 	if err != nil {
 		return OpaqueReplay{}, ErrReplayNotFound
 	}
-	if state != "available" {
-		if state == "expired" {
+	if state != "available" || expired {
+		if state == "expired" || expired {
 			return OpaqueReplay{}, ErrReplayExpired
 		}
 		return OpaqueReplay{}, ErrReplayNotFound
@@ -235,6 +251,9 @@ func (s *TraceQueryStore) Replay(ctx context.Context, traceID agentobs.TraceID, 
 	}
 	result.Sealed.Class = result.Class
 	result.Sealed.Ciphertext = ciphertext
+	if err := tx.Commit(ctx); err != nil {
+		return OpaqueReplay{}, fmt.Errorf("commit Collector Replay access boundary: %w", err)
+	}
 	return result, nil
 }
 
