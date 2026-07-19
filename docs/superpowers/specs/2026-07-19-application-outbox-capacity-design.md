@@ -2,9 +2,15 @@
 
 **Date:** 2026-07-19
 
-**Status:** User delegated the decision; written specification pending review
+**Status:** Superseded by `2026-07-19-direct-trace-delivery-design.md`
 
 **Scope:** Sprint 5 Durable Outbox placement and the exact 100,000-record backlog bound
+
+> This design records an earlier decision and is retained for history. The user
+> subsequently changed the product requirement: full Trace data is diagnostic,
+> may lose a bounded in-memory tail on process failure, and must not be journaled
+> in the core Application PostgreSQL database. The replacement design removes the
+> full Trace Outbox and its 100,000-record capacity mechanism.
 
 ## 1. Decision
 
