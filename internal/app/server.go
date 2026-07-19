@@ -30,6 +30,7 @@ type Config struct {
 	AgentRun     agent.RunConfig
 	AdminTraces  collector.QueryClient
 	ReplaySealer *replay.Sealer
+	TraceSink    agent.TraceSink
 }
 
 type Server struct {
@@ -57,7 +58,22 @@ func NewServer(cfg Config, db *DB) *Server {
 }
 
 func (s *Server) Handler() http.Handler {
-	return requestLogger(s.mux)
+	return requestLogger(s.withTraceDelivery(s.mux))
+}
+
+func (s *Server) withTraceDelivery(next http.Handler) http.Handler {
+	if s == nil || s.cfg.TraceSink == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		scope, err := agent.NewTraceScope(s.cfg.TraceSink)
+		if err != nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+		ctx := agent.ContextWithTraceScope(r.Context(), scope)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 func (s *Server) routes() {

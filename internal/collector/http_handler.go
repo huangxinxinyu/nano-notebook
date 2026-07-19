@@ -49,6 +49,7 @@ func NewHTTPHandler(config HTTPConfig) (http.Handler, error) {
 		queryToken: config.QueryToken, mux: http.NewServeMux(),
 	}
 	handler.mux.HandleFunc("/internal/agent-observability/v1/batches", handler.batches)
+	handler.mux.HandleFunc("/internal/agent-observability/v2/batches", handler.batches)
 	handler.mux.HandleFunc("/internal/agent-observability/v1/purges", handler.purges)
 	handler.mux.HandleFunc("/internal/agent-observability/v1/health", handler.health)
 	handler.mux.HandleFunc("/internal/agent-observability/v1/traces", handler.traces)

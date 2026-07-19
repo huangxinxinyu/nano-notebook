@@ -32,6 +32,7 @@ type collectorConfig struct {
 	ServiceToken               string
 	QueryToken                 string
 	ProducerID                 string
+	ProducerIDPrefix           string
 	MaxBodyBytes               int64
 	ReplayStagingS3            objectstore.S3Config
 	ReplayS3                   objectstore.S3Config
@@ -101,6 +102,7 @@ func loadConfig() (collectorConfig, error) {
 		ServiceToken:               env("NANO_COLLECTOR_SERVICE_TOKEN", "nano-local-collector-token"),
 		QueryToken:                 env("NANO_COLLECTOR_QUERY_TOKEN", "nano-local-collector-query-token"),
 		ProducerID:                 env("NANO_COLLECTOR_PRODUCER_ID", "nano-worker"),
+		ProducerIDPrefix:           env("NANO_COLLECTOR_PRODUCER_ID_PREFIX", "nano-"),
 		MaxBodyBytes:               maxBodyBytes,
 		ReplayStagingS3: objectstore.S3Config{
 			Endpoint:        env("NANO_REPLAY_STAGING_S3_ENDPOINT", "127.0.0.1:59000"),
@@ -118,7 +120,8 @@ func loadConfig() (collectorConfig, error) {
 		},
 	}
 	if strings.TrimSpace(config.DatabaseURL) == "" || strings.TrimSpace(config.Addr) == "" ||
-		strings.TrimSpace(config.ServiceToken) == "" || strings.TrimSpace(config.QueryToken) == "" || strings.TrimSpace(config.ProducerID) == "" ||
+		strings.TrimSpace(config.ServiceToken) == "" || strings.TrimSpace(config.QueryToken) == "" ||
+		(strings.TrimSpace(config.ProducerID) == "" && strings.TrimSpace(config.ProducerIDPrefix) == "") ||
 		config.DatabaseMaxConns < 1 || config.DatabaseMinConns < 0 ||
 		config.DatabaseMinConns > config.DatabaseMaxConns || config.MaxBodyBytes < 1 ||
 		config.ProjectionDatabaseMaxConns < 1 || config.ProjectionDatabaseMinConns < 0 ||
@@ -222,7 +225,9 @@ func runCollectorService(ctx context.Context, config collectorConfig, pool, proj
 	if err != nil {
 		return err
 	}
-	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: config.ProducerID, Store: store})
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{
+		ProducerID: config.ProducerID, ProducerIDPrefix: config.ProducerIDPrefix, Store: store,
+	})
 	if err != nil {
 		return err
 	}
@@ -251,7 +256,7 @@ func runCollectorService(ctx context.Context, config collectorConfig, pool, proj
 	if err != nil {
 		return fmt.Errorf("listen for Collector HTTP: %w", err)
 	}
-	slog.Info("Collector listening", "addr", config.Addr, "producer_id", config.ProducerID,
+	slog.Info("Collector listening", "addr", config.Addr, "producer_id", config.ProducerID, "producer_id_prefix", config.ProducerIDPrefix,
 		"ingestion_database_max_connections", config.DatabaseMaxConns,
 		"projection_database_max_connections", config.ProjectionDatabaseMaxConns,
 		"query_database_max_connections", config.QueryDatabaseMaxConns, "max_body_bytes", config.MaxBodyBytes)

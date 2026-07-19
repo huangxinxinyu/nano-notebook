@@ -22,6 +22,7 @@ type PostgresRuntime struct {
 	newMessageID func() string
 	commit       func(context.Context, pgx.Tx) error
 	telemetry    agentobs.Exporter
+	traceSink    TraceSink
 	replayStager ReplayStager
 }
 
@@ -38,6 +39,29 @@ func WithCommitFunc(commit func(context.Context, pgx.Tx) error) RuntimeOption {
 func WithBestEffortTraceExporter(exporter agentobs.Exporter) RuntimeOption {
 	return func(runtime *PostgresRuntime) {
 		runtime.telemetry = exporter
+	}
+}
+
+func WithTraceSink(sink TraceSink) RuntimeOption {
+	return func(runtime *PostgresRuntime) {
+		runtime.traceSink = sink
+	}
+}
+
+func (r *PostgresRuntime) beginTraceScope(ctx context.Context) (context.Context, *TraceScope, error) {
+	if r == nil || r.traceSink == nil {
+		return ctx, nil, nil
+	}
+	scope, err := NewTraceScope(r.traceSink)
+	if err != nil {
+		return ctx, nil, err
+	}
+	return ContextWithTraceScope(ctx, scope), scope, nil
+}
+
+func publishCommittedTrace(ctx context.Context, scope *TraceScope) {
+	if scope != nil {
+		_ = scope.PublishAfterCommit(ctx)
 	}
 }
 
@@ -209,6 +233,13 @@ func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, mess
 		return err
 	}
 	defer tx.Rollback(ctx)
+	traceCtx, traceScope, err := r.beginTraceScope(ctx)
+	if err != nil {
+		return err
+	}
+	if traceScope != nil {
+		defer traceScope.Rollback()
+	}
 	if err := lockCheckpointAuthority(ctx, tx, attempt); err != nil {
 		return err
 	}
@@ -229,7 +260,7 @@ func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, mess
 			return invalidCheckpoint("publication Final Draft does not match accepted prefix")
 		}
 	}
-	recorder, err := NewRunTraceRecorder(ctx, tx, attempt.RunID)
+	recorder, err := NewRunTraceRecorder(traceCtx, tx, attempt.RunID)
 	if err != nil {
 		return err
 	}
@@ -239,11 +270,11 @@ func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, mess
 	if err != nil {
 		return err
 	}
-	attemptSpan, err := recorder.SpanContextByIdentity(ctx, TraceAttemptStartIdentity(attempt.RunID, attempt.AttemptNo))
+	attemptSpan, err := recorder.SpanContextByIdentity(traceCtx, TraceAttemptStartIdentity(attempt.RunID, attempt.AttemptNo))
 	if err != nil {
 		return err
 	}
-	publicationContext, _, err := tracer.StartSpan(agentobs.ContextWithSpanContext(ctx, attemptSpan), agentobs.SpanStart{
+	publicationContext, _, err := tracer.StartSpan(agentobs.ContextWithSpanContext(traceCtx, attemptSpan), agentobs.SpanStart{
 		IdentityKey: fmt.Sprintf("run/%s/attempt/%d/publication/start", attempt.RunID, attempt.AttemptNo),
 		Name:        TraceSpanPublication,
 	})
@@ -292,12 +323,16 @@ func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, mess
 	if err := tracer.EndSpan(publicationContext, agentobs.SpanEnd{Name: TraceSpanPublication, Status: agentobs.StatusOK}); err != nil {
 		return err
 	}
-	if err := RecordRunTerminalInTx(ctx, tx, attempt.RunID, RunTerminalTrace{
+	if err := RecordRunTerminalInTx(traceCtx, tx, attempt.RunID, RunTerminalTrace{
 		RunStatus: "completed", SpanStatus: agentobs.StatusOK, AttemptNo: attempt.AttemptNo,
 	}); err != nil {
 		return err
 	}
-	return r.commit(ctx, tx)
+	if err := r.commit(ctx, tx); err != nil {
+		return err
+	}
+	publishCommittedTrace(traceCtx, traceScope)
+	return nil
 }
 
 type publicationState int
@@ -356,6 +391,13 @@ func (r *PostgresRuntime) Fail(ctx context.Context, attempt Attempt, errorCode s
 		return err
 	}
 	defer tx.Rollback(ctx)
+	traceCtx, traceScope, err := r.beginTraceScope(ctx)
+	if err != nil {
+		return err
+	}
+	if traceScope != nil {
+		defer traceScope.Rollback()
+	}
 	var jobID string
 	err = tx.QueryRow(ctx, `
 		select j.id
@@ -392,12 +434,16 @@ func (r *PostgresRuntime) Fail(ctx context.Context, attempt Attempt, errorCode s
 	if _, err := tx.Exec(ctx, `select pg_notify('nano_agent_runs', $1)`, attempt.RunID); err != nil {
 		return err
 	}
-	if err := RecordRunTerminalInTx(ctx, tx, attempt.RunID, RunTerminalTrace{
+	if err := RecordRunTerminalInTx(traceCtx, tx, attempt.RunID, RunTerminalTrace{
 		RunStatus: "failed", SpanStatus: agentobs.StatusError, ErrorCode: errorCode, AttemptNo: attempt.AttemptNo,
 	}); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	publishCommittedTrace(traceCtx, traceScope)
+	return nil
 }
 
 func (r *PostgresRuntime) workerTx(ctx context.Context) (pgx.Tx, error) {

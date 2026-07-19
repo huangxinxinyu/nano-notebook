@@ -99,6 +99,13 @@ func (r *PostgresRuntime) appendCheckpointOnce(ctx context.Context, attempt Atte
 		return Checkpoint{}, err
 	}
 	defer tx.Rollback(ctx)
+	traceCtx, traceScope, err := r.beginTraceScope(ctx)
+	if err != nil {
+		return Checkpoint{}, err
+	}
+	if traceScope != nil {
+		defer traceScope.Rollback()
+	}
 	if err := lockCheckpointAuthority(ctx, tx, attempt); err != nil {
 		return Checkpoint{}, err
 	}
@@ -145,12 +152,13 @@ func (r *PostgresRuntime) appendCheckpointOnce(ctx context.Context, attempt Atte
 	if err != nil {
 		return Checkpoint{}, err
 	}
-	if err := RecordCheckpointAcceptedInTx(ctx, tx, attempt, checkpoint); err != nil {
+	if err := RecordCheckpointAcceptedInTx(traceCtx, tx, attempt, checkpoint); err != nil {
 		return Checkpoint{}, err
 	}
 	if err := r.commit(ctx, tx); err != nil {
 		return Checkpoint{}, err
 	}
+	publishCommittedTrace(traceCtx, traceScope)
 	return checkpoint, nil
 }
 

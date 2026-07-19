@@ -15,6 +15,7 @@ func TestLoadConfigUsesDedicatedCollectorDatabaseAndPool(t *testing.T) {
 	t.Setenv("NANO_COLLECTOR_SERVICE_TOKEN", "test-service-token")
 	t.Setenv("NANO_COLLECTOR_QUERY_TOKEN", "test-query-token")
 	t.Setenv("NANO_COLLECTOR_PRODUCER_ID", "test-worker")
+	t.Setenv("NANO_COLLECTOR_PRODUCER_ID_PREFIX", "test-")
 	t.Setenv("NANO_REPLAY_STAGING_S3_ENDPOINT", "staging.internal:9000")
 	t.Setenv("NANO_REPLAY_STAGING_S3_ACCESS_KEY_ID", "collector-staging-reader")
 	t.Setenv("NANO_REPLAY_STAGING_S3_SECRET_ACCESS_KEY", "staging-reader-secret")
@@ -37,7 +38,7 @@ func TestLoadConfigUsesDedicatedCollectorDatabaseAndPool(t *testing.T) {
 	if config.ProjectionDatabaseMaxConns != 5 || config.ProjectionDatabaseMinConns != 1 || config.QueryDatabaseMaxConns != 7 || config.QueryDatabaseMinConns != 2 {
 		t.Fatalf("projection/query pools = %#v", config)
 	}
-	if config.Addr != ":18082" || config.ServiceToken != "test-service-token" || config.QueryToken != "test-query-token" || config.ProducerID != "test-worker" {
+	if config.Addr != ":18082" || config.ServiceToken != "test-service-token" || config.QueryToken != "test-query-token" || config.ProducerID != "test-worker" || config.ProducerIDPrefix != "test-" {
 		t.Fatalf("Collector config = %#v", config)
 	}
 	if config.ReplayStagingS3.Endpoint != "staging.internal:9000" || config.ReplayStagingS3.AccessKeyID != "collector-staging-reader" || config.ReplayStagingS3.Bucket != "worker-staging" ||

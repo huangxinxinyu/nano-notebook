@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agentbatch"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 )
 
 type AttemptTraceRecorder struct {
 	runtime *PostgresRuntime
 	attempt Attempt
+	trace   collector.TraceDescriptor
 }
 
 var _ agentobs.Recorder = (*AttemptTraceRecorder)(nil)
@@ -25,20 +28,28 @@ func (r *PostgresRuntime) StartAttemptTrace(ctx context.Context, attempt Attempt
 	if err := lockCheckpointAuthority(ctx, tx, attempt); err != nil {
 		return ctx, nil, err
 	}
-	recorder, err := NewRunTraceRecorder(ctx, tx, attempt.RunID)
+	traceCtx, traceScope, err := r.beginTraceScope(ctx)
 	if err != nil {
 		return ctx, nil, err
 	}
-	attemptSpan, err := recorder.SpanContextByIdentity(ctx, TraceAttemptStartIdentity(attempt.RunID, attempt.AttemptNo))
+	if traceScope != nil {
+		defer traceScope.Rollback()
+	}
+	recorder, err := NewRunTraceRecorder(traceCtx, tx, attempt.RunID)
+	if err != nil {
+		return ctx, nil, err
+	}
+	attemptSpan, err := recorder.SpanContextByIdentity(traceCtx, TraceAttemptStartIdentity(attempt.RunID, attempt.AttemptNo))
 	if err != nil {
 		return ctx, nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return ctx, nil, err
 	}
+	attemptRecorder := &AttemptTraceRecorder{runtime: r, attempt: attempt, trace: recorder.Descriptor()}
 	destinations := []agentobs.Destination{{
 		Name: "nano-postgres", Class: agentobs.DeliveryRequired,
-		Exporter: recorderExporter{recorder: &AttemptTraceRecorder{runtime: r, attempt: attempt}},
+		Exporter: recorderExporter{recorder: attemptRecorder},
 	}}
 	if r.telemetry != nil {
 		destinations = append(destinations, agentobs.Destination{
@@ -56,6 +67,7 @@ func (r *PostgresRuntime) StartAttemptTrace(ctx context.Context, attempt Attempt
 	}
 	tracer, err := agentobs.NewTracer(agentobs.TracerConfig{
 		Recorder:                  sdkRuntime,
+		IdentitySpanIDGenerator:   attemptRecorder,
 		SemanticConventionVersion: TraceSemanticConventionVersion,
 	})
 	if err != nil {
@@ -113,6 +125,13 @@ func (r *AttemptTraceRecorder) Record(ctx context.Context, record agentobs.Recor
 	if err := record.Validate(); err != nil {
 		return err
 	}
+	if r.runtime.traceSink != nil {
+		if record.TraceID != r.trace.TraceID || record.SchemaVersion != r.trace.SchemaVersion ||
+			record.SemanticConventionVersion != r.trace.SemanticConventionVersion {
+			return errors.New("Attempt Trace record changed its direct-delivery envelope")
+		}
+		return r.runtime.traceSink.Offer(ctx, agentbatch.Envelope{Trace: r.trace, Record: record})
+	}
 	var appendErr error
 	for try := 0; try < 2; try++ {
 		appendErr = r.recordOnce(ctx, record)
@@ -134,6 +153,11 @@ func (r *AttemptTraceRecorder) Record(ctx context.Context, record agentobs.Recor
 		}
 	}
 	return fmt.Errorf("Attempt Trace append exhausted retries: %w", appendErr)
+}
+
+func (r *AttemptTraceRecorder) SpanIDForIdentity(traceID agentobs.TraceID, identityKey string) agentobs.SpanID {
+	spanID, _ := DeterministicSpanID(traceID, identityKey)
+	return spanID
 }
 
 func (r *AttemptTraceRecorder) recordOnce(ctx context.Context, record agentobs.Record) error {

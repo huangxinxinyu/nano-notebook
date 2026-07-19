@@ -36,7 +36,7 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 	if config.DatabaseURL != "postgres://application" || config.Addr != ":18081" {
 		t.Fatalf("Application config = %#v", config)
 	}
-	if config.CollectorEndpoint != "http://collector.internal:8082/internal/agent-observability/v1/batches" || config.CollectorServiceToken != "sender-secret" || config.ProducerID != "worker-a" {
+	if config.CollectorEndpoint != "http://collector.internal:8082/internal/agent-observability/v2/batches" || config.CollectorServiceToken != "sender-secret" || config.ProducerID != "worker-a" {
 		t.Fatalf("Collector config = %#v", config)
 	}
 	if config.MaxRecords != 64 || config.MaxEncodedBytes != 262144 || config.MaxTraces != 8 {
@@ -59,21 +59,27 @@ func TestLoadWorkerConfigRejectsInvalidSenderBounds(t *testing.T) {
 	}
 }
 
-func TestFlushOutboxOnShutdownDelegatesToDurableSender(t *testing.T) {
+func TestShutdownTraceExporterFlushesThenStopsMemoryExporter(t *testing.T) {
 	wantErr := errors.New("collector unavailable")
 	flusher := &workerFlusher{err: wantErr}
-	err := flushOutboxOnShutdown(context.Background(), flusher)
-	if !errors.Is(err, wantErr) || flusher.calls != 1 {
-		t.Fatalf("flushOutboxOnShutdown err=%v calls=%d", err, flusher.calls)
+	err := shutdownTraceExporter(context.Background(), flusher)
+	if !errors.Is(err, wantErr) || flusher.flushCalls != 1 || flusher.shutdownCalls != 0 {
+		t.Fatalf("shutdownTraceExporter err=%v flush=%d shutdown=%d", err, flusher.flushCalls, flusher.shutdownCalls)
 	}
 }
 
 type workerFlusher struct {
-	calls int
-	err   error
+	flushCalls    int
+	shutdownCalls int
+	err           error
 }
 
 func (f *workerFlusher) ForceFlush(context.Context) error {
-	f.calls++
+	f.flushCalls++
 	return f.err
+}
+
+func (f *workerFlusher) Shutdown(context.Context) error {
+	f.shutdownCalls++
+	return nil
 }

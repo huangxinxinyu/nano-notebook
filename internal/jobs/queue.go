@@ -19,6 +19,7 @@ const DefaultLeaseDuration = 30 * time.Second
 type Queue struct {
 	pool          *pgxpool.Pool
 	leaseDuration time.Duration
+	traceSink     agent.TraceSink
 }
 
 type ClaimedJob struct {
@@ -32,6 +33,10 @@ func NewQueue(pool *pgxpool.Pool) *Queue {
 	return &Queue{pool: pool, leaseDuration: DefaultLeaseDuration}
 }
 
+func NewQueueWithTraceSink(pool *pgxpool.Pool, sink agent.TraceSink) *Queue {
+	return &Queue{pool: pool, leaseDuration: DefaultLeaseDuration, traceSink: sink}
+}
+
 func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 	for {
 		tx, err := q.pool.Begin(ctx)
@@ -39,10 +44,20 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 			return ClaimedJob{}, false, err
 		}
 		defer tx.Rollback(ctx)
+		traceCtx := ctx
+		var traceScope *agent.TraceScope
+		if q.traceSink != nil {
+			traceScope, err = agent.NewTraceScope(q.traceSink)
+			if err != nil {
+				return ClaimedJob{}, false, err
+			}
+			defer traceScope.Rollback()
+			traceCtx = agent.ContextWithTraceScope(ctx, traceScope)
+		}
 		if _, err := tx.Exec(ctx, `set local role nano_worker`); err != nil {
 			return ClaimedJob{}, false, err
 		}
-		if _, err := agent.NewStore(tx).ExpireIfOverdue(ctx, "", ""); err != nil {
+		if _, err := agent.NewStore(tx).ExpireIfOverdue(traceCtx, "", ""); err != nil {
 			return ClaimedJob{}, false, err
 		}
 
@@ -61,6 +76,9 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 			if err := tx.Commit(ctx); err != nil {
 				return ClaimedJob{}, false, err
 			}
+			if traceScope != nil {
+				_ = traceScope.PublishAfterCommit(traceCtx)
+			}
 			return ClaimedJob{}, false, nil
 		}
 		if err != nil {
@@ -68,11 +86,14 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 		}
 
 		if status == "running" && job.AttemptNo >= 3 {
-			if err := exhaustRecovery(ctx, tx, job); err != nil {
+			if err := exhaustRecovery(traceCtx, tx, job); err != nil {
 				return ClaimedJob{}, false, err
 			}
 			if err := tx.Commit(ctx); err != nil {
 				return ClaimedJob{}, false, err
+			}
+			if traceScope != nil {
+				_ = traceScope.PublishAfterCommit(traceCtx)
 			}
 			continue
 		}
@@ -107,7 +128,7 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 				return ClaimedJob{}, false, err
 			}
 		}
-		traceRecorder, err := agent.NewRunTraceRecorder(ctx, tx, job.RunID)
+		traceRecorder, err := agent.NewRunTraceRecorder(traceCtx, tx, job.RunID)
 		if err != nil {
 			return ClaimedJob{}, false, err
 		}
@@ -117,11 +138,11 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 		if err != nil {
 			return ClaimedJob{}, false, err
 		}
-		rootContext := agentobs.ContextWithSpanContext(ctx, traceRecorder.RootSpanContext())
+		rootContext := agentobs.ContextWithSpanContext(traceCtx, traceRecorder.RootSpanContext())
 		var priorAttempt agentobs.SpanContext
 		if status == "running" {
 			priorIdentity := agent.TraceAttemptStartIdentity(job.RunID, previousAttemptNo)
-			priorAttempt, err = traceRecorder.SpanContextByIdentity(ctx, priorIdentity)
+			priorAttempt, err = traceRecorder.SpanContextByIdentity(traceCtx, priorIdentity)
 			if err != nil {
 				return ClaimedJob{}, false, err
 			}
@@ -159,6 +180,9 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return ClaimedJob{}, false, err
+		}
+		if traceScope != nil {
+			_ = traceScope.PublishAfterCommit(traceCtx)
 		}
 		return job, true, nil
 	}

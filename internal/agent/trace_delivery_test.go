@@ -88,6 +88,43 @@ func TestTraceTransactionPublishFailureCannotUndoCommittedProductResult(t *testi
 	}
 }
 
+func TestTraceScopePublishesMultipleTraceBuffersOnlyAfterProductCommit(t *testing.T) {
+	sink := &recordingTraceSink{}
+	scope, err := agent.NewTraceScope(sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := agent.ContextWithTraceScope(context.Background(), scope)
+	first := newTraceTransaction(t, sink)
+	secondDescriptor := collector.TraceDescriptor{
+		TraceID: "trace-second", RunID: "run-second", ChatID: "chat-second", NotebookID: "notebook-second",
+		RootSpanID: "root-second", AgentName: "nano-research-agent", SchemaVersion: 1, SemanticConventionVersion: 1,
+	}
+	first, err = scope.Transaction(first.Descriptor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := scope.Transaction(secondDescriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := agent.TraceScopeFromContext(ctx); !ok || got != scope {
+		t.Fatalf("context Trace scope = %#v, %t", got, ok)
+	}
+	if err := first.Record(ctx, transactionRecord("first-record")); err != nil {
+		t.Fatal(err)
+	}
+	secondRecord := transactionRecord("second-record")
+	secondRecord.TraceID = secondDescriptor.TraceID
+	secondRecord.SpanID = secondDescriptor.RootSpanID
+	if err := second.Record(ctx, secondRecord); err != nil {
+		t.Fatal(err)
+	}
+	if got := scope.PublishAfterCommit(ctx); got.Attempted != 2 || got.Accepted != 2 {
+		t.Fatalf("scope publish = %#v", got)
+	}
+}
+
 type recordingTraceSink struct {
 	envelopes    []agentbatch.Envelope
 	failIdentity string

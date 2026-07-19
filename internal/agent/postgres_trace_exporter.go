@@ -67,28 +67,49 @@ func NewPostgresTraceExporter(pool *pgxpool.Pool, options ...TraceExporterOption
 }
 
 func CreateTraceInTx(ctx context.Context, tx pgx.Tx, runID string, root agentobs.Record) error {
+	descriptor, err := createTraceAnchorInTx(ctx, tx, runID, root)
+	if err != nil {
+		return err
+	}
+	_ = descriptor
+	return insertTraceRecord(ctx, tx, 1, root)
+}
+
+func createTraceAnchorInTx(ctx context.Context, tx pgx.Tx, runID string, root agentobs.Record) (collector.TraceDescriptor, error) {
 	if tx == nil || strings.TrimSpace(runID) == "" {
-		return errors.New("Trace admission dependencies are incomplete")
+		return collector.TraceDescriptor{}, errors.New("Trace admission dependencies are incomplete")
 	}
 	root = normalizeTraceRecord(root)
 	if err := root.Validate(); err != nil {
-		return err
+		return collector.TraceDescriptor{}, err
 	}
 	if root.Kind != agentobs.RecordSpanStarted || root.ParentSpanID != "" {
-		return fmt.Errorf("%w: Trace root must be a root Span start", agentobs.ErrLifecycle)
+		return collector.TraceDescriptor{}, fmt.Errorf("%w: Trace root must be a root Span start", agentobs.ErrLifecycle)
+	}
+	descriptor := collector.TraceDescriptor{
+		TraceID: root.TraceID, RunID: runID, RootSpanID: root.SpanID,
+		AgentName: "nano-research-agent", SchemaVersion: root.SchemaVersion,
+		SemanticConventionVersion: root.SemanticConventionVersion,
+	}
+	if err := tx.QueryRow(ctx, `
+		select r.chat_id, c.notebook_id
+		from agent_runs r join chat_chats c on c.id = r.chat_id
+		where r.id = $1
+	`, runID).Scan(&descriptor.ChatID, &descriptor.NotebookID); err != nil {
+		return collector.TraceDescriptor{}, err
 	}
 	if _, err := tx.Exec(ctx, `
 		insert into agent_trace_refs(
 			trace_id, run_id, chat_id, notebook_id, root_span_id, agent_name,
 			schema_version, semantic_convention_version
 		)
-		select $1, r.id, r.chat_id, c.notebook_id, $2, 'nano-research-agent', $3, $4
-		from agent_runs r join chat_chats c on c.id = r.chat_id
-		where r.id = $5
-	`, root.TraceID, root.SpanID, root.SchemaVersion, root.SemanticConventionVersion, runID); err != nil {
-		return err
+		values($1, $2, $3, $4, $5, $6, $7, $8)
+	`, descriptor.TraceID, descriptor.RunID, descriptor.ChatID, descriptor.NotebookID,
+		descriptor.RootSpanID, descriptor.AgentName, descriptor.SchemaVersion,
+		descriptor.SemanticConventionVersion); err != nil {
+		return collector.TraceDescriptor{}, err
 	}
-	return insertTraceRecord(ctx, tx, 1, root)
+	return descriptor, nil
 }
 
 func (e *PostgresTraceExporter) Export(ctx context.Context, record agentobs.Record) error {

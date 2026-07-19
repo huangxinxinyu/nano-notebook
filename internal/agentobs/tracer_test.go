@@ -124,6 +124,37 @@ func TestTracerSupportsCallerSuppliedRootIdentity(t *testing.T) {
 	}
 }
 
+func TestTracerUsesRecorderDeterministicSpanIdentity(t *testing.T) {
+	recorder := &identityRecordingRecorder{recordingRecorder: recordingRecorder{}}
+	tracer, err := NewTracer(TracerConfig{
+		Recorder: recorder,
+		IDGenerator: &sequenceIDs{traceIDs: []TraceID{"trace-stable"}, spanIDs: []SpanID{
+			"random-root-must-not-be-used", "random-child-must-not-be-used",
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootCtx, root, err := tracer.StartTrace(context.Background(), TraceStart{
+		IdentityKey: "run/run-1/root/start", Name: "agent.execution",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, child, err := tracer.StartSpan(rootCtx, SpanStart{
+		IdentityKey: "run/run-1/attempt/1/start", Name: "agent.attempt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if root.SpanID != "stable:trace-stable:run/run-1/root/start" {
+		t.Fatalf("root Span ID = %q", root.SpanID)
+	}
+	if child.SpanID != "stable:trace-stable:run/run-1/attempt/1/start" {
+		t.Fatalf("child Span ID = %q", child.SpanID)
+	}
+}
+
 func TestTracerDoesNotPublishContextWhenRequiredStartFails(t *testing.T) {
 	wantErr := errors.New("durable exporter unavailable")
 	tracer, err := NewTracer(TracerConfig{
@@ -200,6 +231,14 @@ func TestTracerUsesInstalledRecordLimits(t *testing.T) {
 type recordingRecorder struct {
 	records []Record
 	err     error
+}
+
+type identityRecordingRecorder struct {
+	recordingRecorder
+}
+
+func (*identityRecordingRecorder) SpanIDForIdentity(traceID TraceID, identityKey string) SpanID {
+	return SpanID("stable:" + string(traceID) + ":" + identityKey)
 }
 
 func (r *recordingRecorder) Record(_ context.Context, record Record) error {

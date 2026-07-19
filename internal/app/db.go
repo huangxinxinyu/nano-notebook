@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -51,6 +52,10 @@ func (db *DB) WithRequestPrincipal(ctx context.Context, principalID string, fn f
 		return err
 	}
 	defer tx.Rollback(ctx)
+	traceScope, hasTraceScope := agent.TraceScopeFromContext(ctx)
+	if hasTraceScope {
+		defer traceScope.Rollback()
+	}
 	if _, err := tx.Exec(ctx, `set local role nano_app`); err != nil {
 		return err
 	}
@@ -60,7 +65,13 @@ func (db *DB) WithRequestPrincipal(ctx context.Context, principalID string, fn f
 	if err := fn(tx); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	if hasTraceScope {
+		_ = traceScope.PublishAfterCommit(ctx)
+	}
+	return nil
 }
 
 func ResetForTests(ctx context.Context, db *DB) error {

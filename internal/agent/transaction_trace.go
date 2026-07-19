@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -17,6 +18,7 @@ type RunTraceRecorder struct {
 	schemaVersion int
 	sequence      int
 	ownedLookup   bool
+	direct        *TraceTransaction
 }
 
 var _ agentobs.Recorder = (*RunTraceRecorder)(nil)
@@ -28,15 +30,28 @@ func NewRunTraceRecorder(ctx context.Context, tx pgx.Tx, runID string) (*RunTrac
 	var recorder RunTraceRecorder
 	recorder.tx = tx
 	recorder.runID = runID
+	var descriptor collector.TraceDescriptor
 	if err := tx.QueryRow(ctx, `
-		select trace_id, root_span_id, schema_version
+		select trace_id, run_id, chat_id, notebook_id, root_span_id, agent_name,
+			schema_version, semantic_convention_version
 		from agent_trace_refs where run_id = $1`, runID).Scan(
-		&recorder.traceID, &recorder.rootSpanID, &recorder.schemaVersion,
+		&descriptor.TraceID, &descriptor.RunID, &descriptor.ChatID, &descriptor.NotebookID,
+		&descriptor.RootSpanID, &descriptor.AgentName, &descriptor.SchemaVersion,
+		&descriptor.SemanticConventionVersion,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrTraceNotFound
 		}
 		return nil, err
+	}
+	recorder.traceID, recorder.rootSpanID, recorder.schemaVersion = descriptor.TraceID, descriptor.RootSpanID, descriptor.SchemaVersion
+	if scope, ok := TraceScopeFromContext(ctx); ok {
+		transaction, err := scope.Transaction(descriptor)
+		if err != nil {
+			return nil, err
+		}
+		recorder.direct = transaction
+		return &recorder, nil
 	}
 	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, "agent_trace:"+string(recorder.traceID)); err != nil {
 		return nil, err
@@ -68,6 +83,25 @@ func NewOwnedRunTraceRecorder(ctx context.Context, tx pgx.Tx, runID string) (*Ru
 		}
 		return nil, err
 	}
+	if scope, ok := TraceScopeFromContext(ctx); ok {
+		var descriptor collector.TraceDescriptor
+		descriptor.TraceID, descriptor.RunID = recorder.traceID, runID
+		descriptor.RootSpanID, descriptor.SchemaVersion = recorder.rootSpanID, recorder.schemaVersion
+		descriptor.AgentName = "nano-research-agent"
+		descriptor.SemanticConventionVersion = TraceSemanticConventionVersion
+		if err := tx.QueryRow(ctx, `
+			select r.chat_id, c.notebook_id
+			from agent_runs r join chat_chats c on c.id = r.chat_id
+			where r.id = $1`, runID).Scan(&descriptor.ChatID, &descriptor.NotebookID); err != nil {
+			return nil, err
+		}
+		transaction, err := scope.Transaction(descriptor)
+		if err != nil {
+			return nil, err
+		}
+		recorder.direct = transaction
+		return recorder, nil
+	}
 	if recorder.sequence < 1 {
 		return nil, fmt.Errorf("%w: Run Trace has no root record", agentobs.ErrLifecycle)
 	}
@@ -81,9 +115,30 @@ func (r *RunTraceRecorder) RootSpanContext() agentobs.SpanContext {
 	return agentobs.SpanContext{TraceID: r.traceID, SpanID: r.rootSpanID}
 }
 
+func (r *RunTraceRecorder) Descriptor() collector.TraceDescriptor {
+	if r == nil {
+		return collector.TraceDescriptor{}
+	}
+	if r.direct != nil {
+		return r.direct.Descriptor()
+	}
+	return collector.TraceDescriptor{
+		TraceID: r.traceID, RunID: r.runID, RootSpanID: r.rootSpanID,
+		AgentName: "nano-research-agent", SchemaVersion: r.schemaVersion,
+		SemanticConventionVersion: TraceSemanticConventionVersion,
+	}
+}
+
 func (r *RunTraceRecorder) SpanContextByIdentity(ctx context.Context, identityKey string) (agentobs.SpanContext, error) {
 	if r == nil || r.tx == nil {
 		return agentobs.SpanContext{}, errors.New("nil Run Trace Recorder")
+	}
+	if r.direct != nil {
+		spanID, err := DeterministicSpanID(r.traceID, identityKey)
+		if err != nil {
+			return agentobs.SpanContext{}, err
+		}
+		return agentobs.SpanContext{TraceID: r.traceID, SpanID: spanID}, nil
 	}
 	var traceID agentobs.TraceID
 	var spanID agentobs.SpanID
@@ -123,9 +178,18 @@ func (r *RunTraceRecorder) Record(ctx context.Context, record agentobs.Record) e
 		return fmt.Errorf("%w: record changed Run Trace envelope", agentobs.ErrLifecycle)
 	}
 	nextSequence := r.sequence + 1
-	if err := insertTraceRecord(ctx, r.tx, nextSequence, record); err != nil {
+	if r.direct != nil {
+		if err := r.direct.Record(ctx, record); err != nil {
+			return err
+		}
+	} else if err := insertTraceRecord(ctx, r.tx, nextSequence, record); err != nil {
 		return classifyTraceDatabaseError(err)
 	}
 	r.sequence = nextSequence
 	return nil
+}
+
+func (r *RunTraceRecorder) SpanIDForIdentity(traceID agentobs.TraceID, identityKey string) agentobs.SpanID {
+	spanID, _ := DeterministicSpanID(traceID, identityKey)
+	return spanID
 }

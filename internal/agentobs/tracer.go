@@ -15,9 +15,16 @@ type IDGenerator interface {
 	NewSpanID() SpanID
 }
 
+// IdentitySpanIDGenerator lets a Recorder make a semantic Span identity stable
+// across processes without requiring a shared Trace-record database.
+type IdentitySpanIDGenerator interface {
+	SpanIDForIdentity(TraceID, string) SpanID
+}
+
 type TracerConfig struct {
 	Recorder                  Recorder
 	IDGenerator               IDGenerator
+	IdentitySpanIDGenerator   IdentitySpanIDGenerator
 	Clock                     func() time.Time
 	SchemaVersion             int
 	SemanticConventionVersion int
@@ -68,6 +75,7 @@ type Link struct {
 type Tracer struct {
 	recorder                  Recorder
 	ids                       IDGenerator
+	identityIDs               IdentitySpanIDGenerator
 	now                       func() time.Time
 	schemaVersion             int
 	semanticConventionVersion int
@@ -97,9 +105,14 @@ func NewTracer(config TracerConfig) (*Tracer, error) {
 			return nil, err
 		}
 	}
+	identityIDs := config.IdentitySpanIDGenerator
+	if identityIDs == nil {
+		identityIDs = identitySpanIDs(config.Recorder)
+	}
 	return &Tracer{
 		recorder:                  config.Recorder,
 		ids:                       ids,
+		identityIDs:               identityIDs,
 		now:                       now,
 		schemaVersion:             defaultVersion(config.SchemaVersion),
 		semanticConventionVersion: defaultVersion(config.SemanticConventionVersion),
@@ -116,7 +129,11 @@ func (t *Tracer) StartTrace(ctx context.Context, start TraceStart) (context.Cont
 	}
 	spanID := start.SpanID
 	if spanID == "" {
-		spanID = t.ids.NewSpanID()
+		if t.identityIDs != nil && strings.TrimSpace(start.IdentityKey) != "" {
+			spanID = t.identityIDs.SpanIDForIdentity(traceID, strings.TrimSpace(start.IdentityKey))
+		} else {
+			spanID = t.ids.NewSpanID()
+		}
 	}
 	span := SpanContext{TraceID: traceID, SpanID: spanID}
 	record := t.baseRecord(start.IdentityKey, RecordSpanStarted, span, start.Name, start.OccurredAt, start.Attributes)
@@ -137,7 +154,11 @@ func (t *Tracer) StartSpan(ctx context.Context, start SpanStart) (context.Contex
 	}
 	spanID := start.SpanID
 	if spanID == "" {
-		spanID = t.ids.NewSpanID()
+		if t.identityIDs != nil && strings.TrimSpace(start.IdentityKey) != "" {
+			spanID = t.identityIDs.SpanIDForIdentity(parent.TraceID, strings.TrimSpace(start.IdentityKey))
+		} else {
+			spanID = t.ids.NewSpanID()
+		}
 	}
 	span := SpanContext{TraceID: parent.TraceID, SpanID: spanID}
 	record := t.baseRecord(start.IdentityKey, RecordSpanStarted, span, start.Name, start.OccurredAt, start.Attributes)
@@ -239,6 +260,11 @@ func nonNilContext(ctx context.Context) context.Context {
 		return context.Background()
 	}
 	return ctx
+}
+
+func identitySpanIDs(recorder Recorder) IdentitySpanIDGenerator {
+	ids, _ := recorder.(IdentitySpanIDGenerator)
+	return ids
 }
 
 type uuidIDs struct{}

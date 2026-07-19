@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agentbatch"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/telemetry"
@@ -22,15 +23,17 @@ import (
 )
 
 type controlPlaneConfig struct {
-	DatabaseURL         string
-	Addr                string
-	CollectorURL        string
-	CollectorQueryToken string
-	ReplayKeyID         string
-	ReplayKEK           []byte
-	CookieSecure        bool
-	Version             string
-	DefaultModel        string
+	DatabaseURL           string
+	Addr                  string
+	CollectorURL          string
+	CollectorQueryToken   string
+	CollectorServiceToken string
+	ProducerID            string
+	ReplayKeyID           string
+	ReplayKEK             []byte
+	CookieSecure          bool
+	Version               string
+	DefaultModel          string
 }
 
 func main() {
@@ -71,6 +74,24 @@ func main() {
 		slog.Error("Collector Query client configuration invalid", "error", err)
 		os.Exit(1)
 	}
+	batchHTTP, err := agentbatch.NewHTTPSender(agentbatch.HTTPSenderConfig{
+		Endpoint:     config.CollectorURL + "/internal/agent-observability/v2/batches",
+		ServiceToken: config.CollectorServiceToken,
+		HTTPClient:   &http.Client{Timeout: 10 * time.Second, Transport: otelhttp.NewTransport(http.DefaultTransport)},
+	})
+	if err != nil {
+		slog.Error("Agent Trace HTTP Sender configuration invalid", "error", err)
+		os.Exit(1)
+	}
+	traceExporter, err := agentbatch.NewExporter(agentbatch.Config{
+		ProducerID: config.ProducerID, Sender: batchHTTP,
+		MaxPendingRecords: 10_000, MaxPendingBytes: 32 * 1024 * 1024,
+		MaxBatchRecords: 128, MaxBatchBytes: 512 * 1024, MaxDelay: 250 * time.Millisecond,
+	})
+	if err != nil {
+		slog.Error("Agent Trace memory exporter configuration invalid", "error", err)
+		os.Exit(1)
+	}
 	keyProvider, err := replay.NewDevelopmentKeyProvider(config.ReplayKeyID, config.ReplayKEK)
 	if err != nil {
 		slog.Error("Replay key configuration invalid", "error", err)
@@ -83,7 +104,7 @@ func main() {
 	}
 	server := app.NewServer(app.Config{
 		CookieSecure: config.CookieSecure, Version: config.Version, DefaultModel: config.DefaultModel,
-		AdminTraces: queryClient, ReplaySealer: replaySealer,
+		AdminTraces: queryClient, ReplaySealer: replaySealer, TraceSink: traceExporter,
 	}, db)
 	runListener := realtime.NewRunListener(db.Pool(), server.NotifyRun)
 	go func() {
@@ -113,6 +134,9 @@ func main() {
 		slog.Error("control-plane shutdown failed", "error", err)
 		os.Exit(1)
 	}
+	if err := traceExporter.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("Agent Trace memory flush incomplete; bounded unsent records were dropped on process exit", "error", err)
+	}
 	slog.Info("control-plane stopped")
 }
 
@@ -122,16 +146,19 @@ func loadControlPlaneConfig() (controlPlaneConfig, error) {
 		return controlPlaneConfig{}, fmt.Errorf("parse NANO_REPLAY_KEK_BASE64: %w", err)
 	}
 	config := controlPlaneConfig{
-		DatabaseURL:         env("NANO_DATABASE_URL", "postgres://nano:nano@localhost:55432/nano?sslmode=disable"),
-		Addr:                env("NANO_CONTROL_PLANE_ADDR", ":8080"),
-		CollectorURL:        strings.TrimRight(env("NANO_COLLECTOR_URL", "http://127.0.0.1:8082"), "/"),
-		CollectorQueryToken: env("NANO_COLLECTOR_QUERY_TOKEN", "nano-local-collector-query-token"),
-		ReplayKeyID:         env("NANO_REPLAY_KEY_ID", "nano-local-replay-key-v1"), ReplayKEK: replayKEK,
+		DatabaseURL:           env("NANO_DATABASE_URL", "postgres://nano:nano@localhost:55432/nano?sslmode=disable"),
+		Addr:                  env("NANO_CONTROL_PLANE_ADDR", ":8080"),
+		CollectorURL:          strings.TrimRight(env("NANO_COLLECTOR_URL", "http://127.0.0.1:8082"), "/"),
+		CollectorQueryToken:   env("NANO_COLLECTOR_QUERY_TOKEN", "nano-local-collector-query-token"),
+		CollectorServiceToken: env("NANO_COLLECTOR_SERVICE_TOKEN", "nano-local-collector-token"),
+		ProducerID:            env("NANO_CONTROL_PLANE_PRODUCER_ID", "nano-control-plane"),
+		ReplayKeyID:           env("NANO_REPLAY_KEY_ID", "nano-local-replay-key-v1"), ReplayKEK: replayKEK,
 		CookieSecure: os.Getenv("NANO_COOKIE_SECURE") == "true", Version: env("NANO_VERSION", "dev"),
 		DefaultModel: env("NANO_CHAT_MODEL", "aliyun/qwen-flash"),
 	}
 	if strings.TrimSpace(config.DatabaseURL) == "" || strings.TrimSpace(config.Addr) == "" ||
 		strings.TrimSpace(config.CollectorURL) == "" || strings.TrimSpace(config.CollectorQueryToken) == "" ||
+		strings.TrimSpace(config.CollectorServiceToken) == "" || strings.TrimSpace(config.ProducerID) == "" ||
 		strings.TrimSpace(config.ReplayKeyID) == "" || len(config.ReplayKEK) != 32 {
 		return controlPlaneConfig{}, errors.New("Control Plane configuration is incomplete")
 	}

@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentbatch"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/otelbridge"
-	"github.com/huangxinxinyu/nano-notebook/internal/agentoutbox"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
@@ -48,7 +48,7 @@ type workerConfig struct {
 	ReplayKEK             []byte
 }
 
-type outboxFlusher interface {
+type traceFlusher interface {
 	ForceFlush(context.Context) error
 }
 
@@ -117,54 +117,38 @@ func main() {
 		slog.Error("Replay staging maintenance invalid", "error", err)
 		os.Exit(1)
 	}
+	batchHTTP, err := agentbatch.NewHTTPSender(agentbatch.HTTPSenderConfig{
+		Endpoint: config.CollectorEndpoint, ServiceToken: config.CollectorServiceToken,
+		HTTPClient: &http.Client{Timeout: config.HTTPTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
+	})
+	if err != nil {
+		slog.Error("Agent Trace HTTP Sender invalid", "error", err)
+		os.Exit(1)
+	}
+	traceExporter, err := agentbatch.NewExporter(agentbatch.Config{
+		ProducerID: config.ProducerID, Sender: batchHTTP,
+		MaxPendingRecords: 10_000, MaxPendingBytes: 32 * 1024 * 1024,
+		MaxBatchRecords: config.MaxRecords, MaxBatchBytes: config.MaxEncodedBytes, MaxDelay: config.MaxDelay,
+	})
+	if err != nil {
+		slog.Error("Agent Trace memory exporter invalid", "error", err)
+		os.Exit(1)
+	}
 	runtime := agent.NewPostgresRuntime(db.Pool(), agent.BareSystemPrompt, nil,
-		agent.WithBestEffortTraceExporter(traceBridge), agent.WithReplayStager(replayStager))
+		agent.WithTraceSink(traceExporter), agent.WithBestEffortTraceExporter(traceBridge), agent.WithReplayStager(replayStager))
 	registry, err := agent.NewActionRegistry(agent.NewCalculateAction(), agent.NewCurrentTimeAction(nil))
 	if err != nil {
 		slog.Error("worker Action registry invalid", "error", err)
 		os.Exit(1)
 	}
 	controller := agent.NewController(runtime, modelClient, registry)
-	workerService := agentworker.NewService(db.Pool(), jobs.NewQueue(db.Pool()), controller, 5*time.Second, 210*time.Second)
-	outboxStore, err := agentoutbox.NewPostgresStore(db.Pool(), agentoutbox.Config{
-		ProducerID: config.ProducerID, MaxRecords: config.MaxRecords,
-		MaxEncodedBytes: config.MaxEncodedBytes, MaxTraces: config.MaxTraces,
-		LeaseDuration: config.LeaseDuration, BaseBackoff: config.BaseBackoff, MaxBackoff: config.MaxBackoff,
-		MaxDelay: config.MaxDelay, StagingObjects: stagingObjects,
-	})
-	if err != nil {
-		slog.Error("Agent Trace Outbox invalid", "error", err)
-		os.Exit(1)
-	}
-	sender, err := agentoutbox.NewSender(outboxStore, agentoutbox.SenderConfig{
-		Endpoint: config.CollectorEndpoint, ServiceToken: config.CollectorServiceToken,
-		ReportError: func(err error) {
-			slog.Error("Agent Trace Batch delivery failed; durable records retained for retry", "error", err)
-		},
-		HTTPClient: &http.Client{
-			Timeout:   config.HTTPTimeout,
-			Transport: otelhttp.NewTransport(http.DefaultTransport),
-		},
-	})
-	if err != nil {
-		slog.Error("Agent Trace Sender invalid", "error", err)
-		os.Exit(1)
-	}
+	workerService := agentworker.NewService(db.Pool(), jobs.NewQueueWithTraceSink(db.Pool(), traceExporter), controller, 5*time.Second, 210*time.Second)
 	workerDone := make(chan error, 1)
 	go func() {
 		err := workerService.Run(ctx)
 		workerDone <- err
 		if err != nil && ctx.Err() == nil {
 			slog.Error("agent worker failed", "error", err)
-			stop()
-		}
-	}()
-	senderDone := make(chan error, 1)
-	go func() {
-		err := sender.Run(ctx, config.PollInterval)
-		senderDone <- err
-		if err != nil && ctx.Err() == nil {
-			slog.Error("Agent Trace Sender failed", "error", err)
 			stop()
 		}
 	}()
@@ -212,16 +196,6 @@ func main() {
 		os.Exit(1)
 	}
 	select {
-	case err := <-senderDone:
-		if err != nil {
-			slog.Error("Agent Trace Sender shutdown failed", "error", err)
-			os.Exit(1)
-		}
-	case <-shutdownCtx.Done():
-		slog.Error("Agent Trace Sender did not stop before shutdown", "error", shutdownCtx.Err())
-		os.Exit(1)
-	}
-	select {
 	case err := <-stagingMaintenanceDone:
 		if err != nil {
 			slog.Error("Replay staging maintenance shutdown failed", "error", err)
@@ -231,14 +205,20 @@ func main() {
 		slog.Error("Replay staging maintenance did not stop before shutdown", "error", shutdownCtx.Err())
 		os.Exit(1)
 	}
-	if err := flushOutboxOnShutdown(shutdownCtx, sender); err != nil {
-		slog.Warn("Agent Trace Outbox flush incomplete; durable records remain for the next Sender", "error", err)
+	if err := shutdownTraceExporter(shutdownCtx, traceExporter); err != nil {
+		slog.Warn("Agent Trace memory flush incomplete; bounded unsent records were dropped on process exit", "error", err)
 	}
 	slog.Info("worker stopped")
 }
 
-func flushOutboxOnShutdown(ctx context.Context, flusher outboxFlusher) error {
-	return flusher.ForceFlush(ctx)
+func shutdownTraceExporter(ctx context.Context, exporter interface {
+	traceFlusher
+	Shutdown(context.Context) error
+}) error {
+	if err := exporter.ForceFlush(ctx); err != nil {
+		return err
+	}
+	return exporter.Shutdown(ctx)
 }
 
 func loadWorkerConfig() (workerConfig, error) {
@@ -290,7 +270,7 @@ func loadWorkerConfig() (workerConfig, error) {
 	config := workerConfig{
 		DatabaseURL:           env("NANO_DATABASE_URL", "postgres://nano:nano@localhost:55432/nano?sslmode=disable"),
 		Addr:                  env("NANO_WORKER_ADDR", ":8081"),
-		CollectorEndpoint:     collectorURL + "/internal/agent-observability/v1/batches",
+		CollectorEndpoint:     collectorURL + "/internal/agent-observability/v2/batches",
 		CollectorServiceToken: env("NANO_COLLECTOR_SERVICE_TOKEN", "nano-local-collector-token"),
 		ProducerID:            env("NANO_COLLECTOR_PRODUCER_ID", "nano-worker"),
 		MaxRecords:            maxRecords, MaxEncodedBytes: maxEncodedBytes, MaxTraces: maxTraces,

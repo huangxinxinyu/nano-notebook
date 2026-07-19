@@ -84,6 +84,34 @@ func TestHTTPHandlerIngestsAuthorizedBatchAndReturnsChunkACK(t *testing.T) {
 	}
 }
 
+func TestHTTPHandlerIngestsDirectProtocolOnV2Route(t *testing.T) {
+	store := collector.NewMemoryStore()
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerIDPrefix: "nano-", Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := collector.NewHTTPHandler(collector.HTTPConfig{
+		Ingestor: ingestor, ServiceToken: "collector-secret", MaxBodyBytes: 1024 * 1024,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := directCollectorBatch(t)
+	batch.ProducerID = "nano-control-plane/process-a"
+	body, err := json.Marshal(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/internal/agent-observability/v2/batches", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer collector-secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
 func TestHTTPHandlerIngestsBoundedGzipBatch(t *testing.T) {
 	store := collector.NewMemoryStore()
 	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})

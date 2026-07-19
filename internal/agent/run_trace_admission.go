@@ -24,7 +24,8 @@ func StartRunTraceInTx(ctx context.Context, tx pgx.Tx, runID, model, promptVersi
 		return err
 	}
 	rootContext, _, err := tracer.StartTrace(ctx, agentobs.TraceStart{
-		Name: TraceSpanAgentExecution,
+		IdentityKey: "run/" + runID + "/root/start",
+		Name:        TraceSpanAgentExecution,
 		Attributes: []agentobs.Attribute{
 			agentobs.String(TraceKeyRunID, runID),
 			agentobs.String(TraceKeyRunModel, model),
