@@ -17,7 +17,9 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentbatch"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/otelbridge"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentoutbox"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
+	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
@@ -50,6 +52,18 @@ type workerConfig struct {
 
 type traceFlusher interface {
 	ForceFlush(context.Context) error
+}
+
+type purgeOnlyStore struct {
+	*agentoutbox.PostgresStore
+}
+
+func (purgeOnlyStore) ClaimBatch(context.Context) (agentoutbox.ClaimedBatch, bool, error) {
+	return agentoutbox.ClaimedBatch{}, false, nil
+}
+
+func (purgeOnlyStore) ApplyResult(context.Context, agentoutbox.ClaimedBatch, collector.BatchResult) error {
+	return errors.New("purge-only Store cannot apply a Trace Batch result")
 }
 
 func main() {
@@ -127,6 +141,29 @@ func main() {
 		slog.Error("Agent Trace memory exporter invalid", "error", err)
 		os.Exit(1)
 	}
+	purgePostgres, err := agentoutbox.NewPostgresStore(db.Pool(), agentoutbox.Config{
+		ProducerID: config.ProducerID, MaxRecords: 1, MaxEncodedBytes: 1024,
+		MaxTraces: 1, LeaseDuration: config.LeaseDuration,
+		BaseBackoff: config.BaseBackoff, MaxBackoff: config.MaxBackoff,
+		MaxDelay: config.MaxDelay, StagingObjects: stagingObjects,
+	})
+	if err != nil {
+		slog.Error("Agent Trace purge Store invalid", "error", err)
+		os.Exit(1)
+	}
+	purgeSender, err := agentoutbox.NewSender(purgeOnlyStore{PostgresStore: purgePostgres}, agentoutbox.SenderConfig{
+		Endpoint:      config.CollectorEndpoint,
+		PurgeEndpoint: strings.TrimSuffix(config.CollectorEndpoint, "/v2/batches") + "/v1/purges",
+		ServiceToken:  config.CollectorServiceToken,
+		HTTPClient:    &http.Client{Timeout: config.HTTPTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
+		ReportError: func(err error) {
+			slog.Error("Agent Trace purge delivery failed; durable command retained", "error", err)
+		},
+	})
+	if err != nil {
+		slog.Error("Agent Trace purge Sender invalid", "error", err)
+		os.Exit(1)
+	}
 	runtime := agent.NewPostgresRuntime(db.Pool(), agent.BareSystemPrompt, nil,
 		agent.WithTraceSink(traceExporter), agent.WithBestEffortTraceExporter(traceBridge), agent.WithReplayStager(replayStager))
 	registry, err := agent.NewActionRegistry(agent.NewCalculateAction(), agent.NewCurrentTimeAction(nil))
@@ -145,6 +182,8 @@ func main() {
 			stop()
 		}
 	}()
+	purgeDone := make(chan error, 1)
+	go func() { purgeDone <- purgeSender.Run(ctx, time.Second) }()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", func(w http.ResponseWriter, r *http.Request) {
@@ -185,6 +224,19 @@ func main() {
 	case <-shutdownCtx.Done():
 		slog.Error("agent worker did not release its lease before shutdown", "error", shutdownCtx.Err())
 		os.Exit(1)
+	}
+	select {
+	case err := <-purgeDone:
+		if err != nil {
+			slog.Error("Agent Trace purge Sender shutdown failed", "error", err)
+			os.Exit(1)
+		}
+	case <-shutdownCtx.Done():
+		slog.Error("Agent Trace purge Sender did not stop before shutdown", "error", shutdownCtx.Err())
+		os.Exit(1)
+	}
+	if err := purgeSender.ForceFlush(shutdownCtx); err != nil {
+		slog.Warn("Agent Trace purge flush incomplete; durable command remains for restart", "error", err)
 	}
 	if err := shutdownTraceExporter(shutdownCtx, traceExporter); err != nil {
 		slog.Warn("Agent Trace memory flush incomplete; bounded unsent records were dropped on process exit", "error", err)

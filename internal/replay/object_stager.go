@@ -2,6 +2,8 @@ package replay
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 )
 
@@ -70,7 +73,8 @@ func (s *ObjectStager) Stage(ctx context.Context, request StageRequest) (StagedA
 		}
 		return cloneStagedAttachment(existing), nil
 	}
-	manifestKey := s.objectPrefix + "/manifests/" + attachmentID + ".json"
+	tracePrefix := StagingTracePrefix(s.objectPrefix, request.TraceID)
+	manifestKey := tracePrefix + "/manifests/" + attachmentID + ".json"
 	encodedManifest, err := s.objects.Get(ctx, manifestKey, maxReplayManifestBytes)
 	if err == nil {
 		var manifest objectStagerManifest
@@ -93,7 +97,7 @@ func (s *ObjectStager) Stage(ctx context.Context, request StageRequest) (StagedA
 	if err != nil {
 		return StagedAttachment{}, err
 	}
-	objectKey := s.objectPrefix + "/objects/" + attachmentID
+	objectKey := tracePrefix + "/objects/" + attachmentID
 	if err := s.objects.Put(ctx, objectKey, sealed.Ciphertext); err != nil {
 		return StagedAttachment{}, fmt.Errorf("stage Replay object: %w", err)
 	}
@@ -115,6 +119,15 @@ func (s *ObjectStager) Stage(ctx context.Context, request StageRequest) (StagedA
 	}
 	s.attachments[attachmentID] = cloneStagedAttachment(staged)
 	return cloneStagedAttachment(staged), nil
+}
+
+func StagingTracePrefix(objectPrefix string, traceID agentobs.TraceID) string {
+	objectPrefix = strings.Trim(strings.TrimSpace(objectPrefix), "/")
+	if objectPrefix == "" {
+		objectPrefix = "agent-replay-staging"
+	}
+	digest := sha256.Sum256([]byte(traceID))
+	return objectPrefix + "/traces/" + hex.EncodeToString(digest[:])
 }
 
 func (s *ObjectStager) StagedAttachment(attachmentID string) (StagedAttachment, bool) {

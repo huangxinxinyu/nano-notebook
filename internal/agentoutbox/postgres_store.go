@@ -18,16 +18,17 @@ import (
 )
 
 type Config struct {
-	ProducerID      string
-	MaxRecords      int
-	MaxEncodedBytes int
-	MaxTraces       int
-	LeaseDuration   time.Duration
-	MaxDelay        time.Duration
-	BaseBackoff     time.Duration
-	MaxBackoff      time.Duration
-	RetryJitter     func() float64
-	StagingObjects  objectstore.Store
+	ProducerID          string
+	MaxRecords          int
+	MaxEncodedBytes     int
+	MaxTraces           int
+	LeaseDuration       time.Duration
+	MaxDelay            time.Duration
+	BaseBackoff         time.Duration
+	MaxBackoff          time.Duration
+	RetryJitter         func() float64
+	StagingObjects      objectstore.Store
+	StagingObjectPrefix string
 }
 
 func (c Config) withDefaults() Config {
@@ -39,6 +40,10 @@ func (c Config) withDefaults() Config {
 	}
 	if c.RetryJitter == nil {
 		c.RetryJitter = rand.Float64
+	}
+	c.StagingObjectPrefix = strings.Trim(strings.TrimSpace(c.StagingObjectPrefix), "/")
+	if c.StagingObjectPrefix == "" {
+		c.StagingObjectPrefix = "agent-replay-staging"
 	}
 	return c
 }

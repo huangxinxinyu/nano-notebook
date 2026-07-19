@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
+	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -136,6 +137,11 @@ func (s *PostgresStore) ApplyPurgeResult(ctx context.Context, claimed ClaimedPur
 		if err != nil {
 			return err
 		}
+		traceKeys, err := s.traceStagingObjectKeys(ctx, command.TraceID)
+		if err != nil {
+			return err
+		}
+		keys = append(keys, traceKeys...)
 		if len(keys) > 0 && s.stagingObjects == nil {
 			return errors.New("Outbox Replay staging object Store is unavailable")
 		}
@@ -190,6 +196,28 @@ func (s *PostgresStore) ApplyPurgeResult(ctx context.Context, claimed ClaimedPur
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+func (s *PostgresStore) traceStagingObjectKeys(ctx context.Context, traceID agentobs.TraceID) ([]string, error) {
+	if s.stagingObjects == nil {
+		return nil, nil
+	}
+	prefix := replay.StagingTracePrefix(s.config.StagingObjectPrefix, traceID) + "/"
+	var keys []string
+	after := ""
+	for {
+		objects, err := s.stagingObjects.List(ctx, prefix, after, 256)
+		if err != nil {
+			return nil, fmt.Errorf("list purged Replay staging objects: %w", err)
+		}
+		for _, object := range objects {
+			keys = append(keys, object.Key)
+			after = object.Key
+		}
+		if len(objects) < 256 {
+			return keys, nil
+		}
+	}
 }
 
 func (s *PostgresStore) ReleasePurgeBatch(ctx context.Context, claimed ClaimedPurgeBatch, code string) error {

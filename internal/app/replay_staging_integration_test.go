@@ -304,6 +304,10 @@ func TestParentDeletionAtomicallyPrioritizesPurgeAndCleansProducerReplayAfterACK
 	}); err != nil {
 		t.Fatal(err)
 	}
+	directObjectKey := replay.StagingTracePrefix("", trace.TraceID) + "/objects/direct-fixture"
+	if err := objects.Put(ctx, directObjectKey, []byte("direct Replay ciphertext")); err != nil {
+		t.Fatal(err)
+	}
 	var notebookID string
 	if err := api.db.Pool().QueryRow(ctx, `select notebook_id from agent_trace_refs where trace_id = $1`, trace.TraceID).Scan(&notebookID); err != nil {
 		t.Fatal(err)
@@ -321,7 +325,7 @@ func TestParentDeletionAtomicallyPrioritizesPurgeAndCleansProducerReplayAfterACK
 		t.Fatal(err)
 	}
 	_ = api.db.Pool().QueryRow(ctx, `select count(*) from agentobs_outbox_command_objects`).Scan(&cleanupObjects)
-	if refs != 0 || staging != 0 || commands != 1 || cleanupObjects != 1 || deliveryState != "ready" || objects.Len() != 1 {
+	if refs != 0 || staging != 0 || commands != 1 || cleanupObjects != 1 || deliveryState != "ready" || objects.Len() != 2 {
 		t.Fatalf("post-delete refs=%d staging=%d commands=%d cleanup=%d state=%s objects=%d", refs, staging, commands, cleanupObjects, deliveryState, objects.Len())
 	}
 	outbox, err := agentoutbox.NewPostgresStore(api.db.Pool(), agentoutbox.Config{
