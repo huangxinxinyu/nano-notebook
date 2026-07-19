@@ -287,6 +287,22 @@ go run ./cmd/collector-rebuild all
 
 The `all` command only enqueues work. Keep the Collector running and wait for `obs_projection_queue` to drain. Rebuild replaces disposable summaries, Spans, Events, and Links from immutable raw records; it never changes Agent execution or Replay ciphertext.
 
+## Fault-Injection Evidence
+
+The PRD Section 25.4 crash boundaries map to deterministic tests rather than to a broad package pass:
+
+| Boundary | Authoritative evidence |
+|---|---|
+| Before/after producer Attachment object write | `TestReplayStagerObjectWriteFailureLeavesNoMetadata`, `TestReplayStagerCapacityFailureDeletesUnreferencedObject`, and `TestReplayStagingMaintenanceRemovesExpiredUnattachedAndOldOrphanObjects` |
+| Before/after producer Attachment metadata commit | `TestReplayStagerCapacityFailureDeletesUnreferencedObject`, `TestReplayStagerPersistsOnlyEncryptedObjectMetadataAndReconcilesIdentity`, and `TestTraceRecordAtomicallyBindsAnExistingStagedReplayAttachment` |
+| Before/after Collector raw record and Attachment metadata commit | `TestPostgresStoreTreatsMissingReplayStagingObjectAsRetryableDependency`, `TestPostgresStorePersistsCommittedTraceAcrossConnections`, and `TestPostgresStoreTakesOpaqueReplayCustodyBeforeACKAndReconcilesWithoutStaging` |
+| Collector commit after response loss and before local cursor advance | `TestSenderTurnsTimeoutAndLostACKIntoRetryableTraceResults` and `TestAdmissionAtomicallyStartsDurableTraceAndReplayDoesNotDuplicate`; the latter commits to an idempotent Collector, loses the local lease/cursor update, reclaims with a new lease, resends the same identities, and only then advances the cursor |
+| During projection update | `TestProjectorFailureLeavesRawCursorAndDiagnostic` followed by `TestProjectorPersistsDeterministicViewsAndAdvancesWatermark` rebuild evidence |
+| During Replay expiry | `TestReplayMaintenanceRecoversWhenExpiryStopsAfterObjectDeletion` injects process loss after object deletion but before the metadata state transition, then proves an idempotent retry |
+| During parent purge | `TestReplayMaintenanceRecoversWhenPurgeStopsAfterObjectDeletion` injects process loss before the durable purge-stage transition, then proves lease release, object-stage retry, and content removal behind the tombstone |
+
+Together these tests prove that acknowledged raw identities are not duplicated, missing Replay custody cannot be acknowledged, unreferenced objects are removed after the bounded orphan grace period, projections rebuild from raw authority, and tombstones prevent resurrection.
+
 ## Recovery Rules
 
 - Collector/network unavailable before ACK: leave the Outbox intact. Restoring connectivity is sufficient; resend is idempotent.

@@ -83,8 +83,21 @@ func TestAdmissionAtomicallyStartsDurableTraceAndReplayDoesNotDuplicate(t *testi
 			t.Fatalf("claimed record %d = %#v", index, envelope)
 		}
 	}
+	collectorStore := collector.NewMemoryStore()
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{
+		ProducerID: "nano-worker", Store: collectorStore,
+	})
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+	committedBeforeCursor, err := ingestor.Ingest(ctx, claimed.Batch)
+	if err != nil || len(committedBeforeCursor.Chunks) != 1 ||
+		committedBeforeCursor.Chunks[0].Status != collector.ChunkCommitted ||
+		committedBeforeCursor.Chunks[0].CommittedThrough != 2 {
+		t.Fatalf("Collector commit before local cursor = %#v err=%v", committedBeforeCursor, err)
+	}
 	secondStore, err := agentoutbox.NewPostgresStore(api.db.Pool(), agentoutbox.Config{
-		ProducerID: "nano-worker-2", MaxRecords: 128, MaxEncodedBytes: 512 * 1024,
+		ProducerID: "nano-worker", MaxRecords: 128, MaxEncodedBytes: 512 * 1024,
 		MaxTraces: 16, LeaseDuration: 30 * time.Second,
 	})
 	if err != nil {
@@ -103,7 +116,7 @@ func TestAdmissionAtomicallyStartsDurableTraceAndReplayDoesNotDuplicate(t *testi
 	if err != nil || !reclaimedOK {
 		t.Fatalf("reclaimed ClaimBatch = %#v ok=%t err=%v", reclaimed, reclaimedOK, err)
 	}
-	if reclaimed.LeaseToken == claimed.LeaseToken || reclaimed.Batch.ProducerID != "nano-worker-2" || len(reclaimed.Batch.Chunks) != 1 || len(reclaimed.Batch.Chunks[0].Records) != 2 {
+	if reclaimed.LeaseToken == claimed.LeaseToken || reclaimed.Batch.ProducerID != "nano-worker" || len(reclaimed.Batch.Chunks) != 1 || len(reclaimed.Batch.Chunks[0].Records) != 2 {
 		t.Fatalf("reclaimed Batch = %#v", reclaimed)
 	}
 	var senderAttemptCount int
@@ -115,12 +128,13 @@ func TestAdmissionAtomicallyStartsDurableTraceAndReplayDoesNotDuplicate(t *testi
 	if senderAttemptCount != 2 {
 		t.Fatalf("sender attempt count = %d, want 2", senderAttemptCount)
 	}
-	if err := secondStore.ApplyResult(ctx, reclaimed, collector.BatchResult{
-		BatchID: reclaimed.Batch.BatchID,
-		Chunks: []collector.ChunkResult{{
-			TraceID: trace.TraceID, Status: collector.ChunkCommitted, CommittedThrough: 2,
-		}},
-	}); err != nil {
+	reconciledAfterRestart, err := ingestor.Ingest(ctx, reclaimed.Batch)
+	if err != nil || len(reconciledAfterRestart.Chunks) != 1 ||
+		reconciledAfterRestart.Chunks[0].Status != collector.ChunkCommitted ||
+		reconciledAfterRestart.Chunks[0].CommittedThrough != 2 {
+		t.Fatalf("Collector reconciliation after sender restart = %#v err=%v", reconciledAfterRestart, err)
+	}
+	if err := secondStore.ApplyResult(ctx, reclaimed, reconciledAfterRestart); err != nil {
 		t.Fatalf("ApplyResult: %v", err)
 	}
 	var acknowledgedCursor, retainedRecords int

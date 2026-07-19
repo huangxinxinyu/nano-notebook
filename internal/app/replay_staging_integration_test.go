@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,6 +172,39 @@ func TestReplayStagerPersistsOnlyEncryptedObjectMetadataAndReconcilesIdentity(t 
 	})
 	if !errors.Is(err, replay.ErrIdentityConflict) || objects.Len() != 1 {
 		t.Fatalf("conflicting Stage error=%v objects=%d", err, objects.Len())
+	}
+}
+
+func TestReplayStagerObjectWriteFailureLeavesNoMetadata(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "replay-staging-object-failure@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c449")
+	trace, err := agent.LoadDurableTraceByRun(context.Background(), api.db.Pool(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, _ := replay.NewDevelopmentKeyProvider("dev-key-v1", bytes.Repeat([]byte{0x29}, 32))
+	sealer, _ := replay.NewSealer(keys)
+	objects := &putFailingObjectStore{Store: objectstore.NewMemoryStore()}
+	stager, err := replay.NewPostgresStager(api.db.Pool(), sealer, objects, replay.StagerConfig{ObjectPrefix: "producer-staging"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, _ := replay.NewPlainPayload(replay.ClassModelRequest, 1, []byte(`{"schema_version":1,"class":"model_request","messages":[]}`))
+	_, err = stager.Stage(context.Background(), replay.StageRequest{
+		TraceID: trace.TraceID, IdentityKey: "attempt:1/model:1/write-failure", Payload: payload,
+	})
+	if err == nil || !strings.Contains(err.Error(), "stage Replay object") {
+		t.Fatalf("Stage error = %v, want object-write failure", err)
+	}
+	var metadata, capacity int
+	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from agentobs_replay_staging where trace_id = $1`, trace.TraceID).Scan(&metadata); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(context.Background(), `select current_staged_ciphertext_bytes from agentobs_outbox_capacity where singleton`).Scan(&capacity); err != nil {
+		t.Fatal(err)
+	}
+	if metadata != 0 || capacity != 0 {
+		t.Fatalf("failed object write left metadata=%d capacity=%d", metadata, capacity)
 	}
 }
 
@@ -405,4 +439,12 @@ func TestTraceRecordAtomicallyBindsAnExistingStagedReplayAttachment(t *testing.T
 	if len(loaded.Records) != 3 {
 		t.Fatalf("missing Attachment advanced Trace to %d records", len(loaded.Records))
 	}
+}
+
+type putFailingObjectStore struct {
+	objectstore.Store
+}
+
+func (*putFailingObjectStore) Put(context.Context, string, []byte) error {
+	return errors.New("injected object write failure")
 }
