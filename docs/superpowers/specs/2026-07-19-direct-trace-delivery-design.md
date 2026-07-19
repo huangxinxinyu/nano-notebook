@@ -232,8 +232,8 @@ Cutover is one-way and has no indefinite dual write:
 8. resume admission and verify product PG writes no longer scale with Trace
    record count.
 
-Legacy migration utilities may remain for restoration of pre-cutover backups,
-but normal runtime code cannot read or write the retired tables.
+Restoring a pre-cutover backup requires the previous release in an isolated
+environment. Current runtime code cannot read or write the retired tables.
 
 ## 9. Error Handling And Diagnostics
 

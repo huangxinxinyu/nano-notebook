@@ -36,19 +36,19 @@ func (r *AdmissionTraceRecorder) Record(ctx context.Context, record agentobs.Rec
 		return err
 	}
 	if r.sequence == 0 {
-		if scope, direct := TraceScopeFromContext(ctx); direct {
-			descriptor, err := createTraceAnchorInTx(ctx, r.tx, r.runID, record)
-			if err != nil {
-				return err
-			}
-			r.direct, err = scope.Transaction(descriptor)
-			if err != nil {
-				return err
-			}
-			if err := r.direct.Record(ctx, record); err != nil {
-				return err
-			}
-		} else if err := CreateTraceInTx(ctx, r.tx, r.runID, record); err != nil {
+		scope, direct := TraceScopeFromContext(ctx)
+		if !direct {
+			return errors.New("admission Trace Recorder requires direct Trace delivery scope")
+		}
+		descriptor, err := createTraceAnchorInTx(ctx, r.tx, r.runID, record)
+		if err != nil {
+			return err
+		}
+		r.direct, err = scope.Transaction(descriptor)
+		if err != nil {
+			return err
+		}
+		if err := r.direct.Record(ctx, record); err != nil {
 			return err
 		}
 		r.traceID = record.TraceID
@@ -60,11 +60,7 @@ func (r *AdmissionTraceRecorder) Record(ctx context.Context, record agentobs.Rec
 		return errors.New("admission Trace record changed its envelope")
 	}
 	nextSequence := r.sequence + 1
-	if r.direct != nil {
-		if err := r.direct.Record(ctx, record); err != nil {
-			return err
-		}
-	} else if err := insertTraceRecord(ctx, r.tx, nextSequence, record); err != nil {
+	if err := r.direct.Record(ctx, record); err != nil {
 		return err
 	}
 	r.sequence = nextSequence

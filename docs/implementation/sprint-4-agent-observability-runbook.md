@@ -42,13 +42,9 @@ Operational spans may be sampled or dropped. Do not use Jaeger or another OTLP b
 
 ## Internal Diagnosis
 
-Use the Agent loader in trusted server-side code or tests:
-
-```go
-trace, err := agent.LoadDurableTraceByRun(ctx, db, runID)
-```
-
-The loader validates contiguous sequence, canonical hashes, parentage, terminal uniqueness, and Link targets before returning a tree. Ordinary `nano_app` sessions cannot select Trace tables, and no REST/SSE response includes Trace details.
+This PostgreSQL loader was retired by Sprint 5. Use the Control Plane Admin API backed
+by Collector Query for Trace diagnosis; Application PostgreSQL contains only the stable
+Run-to-Trace identity anchor.
 
 Interpret an unclosed Model or Action Span literally: the system durably observed its start but not a terminal outcome. Do not repair it by fabricating an error. A later physical execution has a distinct Span; reclaim and repeated work use `continues` and `retries` Links.
 

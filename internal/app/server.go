@@ -62,11 +62,15 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) withTraceDelivery(next http.Handler) http.Handler {
-	if s == nil || s.cfg.TraceSink == nil {
+	if s == nil {
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		scope, err := agent.NewTraceScope(s.cfg.TraceSink)
+		sink := agent.TraceSink(agent.DiscardTraceSink{})
+		if s.cfg.TraceSink != nil {
+			sink = s.cfg.TraceSink
+		}
+		scope, err := agent.NewTraceScope(sink)
 		if err != nil {
 			next.ServeHTTP(w, r)
 			return

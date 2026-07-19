@@ -13,13 +13,13 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 	t.Setenv("NANO_COLLECTOR_URL", "http://collector.internal:8082/")
 	t.Setenv("NANO_COLLECTOR_SERVICE_TOKEN", "sender-secret")
 	t.Setenv("NANO_COLLECTOR_PRODUCER_ID", "worker-a")
-	t.Setenv("NANO_OUTBOX_MAX_RECORDS", "64")
-	t.Setenv("NANO_OUTBOX_MAX_ENCODED_BYTES", "262144")
-	t.Setenv("NANO_OUTBOX_MAX_TRACES", "8")
-	t.Setenv("NANO_OUTBOX_LEASE_DURATION", "20s")
-	t.Setenv("NANO_OUTBOX_POLL_INTERVAL", "125ms")
-	t.Setenv("NANO_OUTBOX_MAX_DELAY", "333ms")
-	t.Setenv("NANO_OUTBOX_HTTP_TIMEOUT", "7s")
+	t.Setenv("NANO_TRACE_BATCH_MAX_RECORDS", "64")
+	t.Setenv("NANO_TRACE_BATCH_MAX_ENCODED_BYTES", "262144")
+	t.Setenv("NANO_TRACE_BATCH_MAX_DELAY", "333ms")
+	t.Setenv("NANO_TRACE_HTTP_TIMEOUT", "7s")
+	t.Setenv("NANO_TRACE_PURGE_MAX_COMMANDS", "8")
+	t.Setenv("NANO_TRACE_PURGE_LEASE_DURATION", "20s")
+	t.Setenv("NANO_TRACE_PURGE_POLL_INTERVAL", "125ms")
 	t.Setenv("NANO_REPLAY_STAGING_S3_ENDPOINT", "staging.internal:9000")
 	t.Setenv("NANO_REPLAY_STAGING_S3_ACCESS_KEY_ID", "worker-staging-key")
 	t.Setenv("NANO_REPLAY_STAGING_S3_SECRET_ACCESS_KEY", "worker-staging-secret")
@@ -39,10 +39,10 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 	if config.CollectorEndpoint != "http://collector.internal:8082/internal/agent-observability/v2/batches" || config.CollectorServiceToken != "sender-secret" || config.ProducerID != "worker-a" {
 		t.Fatalf("Collector config = %#v", config)
 	}
-	if config.MaxRecords != 64 || config.MaxEncodedBytes != 262144 || config.MaxTraces != 8 {
+	if config.BatchMaxRecords != 64 || config.BatchMaxEncodedBytes != 262144 || config.PurgeMaxCommands != 8 {
 		t.Fatalf("batch bounds = %#v", config)
 	}
-	if config.LeaseDuration != 20*time.Second || config.PollInterval != 125*time.Millisecond || config.MaxDelay != 333*time.Millisecond || config.HTTPTimeout != 7*time.Second {
+	if config.PurgeLeaseDuration != 20*time.Second || config.PurgePollInterval != 125*time.Millisecond || config.BatchMaxDelay != 333*time.Millisecond || config.HTTPTimeout != 7*time.Second {
 		t.Fatalf("Sender timing = %#v", config)
 	}
 	if config.ReplayStagingS3.Endpoint != "staging.internal:9000" || config.ReplayStagingS3.AccessKeyID != "worker-staging-key" ||
@@ -53,7 +53,7 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 }
 
 func TestLoadWorkerConfigRejectsInvalidSenderBounds(t *testing.T) {
-	t.Setenv("NANO_OUTBOX_MAX_RECORDS", "0")
+	t.Setenv("NANO_TRACE_BATCH_MAX_RECORDS", "0")
 	if _, err := loadWorkerConfig(); err == nil {
 		t.Fatal("loadWorkerConfig accepted zero max records")
 	}

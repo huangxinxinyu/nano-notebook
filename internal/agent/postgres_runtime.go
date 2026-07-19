@@ -49,10 +49,11 @@ func WithTraceSink(sink TraceSink) RuntimeOption {
 }
 
 func (r *PostgresRuntime) beginTraceScope(ctx context.Context) (context.Context, *TraceScope, error) {
-	if r == nil || r.traceSink == nil {
-		return ctx, nil, nil
+	sink := TraceSink(DiscardTraceSink{})
+	if r != nil && r.traceSink != nil {
+		sink = r.traceSink
 	}
-	scope, err := NewTraceScope(r.traceSink)
+	scope, err := NewTraceScope(sink)
 	if err != nil {
 		return ctx, nil, err
 	}

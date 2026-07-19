@@ -19,6 +19,10 @@ type TraceSink interface {
 	Offer(context.Context, agentbatch.Envelope) error
 }
 
+type DiscardTraceSink struct{}
+
+func (DiscardTraceSink) Offer(context.Context, agentbatch.Envelope) error { return nil }
+
 type TracePublishResult struct {
 	Attempted int
 	Accepted  int

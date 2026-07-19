@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentbatch"
@@ -88,6 +87,9 @@ func (recorderExporter) ForceFlush(context.Context) error { return nil }
 func (recorderExporter) Shutdown(context.Context) error   { return nil }
 
 func (r *PostgresRuntime) PreviousActionSpan(ctx context.Context, attempt Attempt, logicalActionID string) (agentobs.SpanContext, bool, error) {
+	if attempt.AttemptNo <= 1 || logicalActionID == "" {
+		return agentobs.SpanContext{}, false, nil
+	}
 	tx, err := r.workerTx(ctx)
 	if err != nil {
 		return agentobs.SpanContext{}, false, err
@@ -96,26 +98,18 @@ func (r *PostgresRuntime) PreviousActionSpan(ctx context.Context, attempt Attemp
 	if err := lockCheckpointAuthority(ctx, tx, attempt); err != nil {
 		return agentobs.SpanContext{}, false, err
 	}
-	recorder, err := NewRunTraceRecorder(ctx, tx, attempt.RunID)
-	if err != nil {
+	var traceID agentobs.TraceID
+	if err := tx.QueryRow(ctx, `select trace_id from agent_trace_refs where run_id = $1`, attempt.RunID).Scan(&traceID); err != nil {
 		return agentobs.SpanContext{}, false, err
 	}
-	for priorAttempt := attempt.AttemptNo - 1; priorAttempt > 0; priorAttempt-- {
-		span, err := recorder.SpanContextByIdentity(ctx, TraceActionStartIdentity(attempt.RunID, priorAttempt, logicalActionID))
-		if err == nil {
-			if err := tx.Commit(ctx); err != nil {
-				return agentobs.SpanContext{}, false, err
-			}
-			return span, true, nil
-		}
-		if !errors.Is(err, ErrTraceNotFound) {
-			return agentobs.SpanContext{}, false, err
-		}
+	spanID, err := DeterministicSpanID(traceID, TraceActionStartIdentity(attempt.RunID, attempt.AttemptNo-1, logicalActionID))
+	if err != nil {
+		return agentobs.SpanContext{}, false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return agentobs.SpanContext{}, false, err
 	}
-	return agentobs.SpanContext{}, false, nil
+	return agentobs.SpanContext{TraceID: traceID, SpanID: spanID}, true, nil
 }
 
 func (r *AttemptTraceRecorder) Record(ctx context.Context, record agentobs.Record) error {
@@ -126,38 +120,18 @@ func (r *AttemptTraceRecorder) Record(ctx context.Context, record agentobs.Recor
 	if err := record.Validate(); err != nil {
 		return err
 	}
-	if r.runtime.traceSink != nil {
-		if record.TraceID != r.trace.TraceID || record.SchemaVersion != r.trace.SchemaVersion ||
-			record.SemanticConventionVersion != r.trace.SemanticConventionVersion {
-			return errors.New("Attempt Trace record changed its direct-delivery envelope")
-		}
-		attachments, err := directReplayAttachments(r.runtime.replayStager, record)
-		if err != nil {
-			return err
-		}
-		return r.runtime.traceSink.Offer(ctx, agentbatch.Envelope{Trace: r.trace, Record: record, Attachments: attachments})
+	if r.runtime.traceSink == nil {
+		return nil
 	}
-	var appendErr error
-	for try := 0; try < 2; try++ {
-		appendErr = r.recordOnce(ctx, record)
-		if appendErr == nil {
-			return nil
-		}
-		if errors.Is(appendErr, ErrLeaseLost) || errors.Is(appendErr, ErrRunDeadlineExceeded) || errors.Is(appendErr, agentobs.ErrIdentityConflict) || errors.Is(appendErr, agentobs.ErrLifecycle) || errors.Is(appendErr, agentobs.ErrLimitExceeded) || ctx.Err() != nil {
-			return appendErr
-		}
-		matched, current, reconcileErr := r.reconcile(ctx, record)
-		if reconcileErr != nil {
-			return errors.Join(appendErr, reconcileErr)
-		}
-		if matched {
-			return nil
-		}
-		if !current {
-			return ErrLeaseLost
-		}
+	if record.TraceID != r.trace.TraceID || record.SchemaVersion != r.trace.SchemaVersion ||
+		record.SemanticConventionVersion != r.trace.SemanticConventionVersion {
+		return errors.New("Attempt Trace record changed its direct-delivery envelope")
 	}
-	return fmt.Errorf("Attempt Trace append exhausted retries: %w", appendErr)
+	attachments, err := directReplayAttachments(r.runtime.replayStager, record)
+	if err != nil {
+		return err
+	}
+	return r.runtime.traceSink.Offer(ctx, agentbatch.Envelope{Trace: r.trace, Record: record, Attachments: attachments})
 }
 
 type stagedReplaySource interface {
@@ -195,56 +169,4 @@ func directReplayAttachments(stager ReplayStager, record agentobs.Record) ([]col
 func (r *AttemptTraceRecorder) SpanIDForIdentity(traceID agentobs.TraceID, identityKey string) agentobs.SpanID {
 	spanID, _ := DeterministicSpanID(traceID, identityKey)
 	return spanID
-}
-
-func (r *AttemptTraceRecorder) recordOnce(ctx context.Context, record agentobs.Record) error {
-	tx, err := r.runtime.workerTx(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-	if err := lockCheckpointAuthority(ctx, tx, r.attempt); err != nil {
-		return err
-	}
-	recorder, err := NewRunTraceRecorder(ctx, tx, r.attempt.RunID)
-	if err != nil {
-		return err
-	}
-	if err := recorder.Record(ctx, record); err != nil {
-		return err
-	}
-	return r.runtime.commit(ctx, tx)
-}
-
-func (r *AttemptTraceRecorder) reconcile(ctx context.Context, record agentobs.Record) (matched bool, current bool, resultErr error) {
-	tx, err := r.runtime.workerTx(ctx)
-	if err != nil {
-		return false, false, err
-	}
-	defer tx.Rollback(ctx)
-	var traceID agentobs.TraceID
-	var schemaVersion int
-	if err := tx.QueryRow(ctx, `select trace_id, schema_version from agent_trace_refs where run_id = $1`, r.attempt.RunID).Scan(&traceID, &schemaVersion); err != nil {
-		return false, false, err
-	}
-	if traceID != record.TraceID || schemaVersion != record.SchemaVersion {
-		return false, false, fmt.Errorf("%w: Attempt record changed Trace envelope", agentobs.ErrLifecycle)
-	}
-	existing, found, err := traceRecordByIdentity(ctx, tx, traceID, record.IdentityKey, schemaVersion)
-	if err != nil {
-		return false, false, err
-	}
-	if found {
-		if err := reconcileTraceRecord(existing, record); err != nil {
-			return false, false, err
-		}
-		return true, false, tx.Commit(ctx)
-	}
-	if err := lockCheckpointAuthority(ctx, tx, r.attempt); err != nil {
-		if errors.Is(err, ErrLeaseLost) || errors.Is(err, ErrRunDeadlineExceeded) {
-			return false, false, nil
-		}
-		return false, false, err
-	}
-	return false, true, tx.Commit(ctx)
 }

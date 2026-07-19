@@ -18,7 +18,7 @@ type ClaimedPurgeBatch struct {
 	Batch      collector.PurgeBatch
 }
 
-func (s *PostgresStore) ClaimPurgeBatch(ctx context.Context) (ClaimedPurgeBatch, bool, error) {
+func (s *PurgeStore) ClaimPurgeBatch(ctx context.Context) (ClaimedPurgeBatch, bool, error) {
 	if s == nil || s.pool == nil {
 		return ClaimedPurgeBatch{}, false, errors.New("nil Outbox PostgreSQL Store")
 	}
@@ -44,7 +44,7 @@ func (s *PostgresStore) ClaimPurgeBatch(ctx context.Context) (ClaimedPurgeBatch,
 		where delivery_state = 'ready' and next_attempt_at <= now()
 		order by next_attempt_at, created_at, command_id
 		for update skip locked limit $1
-	`, s.config.MaxTraces)
+	`, s.config.MaxCommands)
 	if err != nil {
 		return ClaimedPurgeBatch{}, false, err
 	}
@@ -52,7 +52,7 @@ func (s *PostgresStore) ClaimPurgeBatch(ctx context.Context) (ClaimedPurgeBatch,
 		command  collector.PurgeCommand
 		attempts int
 	}
-	commands := make([]claimedCommand, 0, s.config.MaxTraces)
+	commands := make([]claimedCommand, 0, s.config.MaxCommands)
 	for rows.Next() {
 		var item claimedCommand
 		if err := rows.Scan(
@@ -102,7 +102,7 @@ func (s *PostgresStore) ClaimPurgeBatch(ctx context.Context) (ClaimedPurgeBatch,
 	return ClaimedPurgeBatch{LeaseToken: leaseToken, Batch: batch}, true, nil
 }
 
-func (s *PostgresStore) ApplyPurgeResult(ctx context.Context, claimed ClaimedPurgeBatch, result collector.PurgeBatchResult) error {
+func (s *PurgeStore) ApplyPurgeResult(ctx context.Context, claimed ClaimedPurgeBatch, result collector.PurgeBatchResult) error {
 	if claimed.LeaseToken == "" || claimed.Batch.BatchID == "" || result.BatchID != claimed.Batch.BatchID || len(result.Commands) != len(claimed.Batch.Commands) {
 		return errors.New("Collector purge result does not match the claimed Batch")
 	}
@@ -198,7 +198,7 @@ func (s *PostgresStore) ApplyPurgeResult(ctx context.Context, claimed ClaimedPur
 	return tx.Commit(ctx)
 }
 
-func (s *PostgresStore) traceStagingObjectKeys(ctx context.Context, traceID agentobs.TraceID) ([]string, error) {
+func (s *PurgeStore) traceStagingObjectKeys(ctx context.Context, traceID agentobs.TraceID) ([]string, error) {
 	if s.stagingObjects == nil {
 		return nil, nil
 	}
@@ -220,7 +220,7 @@ func (s *PostgresStore) traceStagingObjectKeys(ctx context.Context, traceID agen
 	}
 }
 
-func (s *PostgresStore) ReleasePurgeBatch(ctx context.Context, claimed ClaimedPurgeBatch, code string) error {
+func (s *PurgeStore) ReleasePurgeBatch(ctx context.Context, claimed ClaimedPurgeBatch, code string) error {
 	if claimed.LeaseToken == "" || code == "" {
 		return errors.New("Outbox purge release identity is incomplete")
 	}
@@ -253,7 +253,7 @@ func (s *PostgresStore) ReleasePurgeBatch(ctx context.Context, claimed ClaimedPu
 	return tx.Commit(ctx)
 }
 
-func (s *PostgresStore) purgeObjectKeys(ctx context.Context, commandID string) ([]string, error) {
+func (s *PurgeStore) purgeObjectKeys(ctx context.Context, commandID string) ([]string, error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, err

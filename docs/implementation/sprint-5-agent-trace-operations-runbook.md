@@ -41,11 +41,11 @@ Browser -> Control Plane Admin API -> Collector Query API
   Response, Tool payload, ciphertext, or staging descriptor is written to Application
   PostgreSQL by the Sprint 5 runtime.
 
-The old `agentobs_outbox_records` and `agentobs_replay_staging` schema remains only for
-Sprint 4 migration/rollback compatibility in this release. Control Plane and Worker
-production wiring does not construct the legacy full-Trace sender or PostgreSQL Replay
-stager. Remove the compatibility schema only after historical migration verification
-and the rollback window close.
+The migration/rollback window is closed. Application migration physically drops
+`agentobs_outbox_records`, `agentobs_replay_staging`, the capacity ledger, and every
+full-Trace cursor/lease/retry/quarantine field. Reapplying migrations keeps them absent.
+The only durable observability transport state left in Application PostgreSQL is the
+low-volume purge-command queue.
 
 ## Local Physical Isolation
 
@@ -87,16 +87,17 @@ lag.
 - `NANO_COLLECTOR_PRODUCER_ID`: Worker producer identity.
 - `NANO_CONTROL_PLANE_PRODUCER_ID`: Control Plane producer identity.
 - `NANO_COLLECTOR_PRODUCER_ID_PREFIX`: Collector allow-list prefix for process producers.
-- `NANO_OUTBOX_MAX_RECORDS`: compatibility name for direct Batch record limit; default
-  128.
-- `NANO_OUTBOX_MAX_ENCODED_BYTES`: compatibility name for direct Batch byte limit;
-  default 512 KiB.
-- `NANO_OUTBOX_MAX_DELAY`: direct Batch maximum delay; default 250 ms.
-- `NANO_OUTBOX_HTTP_TIMEOUT`: Collector request timeout; default 10 seconds.
+- `NANO_TRACE_BATCH_MAX_RECORDS`: direct Batch record limit; default 128.
+- `NANO_TRACE_BATCH_MAX_ENCODED_BYTES`: direct Batch byte limit; default 512 KiB.
+- `NANO_TRACE_BATCH_MAX_DELAY`: direct Batch maximum delay; default 250 ms.
+- `NANO_TRACE_HTTP_TIMEOUT`: Collector request timeout; default 10 seconds.
+- `NANO_TRACE_PURGE_MAX_COMMANDS`: purge Batch command limit; default 16.
+- `NANO_TRACE_PURGE_LEASE_DURATION`: durable purge lease; default 30 seconds.
+- `NANO_TRACE_PURGE_POLL_INTERVAL`: purge polling interval; default 100 ms.
+- `NANO_TRACE_PURGE_BASE_BACKOFF`: purge retry base delay; default 1 second.
+- `NANO_TRACE_PURGE_MAX_BACKOFF`: purge retry ceiling; default 1 minute.
 
-The per-process pending bound is fixed at 10,000 records and 32 MiB in Sprint 5. The
-remaining `NANO_OUTBOX_*` lease/backoff settings configure only the low-volume durable
-purge sender and will be renamed when the migration compatibility layer is removed.
+The per-process pending bound is fixed at 10,000 records and 32 MiB in Sprint 5.
 
 Worker staging storage:
 
@@ -184,21 +185,13 @@ NANO_COLLECTOR_DATABASE_URL="$OBSERVABILITY_DATABASE_URL" \
 go run ./cmd/collector-rebuild all
 ```
 
-## Migration And Rollback
+## Retirement And Restore
 
-1. Back up Application PostgreSQL, Observability PostgreSQL, and both Replay buckets.
-2. Freeze new admission and drain active Sprint 4 Jobs.
-3. Migrate historical Sprint 4 records to Collector with the existing maintenance
-   path.
-4. Run `cmd/trace-migration-verify` against independent repeatable-read snapshots.
-5. Deploy Collector, then direct-delivery Worker and Control Plane.
-6. Verify one product journey and Dashboard Tree, Timeline, Inspector, Replay, and
-   token/cost/latency analysis.
-7. Re-enable admission.
-
-Do not point the new runtime back at the legacy Outbox as an outage workaround. Rollback
-means deploying the previous complete release while its compatibility schema and backup
-remain available.
+Deploy the migration only after backups are verified: it irreversibly drops the retired
+full-Trace Outbox and PostgreSQL Replay staging metadata. Do not point the runtime back
+at those relations during a Collector outage. Restoring a pre-cutover backup requires
+the previous release's migration tooling in an isolated environment, then normal
+Collector ingestion before the current release is started.
 
 ## Verification Gates
 

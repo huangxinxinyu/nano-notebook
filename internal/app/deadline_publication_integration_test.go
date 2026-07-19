@@ -64,13 +64,20 @@ func expireRunInTransaction(t *testing.T, api *testAPI, runID string) int {
 		t.Fatal(err)
 	}
 	defer tx.Rollback(ctx)
-	expired, err := agent.NewStore(tx).ExpireIfOverdue(ctx, "", runID)
+	scope, err := agent.NewTraceScope(agent.DiscardTraceSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer scope.Rollback()
+	traceCtx := agent.ContextWithTraceScope(ctx, scope)
+	expired, err := agent.NewStore(tx).ExpireIfOverdue(traceCtx, "", runID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatal(err)
 	}
+	_ = scope.PublishAfterCommit(traceCtx)
 	return expired
 }
 

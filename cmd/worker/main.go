@@ -19,7 +19,6 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/otelbridge"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentoutbox"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
-	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
@@ -36,15 +35,15 @@ type workerConfig struct {
 	CollectorEndpoint     string
 	CollectorServiceToken string
 	ProducerID            string
-	MaxRecords            int
-	MaxEncodedBytes       int
-	MaxTraces             int
-	LeaseDuration         time.Duration
-	PollInterval          time.Duration
-	MaxDelay              time.Duration
+	BatchMaxRecords       int
+	BatchMaxEncodedBytes  int
+	BatchMaxDelay         time.Duration
 	HTTPTimeout           time.Duration
-	BaseBackoff           time.Duration
-	MaxBackoff            time.Duration
+	PurgeMaxCommands      int
+	PurgeLeaseDuration    time.Duration
+	PurgePollInterval     time.Duration
+	PurgeBaseBackoff      time.Duration
+	PurgeMaxBackoff       time.Duration
 	ReplayStagingS3       objectstore.S3Config
 	ReplayKeyID           string
 	ReplayKEK             []byte
@@ -52,18 +51,6 @@ type workerConfig struct {
 
 type traceFlusher interface {
 	ForceFlush(context.Context) error
-}
-
-type purgeOnlyStore struct {
-	*agentoutbox.PostgresStore
-}
-
-func (purgeOnlyStore) ClaimBatch(context.Context) (agentoutbox.ClaimedBatch, bool, error) {
-	return agentoutbox.ClaimedBatch{}, false, nil
-}
-
-func (purgeOnlyStore) ApplyResult(context.Context, agentoutbox.ClaimedBatch, collector.BatchResult) error {
-	return errors.New("purge-only Store cannot apply a Trace Batch result")
 }
 
 func main() {
@@ -135,24 +122,23 @@ func main() {
 	traceExporter, err := agentbatch.NewExporter(agentbatch.Config{
 		ProducerID: config.ProducerID, Sender: batchHTTP,
 		MaxPendingRecords: 10_000, MaxPendingBytes: 32 * 1024 * 1024,
-		MaxBatchRecords: config.MaxRecords, MaxBatchBytes: config.MaxEncodedBytes, MaxDelay: config.MaxDelay,
+		MaxBatchRecords: config.BatchMaxRecords, MaxBatchBytes: config.BatchMaxEncodedBytes, MaxDelay: config.BatchMaxDelay,
 	})
 	if err != nil {
 		slog.Error("Agent Trace memory exporter invalid", "error", err)
 		os.Exit(1)
 	}
-	purgePostgres, err := agentoutbox.NewPostgresStore(db.Pool(), agentoutbox.Config{
-		ProducerID: config.ProducerID, MaxRecords: 1, MaxEncodedBytes: 1024,
-		MaxTraces: 1, LeaseDuration: config.LeaseDuration,
-		BaseBackoff: config.BaseBackoff, MaxBackoff: config.MaxBackoff,
-		MaxDelay: config.MaxDelay, StagingObjects: stagingObjects,
+	purgePostgres, err := agentoutbox.NewPurgeStore(db.Pool(), agentoutbox.PurgeStoreConfig{
+		ProducerID: config.ProducerID, MaxCommands: config.PurgeMaxCommands,
+		LeaseDuration: config.PurgeLeaseDuration,
+		BaseBackoff:   config.PurgeBaseBackoff, MaxBackoff: config.PurgeMaxBackoff,
+		StagingObjects: stagingObjects,
 	})
 	if err != nil {
 		slog.Error("Agent Trace purge Store invalid", "error", err)
 		os.Exit(1)
 	}
-	purgeSender, err := agentoutbox.NewSender(purgeOnlyStore{PostgresStore: purgePostgres}, agentoutbox.SenderConfig{
-		Endpoint:      config.CollectorEndpoint,
+	purgeSender, err := agentoutbox.NewPurgeSender(purgePostgres, agentoutbox.SenderConfig{
 		PurgeEndpoint: strings.TrimSuffix(config.CollectorEndpoint, "/v2/batches") + "/v1/purges",
 		ServiceToken:  config.CollectorServiceToken,
 		HTTPClient:    &http.Client{Timeout: config.HTTPTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
@@ -183,7 +169,7 @@ func main() {
 		}
 	}()
 	purgeDone := make(chan error, 1)
-	go func() { purgeDone <- purgeSender.Run(ctx, time.Second) }()
+	go func() { purgeDone <- purgeSender.Run(ctx, config.PurgePollInterval) }()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", func(w http.ResponseWriter, r *http.Request) {
@@ -255,39 +241,39 @@ func shutdownTraceExporter(ctx context.Context, exporter interface {
 }
 
 func loadWorkerConfig() (workerConfig, error) {
-	maxRecords, err := workerEnvInt("NANO_OUTBOX_MAX_RECORDS", 128)
+	maxRecords, err := workerEnvInt("NANO_TRACE_BATCH_MAX_RECORDS", 128)
 	if err != nil {
 		return workerConfig{}, err
 	}
-	maxEncodedBytes, err := workerEnvInt("NANO_OUTBOX_MAX_ENCODED_BYTES", 512*1024)
+	maxEncodedBytes, err := workerEnvInt("NANO_TRACE_BATCH_MAX_ENCODED_BYTES", 512*1024)
 	if err != nil {
 		return workerConfig{}, err
 	}
-	maxTraces, err := workerEnvInt("NANO_OUTBOX_MAX_TRACES", 16)
+	purgeMaxCommands, err := workerEnvInt("NANO_TRACE_PURGE_MAX_COMMANDS", 16)
 	if err != nil {
 		return workerConfig{}, err
 	}
-	leaseDuration, err := workerEnvDuration("NANO_OUTBOX_LEASE_DURATION", 30*time.Second)
+	purgeLeaseDuration, err := workerEnvDuration("NANO_TRACE_PURGE_LEASE_DURATION", 30*time.Second)
 	if err != nil {
 		return workerConfig{}, err
 	}
-	pollInterval, err := workerEnvDuration("NANO_OUTBOX_POLL_INTERVAL", 100*time.Millisecond)
+	purgePollInterval, err := workerEnvDuration("NANO_TRACE_PURGE_POLL_INTERVAL", 100*time.Millisecond)
 	if err != nil {
 		return workerConfig{}, err
 	}
-	maxDelay, err := workerEnvDuration("NANO_OUTBOX_MAX_DELAY", 250*time.Millisecond)
+	maxDelay, err := workerEnvDuration("NANO_TRACE_BATCH_MAX_DELAY", 250*time.Millisecond)
 	if err != nil {
 		return workerConfig{}, err
 	}
-	httpTimeout, err := workerEnvDuration("NANO_OUTBOX_HTTP_TIMEOUT", 10*time.Second)
+	httpTimeout, err := workerEnvDuration("NANO_TRACE_HTTP_TIMEOUT", 10*time.Second)
 	if err != nil {
 		return workerConfig{}, err
 	}
-	baseBackoff, err := workerEnvDuration("NANO_OUTBOX_BASE_BACKOFF", time.Second)
+	purgeBaseBackoff, err := workerEnvDuration("NANO_TRACE_PURGE_BASE_BACKOFF", time.Second)
 	if err != nil {
 		return workerConfig{}, err
 	}
-	maxBackoff, err := workerEnvDuration("NANO_OUTBOX_MAX_BACKOFF", time.Minute)
+	purgeMaxBackoff, err := workerEnvDuration("NANO_TRACE_PURGE_MAX_BACKOFF", time.Minute)
 	if err != nil {
 		return workerConfig{}, err
 	}
@@ -306,9 +292,10 @@ func loadWorkerConfig() (workerConfig, error) {
 		CollectorEndpoint:     collectorURL + "/internal/agent-observability/v2/batches",
 		CollectorServiceToken: env("NANO_COLLECTOR_SERVICE_TOKEN", "nano-local-collector-token"),
 		ProducerID:            env("NANO_COLLECTOR_PRODUCER_ID", "nano-worker"),
-		MaxRecords:            maxRecords, MaxEncodedBytes: maxEncodedBytes, MaxTraces: maxTraces,
-		LeaseDuration: leaseDuration, PollInterval: pollInterval, MaxDelay: maxDelay, HTTPTimeout: httpTimeout,
-		BaseBackoff: baseBackoff, MaxBackoff: maxBackoff,
+		BatchMaxRecords:       maxRecords, BatchMaxEncodedBytes: maxEncodedBytes, BatchMaxDelay: maxDelay,
+		HTTPTimeout: httpTimeout, PurgeMaxCommands: purgeMaxCommands,
+		PurgeLeaseDuration: purgeLeaseDuration, PurgePollInterval: purgePollInterval,
+		PurgeBaseBackoff: purgeBaseBackoff, PurgeMaxBackoff: purgeMaxBackoff,
 		ReplayStagingS3: objectstore.S3Config{
 			Endpoint:        env("NANO_REPLAY_STAGING_S3_ENDPOINT", "127.0.0.1:59000"),
 			AccessKeyID:     env("NANO_REPLAY_STAGING_S3_ACCESS_KEY_ID", "nano"),
@@ -320,10 +307,10 @@ func loadWorkerConfig() (workerConfig, error) {
 	}
 	if strings.TrimSpace(config.DatabaseURL) == "" || strings.TrimSpace(config.Addr) == "" ||
 		strings.TrimSpace(collectorURL) == "" || strings.TrimSpace(config.CollectorServiceToken) == "" ||
-		strings.TrimSpace(config.ProducerID) == "" || config.MaxRecords < 1 ||
-		config.MaxEncodedBytes < 1 || config.MaxTraces < 1 || config.LeaseDuration <= 0 ||
-		config.PollInterval <= 0 || config.MaxDelay < 0 || config.HTTPTimeout <= 0 || config.BaseBackoff <= 0 ||
-		config.MaxBackoff < config.BaseBackoff || strings.TrimSpace(config.ReplayStagingS3.Endpoint) == "" ||
+		strings.TrimSpace(config.ProducerID) == "" || config.BatchMaxRecords < 1 ||
+		config.BatchMaxEncodedBytes < 1 || config.BatchMaxDelay < 0 || config.HTTPTimeout <= 0 ||
+		config.PurgeMaxCommands < 1 || config.PurgeLeaseDuration <= 0 || config.PurgePollInterval <= 0 ||
+		config.PurgeBaseBackoff <= 0 || config.PurgeMaxBackoff < config.PurgeBaseBackoff || strings.TrimSpace(config.ReplayStagingS3.Endpoint) == "" ||
 		strings.TrimSpace(config.ReplayStagingS3.AccessKeyID) == "" || strings.TrimSpace(config.ReplayStagingS3.SecretAccessKey) == "" ||
 		strings.TrimSpace(config.ReplayStagingS3.Bucket) == "" || strings.TrimSpace(config.ReplayKeyID) == "" || len(config.ReplayKEK) != 32 {
 		return workerConfig{}, errors.New("worker configuration is incomplete or inconsistent")

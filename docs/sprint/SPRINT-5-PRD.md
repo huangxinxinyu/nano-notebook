@@ -199,12 +199,12 @@ Application PostgreSQL retains:
 | `agent_name` | Producer semantic identity |
 | `schema_version` | Record schema |
 | `semantic_convention_version` | Nano convention schema |
-| `created_at`, `terminal_at` | Anchor lifecycle only |
+| `created_at` | Anchor creation time |
 
 It has no record sequence, Collector cursor, Sender lease, retry, quarantine, capacity,
 or staged Replay byte counter.
 
-### 7.2 `agentobs_purge_commands`
+### 7.2 `agentobs_outbox_commands`
 
 One immutable idempotent command per product deletion, with retry/lease/ACK metadata.
 This is the only remaining durable Agent-observability transport table in Application
@@ -219,8 +219,8 @@ Normal runtime code must not read or write:
 - full Trace capacity/counter/slot tables;
 - Trace delivery cursor, retry, lease, and quarantine columns.
 
-Legacy migration utilities may read retired tables only when restoring a pre-cutover
-backup.
+Restoring a pre-cutover backup requires the previous release in an isolated
+environment; current runtime code has no compatibility reader for retired tables.
 
 ## 8. Transaction Trace Buffer
 

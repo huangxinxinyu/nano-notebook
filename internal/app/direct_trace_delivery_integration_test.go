@@ -32,15 +32,16 @@ func TestDirectTraceAdmissionCommitsOnlyAnchorAndProductSurvivesExporterOverflow
 	if traceID == "" || sink.envelopes[0].Record.IdentityKey == "" || sink.envelopes[1].Trace.TraceID != traceID {
 		t.Fatalf("direct Trace envelope = %#v", sink.envelopes)
 	}
-	var anchors, fullRecords int
+	var anchors int
 	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from agent_trace_refs where trace_id = $1`, traceID).Scan(&anchors); err != nil {
 		t.Fatal(err)
 	}
-	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from agentobs_outbox_records where trace_id = $1`, traceID).Scan(&fullRecords); err != nil {
+	var fullOutboxExists bool
+	if err := api.db.Pool().QueryRow(context.Background(), `select to_regclass('public.agentobs_outbox_records') is not null`).Scan(&fullOutboxExists); err != nil {
 		t.Fatal(err)
 	}
-	if anchors != 1 || fullRecords != 0 {
-		t.Fatalf("Application PostgreSQL Trace rows: anchors=%d full_records=%d", anchors, fullRecords)
+	if anchors != 1 || fullOutboxExists {
+		t.Fatalf("Application PostgreSQL Trace state: anchors=%d full_outbox_exists=%t", anchors, fullOutboxExists)
 	}
 }
 
@@ -76,15 +77,12 @@ func TestDirectTraceQueueClaimDoesNotAppendApplicationOutbox(t *testing.T) {
 	if _, err := runtime.AppendCheckpoint(context.Background(), attemptFromClaim(claimed), pending); err != nil {
 		t.Fatalf("AppendCheckpoint: %v", err)
 	}
-	var fullRecords int
-	if err := api.db.Pool().QueryRow(context.Background(), `
-		select count(*) from agentobs_outbox_records r
-		join agent_trace_refs t on t.trace_id = r.trace_id
-		where t.run_id = $1`, admission.RunID).Scan(&fullRecords); err != nil {
+	var fullOutboxExists bool
+	if err := api.db.Pool().QueryRow(context.Background(), `select to_regclass('public.agentobs_outbox_records') is not null`).Scan(&fullOutboxExists); err != nil {
 		t.Fatal(err)
 	}
-	if fullRecords != 0 {
-		t.Fatalf("Application PostgreSQL full Trace records after claim = %d", fullRecords)
+	if fullOutboxExists {
+		t.Fatal("Application PostgreSQL full Trace Outbox reappeared after claim")
 	}
 	foundAttempt := false
 	foundCheckpoint := false

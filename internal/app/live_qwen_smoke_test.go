@@ -8,8 +8,6 @@ import (
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
-	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
-	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/semconv"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 )
@@ -104,24 +102,5 @@ func TestLiveQwenThroughBifrostUsesBothSprint3ActionsAndPublishesOnce(t *testing
 	}
 	if runStatus != "completed" || jobStatus != "succeeded" || assistants != 1 || finalDrafts != 1 {
 		t.Fatalf("live terminal state=%s/%s assistants=%d final_drafts=%d", runStatus, jobStatus, assistants, finalDrafts)
-	}
-	trace, err := agent.LoadDurableTraceByRun(ctx, api.db.Pool(), admittedBody.RunID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var modelStarts, actionStarts, rootEnds int
-	for _, record := range trace.Records {
-		if record.Kind == agentobs.RecordSpanStarted && record.Name == semconv.ModelCall {
-			modelStarts++
-		}
-		if record.Kind == agentobs.RecordSpanStarted && record.Name == semconv.AgentAction {
-			actionStarts++
-		}
-		if record.Kind == agentobs.RecordSpanEnded && record.SpanID == trace.RootSpanID && record.Status == agentobs.StatusOK {
-			rootEnds++
-		}
-	}
-	if modelStarts < 2 || actionStarts < 2 || rootEnds != 1 {
-		t.Fatalf("live Durable Trace model/action/root-end = %d/%d/%d", modelStarts, actionStarts, rootEnds)
 	}
 }

@@ -44,16 +44,16 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 			return ClaimedJob{}, false, err
 		}
 		defer tx.Rollback(ctx)
-		traceCtx := ctx
-		var traceScope *agent.TraceScope
+		sink := agent.TraceSink(agent.DiscardTraceSink{})
 		if q.traceSink != nil {
-			traceScope, err = agent.NewTraceScope(q.traceSink)
-			if err != nil {
-				return ClaimedJob{}, false, err
-			}
-			defer traceScope.Rollback()
-			traceCtx = agent.ContextWithTraceScope(ctx, traceScope)
+			sink = q.traceSink
 		}
+		traceScope, err := agent.NewTraceScope(sink)
+		if err != nil {
+			return ClaimedJob{}, false, err
+		}
+		defer traceScope.Rollback()
+		traceCtx := agent.ContextWithTraceScope(ctx, traceScope)
 		if _, err := tx.Exec(ctx, `set local role nano_worker`); err != nil {
 			return ClaimedJob{}, false, err
 		}
