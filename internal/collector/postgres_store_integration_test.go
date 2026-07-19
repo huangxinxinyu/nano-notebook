@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/semconv"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/replay"
@@ -131,6 +132,68 @@ func TestPostgresStoreReconcilesResendAndRejectsConflictAtomically(t *testing.T)
 	}
 	if len(stored.Records) != 2 || stored.Records[1].Record.Name != "nano.run.admitted" {
 		t.Fatalf("stored Trace changed after resend/conflict: %#v", stored)
+	}
+}
+
+func TestPostgresStorePersistsCrossTraceLinkAfterTarget(t *testing.T) {
+	ctx := context.Background()
+	pool := openObservabilityTestPool(t, ctx)
+	t.Cleanup(pool.Close)
+	resetObservabilityTestSchema(t, ctx, pool)
+	store := collector.NewPostgresStore(pool)
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := collectorBatchFor(t, "postgres-link-source")
+	if result, err := ingestor.Ingest(ctx, source); err != nil || result.Chunks[0].Status != collector.ChunkCommitted {
+		t.Fatalf("source Ingest = %#v, %v", result, err)
+	}
+	retry := collectorBatchWithCrossTraceLink(t, "postgres-link-retry", source.Chunks[0].Trace.TraceID, source.Chunks[0].Trace.RootSpanID)
+	result, err := ingestor.Ingest(ctx, retry)
+	if err != nil || result.Chunks[0].Status != collector.ChunkCommitted || result.Chunks[0].CommittedThrough != 2 {
+		t.Fatalf("cross-Trace Link Ingest = %#v, %v", result, err)
+	}
+	stored, err := store.LoadTrace(ctx, retry.Chunks[0].Trace.TraceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Records) != 2 || stored.Records[1].Record.Kind != agentobs.RecordLink ||
+		stored.Records[1].Record.TargetTraceID != source.Chunks[0].Trace.TraceID {
+		t.Fatalf("stored Retry Trace = %#v", stored)
+	}
+}
+
+func TestPostgresStoreRetriesMissingCrossTraceLinkUntilTargetCommits(t *testing.T) {
+	ctx := context.Background()
+	pool := openObservabilityTestPool(t, ctx)
+	t.Cleanup(pool.Close)
+	resetObservabilityTestSchema(t, ctx, pool)
+	store := collector.NewPostgresStore(pool)
+	ingestor, _ := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
+	source := collectorBatchFor(t, "postgres-link-late-source")
+	retry := collectorBatchWithCrossTraceLink(t, "postgres-link-waits", source.Chunks[0].Trace.TraceID, source.Chunks[0].Trace.RootSpanID)
+
+	missing, err := ingestor.Ingest(ctx, retry)
+	if err != nil {
+		t.Fatalf("missing dependency transport error: %v", err)
+	}
+	if got := missing.Chunks[0]; got.Status != collector.ChunkRetryable || got.Code != collector.CodeDependencyMissing || got.CommittedThrough != 0 {
+		t.Fatalf("missing dependency result = %#v", got)
+	}
+	var retryRows int
+	if err := pool.QueryRow(ctx, `select count(*) from obs_traces where trace_id = $1`, retry.Chunks[0].Trace.TraceID).Scan(&retryRows); err != nil {
+		t.Fatal(err)
+	}
+	if retryRows != 0 {
+		t.Fatalf("missing dependency persisted %d Retry Trace rows", retryRows)
+	}
+	if result, err := ingestor.Ingest(ctx, source); err != nil || result.Chunks[0].Status != collector.ChunkCommitted {
+		t.Fatalf("late source Ingest = %#v, %v", result, err)
+	}
+	reconciled, err := ingestor.Ingest(ctx, retry)
+	if err != nil || reconciled.Chunks[0].Status != collector.ChunkCommitted || reconciled.Chunks[0].CommittedThrough != 2 {
+		t.Fatalf("dependency retry = %#v, %v", reconciled, err)
 	}
 }
 
@@ -349,6 +412,18 @@ func collectorBatchWithReplay(t *testing.T, ciphertext []byte) collector.Batch {
 		WrappedKey: bytes.Repeat([]byte{0xc3}, 60), Nonce: bytes.Repeat([]byte{0xd4}, 12),
 		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
 	}}
+	return batch
+}
+
+func collectorBatchWithCrossTraceLink(t *testing.T, suffix string, targetTraceID agentobs.TraceID, targetSpanID agentobs.SpanID) collector.Batch {
+	t.Helper()
+	batch := collectorBatchFor(t, suffix)
+	link := batch.Chunks[0].Records[1].Record
+	link.Kind = agentobs.RecordLink
+	link.Name = semconv.LinkRetriedFrom
+	link.TargetTraceID = targetTraceID
+	link.TargetSpanID = targetSpanID
+	batch.Chunks[0].Records[1] = collectorEnvelope(t, 2, link)
 	return batch
 }
 

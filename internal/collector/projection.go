@@ -112,7 +112,19 @@ func BuildTraceProjection(stored StoredTrace) (TraceProjection, error) {
 	if stored.CommittedThrough < 1 || len(stored.Records) != stored.CommittedThrough {
 		return TraceProjection{}, errors.New("Collector projection requires a complete committed prefix")
 	}
-	validator := memory.New()
+	externalLinks := make(map[linkTarget]struct{})
+	for _, envelope := range stored.Records {
+		if envelope.Record.Kind == agentobs.RecordLink && envelope.Record.TargetTraceID != stored.Trace.TraceID {
+			externalLinks[linkTarget{traceID: envelope.Record.TargetTraceID, spanID: envelope.Record.TargetSpanID}] = struct{}{}
+		}
+	}
+	validator, err := memory.NewWithConfig(memory.Config{ResolveLink: func(traceID agentobs.TraceID, spanID agentobs.SpanID) bool {
+		_, found := externalLinks[linkTarget{traceID: traceID, spanID: spanID}]
+		return found
+	}})
+	if err != nil {
+		return TraceProjection{}, err
+	}
 	projection := TraceProjection{Summary: TraceSummary{
 		TraceID: stored.Trace.TraceID, RunID: stored.Trace.RunID, ChatID: stored.Trace.ChatID,
 		NotebookID: stored.Trace.NotebookID, RootSpanID: stored.Trace.RootSpanID,

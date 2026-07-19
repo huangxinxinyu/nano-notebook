@@ -23,6 +23,7 @@ type Config struct {
 	MaxRecordsPerTrace   int
 	MaxTracePayloadBytes int
 	MaxLinksPerSpan      int
+	ResolveLink          func(agentobs.TraceID, agentobs.SpanID) bool
 }
 
 type Exporter struct {
@@ -38,6 +39,7 @@ type resolvedConfig struct {
 	maxRecordsPerTrace   int
 	maxTracePayloadBytes int
 	maxLinksPerSpan      int
+	resolveLink          func(agentobs.TraceID, agentobs.SpanID) bool
 }
 
 type traceState struct {
@@ -70,6 +72,7 @@ func NewWithConfig(config Config) (*Exporter, error) {
 		maxRecordsPerTrace:   defaulted(config.MaxRecordsPerTrace, DefaultMaxRecordsPerTrace),
 		maxTracePayloadBytes: defaulted(config.MaxTracePayloadBytes, DefaultMaxTracePayloadBytes),
 		maxLinksPerSpan:      defaulted(config.MaxLinksPerSpan, DefaultMaxLinksPerSpan),
+		resolveLink:          config.ResolveLink,
 	}
 	if config.RecordLimits != nil {
 		resolved.recordLimits = *config.RecordLimits
@@ -172,7 +175,8 @@ func (e *Exporter) validateLifecycle(record agentobs.Record, trace *traceState) 
 			return err
 		}
 		targetTrace := e.traces[record.TargetTraceID]
-		if targetTrace == nil || targetTrace.spans[record.TargetSpanID] == nil {
+		resolvedExternally := e.config.resolveLink != nil && e.config.resolveLink(record.TargetTraceID, record.TargetSpanID)
+		if (targetTrace == nil || targetTrace.spans[record.TargetSpanID] == nil) && !resolvedExternally {
 			return fmt.Errorf("%w: %s/%s", agentobs.ErrUnresolvedLink, record.TargetTraceID, record.TargetSpanID)
 		}
 	}

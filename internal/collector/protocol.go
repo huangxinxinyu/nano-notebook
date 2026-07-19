@@ -29,6 +29,7 @@ const (
 	CodeInvalidChunk          = "invalid_chunk"
 	CodeInvalidLifecycle      = "invalid_lifecycle"
 	CodeSequenceGap           = "sequence_gap"
+	CodeDependencyMissing     = "dependency_missing"
 	CodeTombstoned            = "tombstoned"
 	CodeUnsupportedSchema     = "unsupported_schema"
 	CodeAttachmentUnavailable = "attachment_unavailable"

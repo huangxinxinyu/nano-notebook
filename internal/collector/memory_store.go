@@ -45,7 +45,9 @@ func (s *MemoryStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk) (i
 	if _, tombstoned := s.tombstones[chunk.Trace.TraceID]; tombstoned {
 		return 0, &ChunkError{Code: CodeTombstoned, Err: errors.New("Collector Trace is tombstoned")}
 	}
-	merged, committedThrough, err := validateAndMergeTraceChunk(ctx, s.traces[chunk.Trace.TraceID], chunk)
+	merged, committedThrough, err := validateAndMergeTraceChunk(ctx, s.traces[chunk.Trace.TraceID], chunk, func(_ context.Context, traceID agentobs.TraceID, spanID agentobs.SpanID) (bool, error) {
+		return memoryTraceHasSpan(s.traces[traceID], spanID), nil
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -74,7 +76,14 @@ func (s *MemoryStore) TombstoneTrace(_ context.Context, command PurgeCommand) er
 	return nil
 }
 
-func validateAndMergeTraceChunk(ctx context.Context, existing memoryTrace, chunk TraceChunk) (memoryTrace, int, error) {
+type linkDependencyResolver func(context.Context, agentobs.TraceID, agentobs.SpanID) (bool, error)
+
+type linkTarget struct {
+	traceID agentobs.TraceID
+	spanID  agentobs.SpanID
+}
+
+func validateAndMergeTraceChunk(ctx context.Context, existing memoryTrace, chunk TraceChunk, resolveDependency linkDependencyResolver) (memoryTrace, int, error) {
 	if err := validateTraceDescriptor(chunk.Trace); err != nil {
 		return memoryTrace{}, 0, &ChunkError{Code: CodeInvalidChunk, Err: err}
 	}
@@ -106,7 +115,19 @@ func validateAndMergeTraceChunk(ctx context.Context, existing memoryTrace, chunk
 		}
 	}
 
-	validator := memory.New()
+	resolvedLinks := make(map[linkTarget]struct{})
+	for _, stored := range existing.records {
+		if stored.Record.Kind == agentobs.RecordLink && stored.Record.TargetTraceID != chunk.Trace.TraceID {
+			resolvedLinks[linkTarget{traceID: stored.Record.TargetTraceID, spanID: stored.Record.TargetSpanID}] = struct{}{}
+		}
+	}
+	validator, err := memory.NewWithConfig(memory.Config{ResolveLink: func(traceID agentobs.TraceID, spanID agentobs.SpanID) bool {
+		_, found := resolvedLinks[linkTarget{traceID: traceID, spanID: spanID}]
+		return found
+	}})
+	if err != nil {
+		return memoryTrace{}, 0, err
+	}
 	for _, stored := range existing.records {
 		if err := validator.Export(ctx, stored.Record); err != nil {
 			return memoryTrace{}, 0, fmt.Errorf("validate stored Collector record: %w", err)
@@ -151,6 +172,22 @@ func validateAndMergeTraceChunk(ctx context.Context, existing memoryTrace, chunk
 				Err: fmt.Errorf("%w: first Collector record is not the Trace root", agentobs.ErrLifecycle),
 			}
 		}
+		if envelope.Record.Kind == agentobs.RecordLink && envelope.Record.TargetTraceID != chunk.Trace.TraceID {
+			target := linkTarget{traceID: envelope.Record.TargetTraceID, spanID: envelope.Record.TargetSpanID}
+			if _, found := resolvedLinks[target]; !found {
+				if resolveDependency == nil {
+					return memoryTrace{}, 0, missingLinkDependency(len(existing.records), target)
+				}
+				found, err := resolveDependency(ctx, target.traceID, target.spanID)
+				if err != nil {
+					return memoryTrace{}, 0, err
+				}
+				if !found {
+					return memoryTrace{}, 0, missingLinkDependency(len(existing.records), target)
+				}
+				resolvedLinks[target] = struct{}{}
+			}
+		}
 		if err := validator.Export(ctx, envelope.Record); err != nil {
 			if errors.Is(err, agentobs.ErrLifecycle) || errors.Is(err, agentobs.ErrUnresolvedLink) || errors.Is(err, agentobs.ErrLimitExceeded) {
 				return memoryTrace{}, 0, &ChunkError{Code: CodeInvalidLifecycle, CommittedThrough: len(existing.records), Err: err}
@@ -167,6 +204,22 @@ func validateAndMergeTraceChunk(ctx context.Context, existing memoryTrace, chunk
 		attachments[attachment.AttachmentID] = cloneAttachmentDescriptor(attachment)
 	}
 	return memoryTrace{descriptor: chunk.Trace, records: candidate, attachments: attachments}, candidate[len(candidate)-1].Sequence, nil
+}
+
+func missingLinkDependency(committedThrough int, target linkTarget) *ChunkError {
+	return &ChunkError{
+		Code: CodeDependencyMissing, CommittedThrough: committedThrough, Retryable: true,
+		Err: fmt.Errorf("%w: %s/%s", agentobs.ErrUnresolvedLink, target.traceID, target.spanID),
+	}
+}
+
+func memoryTraceHasSpan(trace memoryTrace, spanID agentobs.SpanID) bool {
+	for _, record := range trace.records {
+		if record.Record.Kind == agentobs.RecordSpanStarted && record.Record.SpanID == spanID {
+			return true
+		}
+	}
+	return false
 }
 
 func sameAttachmentIdentity(left, right AttachmentDescriptor) bool {

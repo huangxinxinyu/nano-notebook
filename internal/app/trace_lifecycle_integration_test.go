@@ -772,6 +772,32 @@ func TestRetryCreatesSeparateTraceLinkedToPriorRootAndReplays(t *testing.T) {
 	if err != nil || len(replayed.Records) != 4 {
 		t.Fatalf("Retry replay Trace records = %#v err=%v", replayed.Records, err)
 	}
+	outbox, err := agentoutbox.NewPostgresStore(api.db.Pool(), agentoutbox.Config{
+		ProducerID: "nano-worker", MaxRecords: 128, MaxEncodedBytes: 512 * 1024,
+		MaxTraces: 16, LeaseDuration: 30 * time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, ok, err := outbox.ClaimBatch(ctx)
+	if err != nil || !ok {
+		t.Fatalf("claim source and Retry Traces = %#v ok=%t err=%v", claimed, ok, err)
+	}
+	if len(claimed.Batch.Chunks) != 2 || claimed.Batch.Chunks[0].Trace.TraceID != source.TraceID || claimed.Batch.Chunks[1].Trace.TraceID != retry.TraceID {
+		t.Fatalf("source/Retry delivery order = %#v", claimed.Batch.Chunks)
+	}
+	collectorStore := collector.NewMemoryStore()
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: collectorStore})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := ingestor.Ingest(ctx, claimed.Batch)
+	if err != nil || len(result.Chunks) != 2 || result.Chunks[0].Status != collector.ChunkCommitted || result.Chunks[1].Status != collector.ChunkCommitted {
+		t.Fatalf("deliver source and Retry Traces = %#v err=%v", result, err)
+	}
+	if err := outbox.ApplyResult(ctx, claimed, result); err != nil {
+		t.Fatalf("apply source and Retry cursors: %v", err)
+	}
 }
 
 func TestAdmissionRollsBackRunJobAndMessageWhenRequiredTraceWriteFails(t *testing.T) {

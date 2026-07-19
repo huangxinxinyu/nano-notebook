@@ -63,6 +63,56 @@ func TestIngestorAcknowledgesAnIdenticalTraceChunkResend(t *testing.T) {
 	}
 }
 
+func TestIngestorCommitsCrossTraceLinkAfterItsTarget(t *testing.T) {
+	store := collector.NewMemoryStore()
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := collectorBatchFor(t, "link-source")
+	if result, err := ingestor.Ingest(context.Background(), source); err != nil || result.Chunks[0].Status != collector.ChunkCommitted {
+		t.Fatalf("source Ingest = %#v, %v", result, err)
+	}
+	retry := collectorBatchFor(t, "link-retry")
+	retriedFrom := retry.Chunks[0].Records[1].Record
+	retriedFrom.Kind = agentobs.RecordLink
+	retriedFrom.Name = "retried_from"
+	retriedFrom.TargetTraceID = source.Chunks[0].Trace.TraceID
+	retriedFrom.TargetSpanID = source.Chunks[0].Trace.RootSpanID
+	retry.Chunks[0].Records[1] = collectorEnvelope(t, 2, retriedFrom)
+
+	result, err := ingestor.Ingest(context.Background(), retry)
+	if err != nil {
+		t.Fatalf("retry Ingest transport error: %v", err)
+	}
+	if got := result.Chunks[0]; got.Status != collector.ChunkCommitted || got.CommittedThrough != 2 {
+		t.Fatalf("cross-Trace Link result = %#v", got)
+	}
+}
+
+func TestIngestorRetriesCrossTraceLinkWithMissingTarget(t *testing.T) {
+	store := collector.NewMemoryStore()
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry := collectorBatchFor(t, "link-missing")
+	retriedFrom := retry.Chunks[0].Records[1].Record
+	retriedFrom.Kind = agentobs.RecordLink
+	retriedFrom.Name = "retried_from"
+	retriedFrom.TargetTraceID = "trace-not-committed"
+	retriedFrom.TargetSpanID = "root-not-committed"
+	retry.Chunks[0].Records[1] = collectorEnvelope(t, 2, retriedFrom)
+
+	result, err := ingestor.Ingest(context.Background(), retry)
+	if err != nil {
+		t.Fatalf("missing dependency transport error: %v", err)
+	}
+	if got := result.Chunks[0]; got.Status != collector.ChunkRetryable || got.Code != collector.CodeDependencyMissing || got.CommittedThrough != 0 {
+		t.Fatalf("missing cross-Trace target result = %#v", got)
+	}
+}
+
 func TestIngestorRejectsReplayAttachmentMetadataMutationOnResend(t *testing.T) {
 	store := collector.NewMemoryStore()
 	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})

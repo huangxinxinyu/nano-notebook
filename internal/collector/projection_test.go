@@ -100,6 +100,36 @@ func TestBuildTraceProjectionUsesAnEmptyModelListForAModelFreeTrace(t *testing.T
 	}
 }
 
+func TestBuildTraceProjectionPreservesCrossTraceRetryLink(t *testing.T) {
+	traceID := agentobs.TraceID("trace-retry-projection")
+	rootID := agentobs.SpanID("root-retry-projection")
+	started := collectorRecord(traceID, rootID, "retry/root/start", agentobs.RecordSpanStarted, "agent.execution")
+	retriedFrom := collectorRecord(traceID, rootID, "retry/root/retried-from", agentobs.RecordLink, semconv.LinkRetriedFrom)
+	retriedFrom.TargetTraceID = "trace-prior"
+	retriedFrom.TargetSpanID = "root-prior"
+	ended := collectorRecord(traceID, rootID, "retry/root/end", agentobs.RecordSpanEnded, "agent.execution")
+	ended.Status = agentobs.StatusOK
+	stored := collector.StoredTrace{
+		Trace: collector.TraceDescriptor{
+			TraceID: traceID, RunID: "run-retry", ChatID: "chat-retry", NotebookID: "notebook-retry",
+			RootSpanID: rootID, AgentName: "nano-research-agent", SchemaVersion: 1, SemanticConventionVersion: 1,
+		},
+		CommittedThrough: 3,
+		Records: []collector.SequencedRecord{
+			collectorEnvelope(t, 1, started), collectorEnvelope(t, 2, retriedFrom), collectorEnvelope(t, 3, ended),
+		},
+	}
+
+	projection, err := collector.BuildTraceProjection(stored)
+	if err != nil {
+		t.Fatalf("BuildTraceProjection: %v", err)
+	}
+	if len(projection.Links) != 1 || projection.Links[0].Name != semconv.LinkRetriedFrom ||
+		projection.Links[0].TargetTraceID != "trace-prior" || projection.Links[0].TargetSpanID != "root-prior" {
+		t.Fatalf("Retry links = %#v", projection.Links)
+	}
+}
+
 func projectionStoredTrace(t *testing.T, complete, known bool) collector.StoredTrace {
 	t.Helper()
 	traceID := agentobs.TraceID("trace-projection")

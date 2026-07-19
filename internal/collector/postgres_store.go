@@ -103,7 +103,16 @@ func (s *PostgresStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk) 
 	merged, committedThrough, err := validateAndMergeTraceChunk(ctx, memoryTrace{
 		descriptor: existing.Trace,
 		records:    existing.Records,
-	}, chunk)
+	}, chunk, func(ctx context.Context, traceID agentobs.TraceID, spanID agentobs.SpanID) (bool, error) {
+		var found bool
+		err := tx.QueryRow(ctx, `
+			select exists(
+				select 1 from obs_trace_records
+				where trace_id = $1 and span_id = $2 and kind = 'span_started'
+			)
+		`, traceID, spanID).Scan(&found)
+		return found, err
+	})
 	if err != nil {
 		return 0, err
 	}
