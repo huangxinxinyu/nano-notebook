@@ -8,7 +8,7 @@ export NANO_DATABASE_URL="${NANO_DATABASE_URL:-postgres://nano:nano@localhost:55
 export NANO_CONTROL_PLANE_ADDR="${NANO_CONTROL_PLANE_ADDR:-:8080}"
 export NANO_WORKER_ADDR="${NANO_WORKER_ADDR:-:8081}"
 export NANO_COLLECTOR_ADDR="${NANO_COLLECTOR_ADDR:-:8082}"
-export NANO_COLLECTOR_DATABASE_URL="${NANO_COLLECTOR_DATABASE_URL:-postgres://nano_observability:nano-observability@localhost:55432/nano_observability?sslmode=disable}"
+export NANO_COLLECTOR_DATABASE_URL="${NANO_COLLECTOR_DATABASE_URL:-postgres://nano_observability:nano-observability@localhost:55433/nano_observability?sslmode=disable}"
 export NANO_COLLECTOR_SERVICE_TOKEN="${NANO_COLLECTOR_SERVICE_TOKEN:-nano-local-collector-token}"
 export NANO_COLLECTOR_QUERY_TOKEN="${NANO_COLLECTOR_QUERY_TOKEN:-nano-local-collector-query-token}"
 export NANO_CHAT_MODEL="${NANO_CHAT_MODEL:-aliyun/qwen-flash}"

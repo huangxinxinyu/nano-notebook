@@ -5,7 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 export NANO_DATABASE_URL="${NANO_DATABASE_URL:-postgres://nano:nano@localhost:55432/nano?sslmode=disable}"
-export NANO_COLLECTOR_DATABASE_URL="${NANO_COLLECTOR_DATABASE_URL:-postgres://nano_observability:nano-observability@localhost:55432/nano_observability?sslmode=disable}"
+export NANO_COLLECTOR_DATABASE_URL="${NANO_COLLECTOR_DATABASE_URL:-postgres://nano_observability:nano-observability@localhost:55433/nano_observability?sslmode=disable}"
 export NANO_COLLECTOR_ADDR="${NANO_COLLECTOR_ADDR:-127.0.0.1:18082}"
 export NANO_COLLECTOR_SERVICE_TOKEN="${NANO_COLLECTOR_SERVICE_TOKEN:-nano-local-collector-token}"
 export NANO_COLLECTOR_QUERY_TOKEN="${NANO_COLLECTOR_QUERY_TOKEN:-nano-local-collector-query-token}"

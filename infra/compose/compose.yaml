@@ -15,27 +15,21 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
 
-  observability-init:
+  observability-postgres:
     image: postgres:16-alpine
-    profiles: ["collector"]
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
-      PGPASSWORD: nano
-    command:
-      - /bin/sh
-      - -ec
-      - |
-        if ! psql -h postgres -U nano -d nano -tAc "select 1 from pg_roles where rolname='nano_observability'" | grep -q 1; then
-          psql -h postgres -U nano -d nano -v ON_ERROR_STOP=1 -c "create role nano_observability login password 'nano-observability'"
-        fi
-        if ! psql -h postgres -U nano -d nano -tAc "select 1 from pg_database where datname='nano_observability'" | grep -q 1; then
-          createdb -h postgres -U nano -O nano_observability nano_observability
-        else
-          psql -h postgres -U nano -d nano -v ON_ERROR_STOP=1 -c "alter database nano_observability owner to nano_observability"
-        fi
-        psql -h postgres -U nano -d nano_observability -v ON_ERROR_STOP=1 -c "alter schema public owner to nano_observability"
+      POSTGRES_USER: nano_observability
+      POSTGRES_PASSWORD: nano-observability
+      POSTGRES_DB: nano_observability
+    ports:
+      - "55433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nano_observability -d nano_observability"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - observability-postgres-data:/var/lib/postgresql/data
 
   collector:
     build:
@@ -43,15 +37,13 @@ services:
       dockerfile: infra/collector/Dockerfile
     profiles: ["collector"]
     depends_on:
-      postgres:
+      observability-postgres:
         condition: service_healthy
-      observability-init:
-        condition: service_completed_successfully
       minio-init:
         condition: service_completed_successfully
     environment:
       NANO_COLLECTOR_ADDR: ":8082"
-      NANO_COLLECTOR_DATABASE_URL: postgres://nano_observability:nano-observability@postgres:5432/nano_observability?sslmode=disable
+      NANO_COLLECTOR_DATABASE_URL: postgres://nano_observability:nano-observability@observability-postgres:5432/nano_observability?sslmode=disable
       NANO_COLLECTOR_SERVICE_TOKEN: nano-local-collector-token
       NANO_COLLECTOR_QUERY_TOKEN: nano-local-collector-query-token
       NANO_COLLECTOR_DATABASE_MAX_CONNS: "16"
@@ -152,5 +144,6 @@ services:
 
 volumes:
   postgres-data:
+  observability-postgres-data:
   minio-data:
   qdrant-data:

@@ -5,10 +5,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 export NANO_TEST_DATABASE_URL="${NANO_TEST_DATABASE_URL:-postgres://nano:nano@localhost:55432/nano_test?sslmode=disable}"
-export NANO_TEST_OBSERVABILITY_DATABASE_URL="${NANO_TEST_OBSERVABILITY_DATABASE_URL:-postgres://nano_observability:nano-observability@localhost:55432/nano_observability_test?sslmode=disable}"
-export NANO_TEST_MIGRATION_OBSERVABILITY_DATABASE_URL="${NANO_TEST_MIGRATION_OBSERVABILITY_DATABASE_URL:-postgres://nano_observability:nano-observability@localhost:55432/nano_observability_migration_test?sslmode=disable}"
+export NANO_TEST_OBSERVABILITY_DATABASE_URL="${NANO_TEST_OBSERVABILITY_DATABASE_URL:-postgres://nano_observability:nano-observability@localhost:55433/nano_observability_test?sslmode=disable}"
+export NANO_TEST_MIGRATION_OBSERVABILITY_DATABASE_URL="${NANO_TEST_MIGRATION_OBSERVABILITY_DATABASE_URL:-postgres://nano_observability:nano-observability@localhost:55433/nano_observability_migration_test?sslmode=disable}"
 export NANO_TEST_S3_ENDPOINT="${NANO_TEST_S3_ENDPOINT:-127.0.0.1:59000}"
-docker compose -f infra/compose/compose.yaml up -d postgres minio minio-init >/dev/null
+docker compose -f infra/compose/compose.yaml up -d postgres observability-postgres minio minio-init >/dev/null
 docker compose -f infra/compose/compose.yaml wait minio-init >/dev/null
 
 postgres_ready() {
@@ -28,21 +28,16 @@ fi
 if ! docker compose -f infra/compose/compose.yaml exec -T postgres psql -U nano -d nano -tc "select 1 from pg_database where datname='nano_test'" | grep -q 1; then
   docker compose -f infra/compose/compose.yaml exec -T postgres createdb -U nano nano_test
 fi
-if ! docker compose -f infra/compose/compose.yaml exec -T postgres psql -U nano -d nano -tc "select 1 from pg_roles where rolname='nano_observability'" | grep -q 1; then
-  docker compose -f infra/compose/compose.yaml exec -T postgres psql -U nano -d nano -v ON_ERROR_STOP=1 -c "create role nano_observability login password 'nano-observability'"
-fi
-if ! docker compose -f infra/compose/compose.yaml exec -T postgres psql -U nano -d nano -tc "select 1 from pg_database where datname='nano_observability_test'" | grep -q 1; then
-  docker compose -f infra/compose/compose.yaml exec -T postgres createdb -U nano -O nano_observability nano_observability_test
+if ! docker compose -f infra/compose/compose.yaml exec -T observability-postgres psql -U nano_observability -d nano_observability -tc "select 1 from pg_database where datname='nano_observability_test'" | grep -q 1; then
+  docker compose -f infra/compose/compose.yaml exec -T observability-postgres createdb -U nano_observability nano_observability_test
 else
-  docker compose -f infra/compose/compose.yaml exec -T postgres psql -U nano -d nano -v ON_ERROR_STOP=1 -c "alter database nano_observability_test owner to nano_observability"
+  docker compose -f infra/compose/compose.yaml exec -T observability-postgres psql -U nano_observability -d nano_observability -v ON_ERROR_STOP=1 -c "alter database nano_observability_test owner to nano_observability"
 fi
-docker compose -f infra/compose/compose.yaml exec -T postgres psql -U nano -d nano_observability_test -v ON_ERROR_STOP=1 -c "alter schema public owner to nano_observability"
-if ! docker compose -f infra/compose/compose.yaml exec -T postgres psql -U nano -d nano -tc "select 1 from pg_database where datname='nano_observability_migration_test'" | grep -q 1; then
-  docker compose -f infra/compose/compose.yaml exec -T postgres createdb -U nano -O nano_observability nano_observability_migration_test
+if ! docker compose -f infra/compose/compose.yaml exec -T observability-postgres psql -U nano_observability -d nano_observability -tc "select 1 from pg_database where datname='nano_observability_migration_test'" | grep -q 1; then
+  docker compose -f infra/compose/compose.yaml exec -T observability-postgres createdb -U nano_observability nano_observability_migration_test
 else
-  docker compose -f infra/compose/compose.yaml exec -T postgres psql -U nano -d nano -v ON_ERROR_STOP=1 -c "alter database nano_observability_migration_test owner to nano_observability"
+  docker compose -f infra/compose/compose.yaml exec -T observability-postgres psql -U nano_observability -d nano_observability -v ON_ERROR_STOP=1 -c "alter database nano_observability_migration_test owner to nano_observability"
 fi
-docker compose -f infra/compose/compose.yaml exec -T postgres psql -U nano -d nano_observability_migration_test -v ON_ERROR_STOP=1 -c "alter schema public owner to nano_observability"
 unformatted="$(gofmt -l cmd internal)"
 if [ -n "$unformatted" ]; then
   echo "$unformatted"

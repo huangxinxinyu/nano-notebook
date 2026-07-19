@@ -5,12 +5,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 compose_file="infra/compose/compose.yaml"
-if ! docker compose -f "$compose_file" exec -T postgres psql -U nano -d nano -tc "select 1 from pg_roles where rolname='nano_observability'" | grep -q 1; then
-  docker compose -f "$compose_file" exec -T postgres psql -U nano -d nano -v ON_ERROR_STOP=1 -c "create role nano_observability login password 'nano-observability'"
-fi
-if ! docker compose -f "$compose_file" exec -T postgres psql -U nano -d nano -tc "select 1 from pg_database where datname='nano_observability'" | grep -q 1; then
-  docker compose -f "$compose_file" exec -T postgres createdb -U nano -O nano_observability nano_observability
-else
-  docker compose -f "$compose_file" exec -T postgres psql -U nano -d nano -v ON_ERROR_STOP=1 -c "alter database nano_observability owner to nano_observability"
-fi
-docker compose -f "$compose_file" exec -T postgres psql -U nano -d nano_observability -v ON_ERROR_STOP=1 -c "alter schema public owner to nano_observability"
+docker compose -f "$compose_file" up -d observability-postgres >/dev/null
+for _ in $(seq 1 60); do
+  if docker compose -f "$compose_file" exec -T observability-postgres pg_isready -U nano_observability -d nano_observability >/dev/null 2>&1; then
+    exit 0
+  fi
+  sleep 1
+done
+echo "observability-postgres did not become ready" >&2
+exit 1

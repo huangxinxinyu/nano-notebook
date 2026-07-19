@@ -6,7 +6,7 @@ cd "$ROOT"
 
 docker compose -f infra/compose/compose.yaml exec -T postgres pg_isready -U nano -d nano >/dev/null
 echo '{"status":"ready","service":"postgres"}'
-docker compose -f infra/compose/compose.yaml exec -T postgres pg_isready -U nano_observability -d nano_observability >/dev/null
+docker compose -f infra/compose/compose.yaml exec -T observability-postgres pg_isready -U nano_observability -d nano_observability >/dev/null
 echo '{"status":"ready","service":"observability-postgres"}'
 curl -fsS http://localhost:59000/minio/health/live >/dev/null
 echo '{"status":"ready","service":"minio"}'
