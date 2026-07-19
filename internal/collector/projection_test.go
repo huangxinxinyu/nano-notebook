@@ -55,6 +55,66 @@ func TestBuildTraceProjectionKeepsUnfinishedAndUnknownValuesExplicit(t *testing.
 	}
 }
 
+func TestBuildTraceProjectionConvergesWhenRootArrivesAfterChild(t *testing.T) {
+	traceID := agentobs.TraceID("trace-late-root")
+	rootID := agentobs.SpanID("root-late")
+	childID := agentobs.SpanID("attempt-late")
+	base := time.Unix(1_700_200_000, 0).UTC()
+	child := collectorRecord(traceID, childID, "late/attempt/start", agentobs.RecordSpanStarted, "nano.job.attempt")
+	child.ParentSpanID = rootID
+	child.OccurredAt = base.Add(time.Second)
+	root := collectorRecord(traceID, rootID, "late/root/start", agentobs.RecordSpanStarted, "agent.execution")
+	root.OccurredAt = base
+	stored := collector.StoredTrace{
+		Trace: collector.TraceDescriptor{
+			TraceID: traceID, RunID: "run-late", ChatID: "chat-late", NotebookID: "notebook-late",
+			RootSpanID: rootID, AgentName: "nano-research-agent", SchemaVersion: 1, SemanticConventionVersion: 1,
+		},
+		CommittedThrough: 2,
+		Records: []collector.SequencedRecord{
+			collectorEnvelope(t, 1, child), collectorEnvelope(t, 2, root),
+		},
+	}
+
+	projection, err := collector.BuildTraceProjection(stored)
+	if err != nil {
+		t.Fatalf("BuildTraceProjection: %v", err)
+	}
+	if !projection.Summary.Active || projection.Summary.StartedAtUnixNano != root.OccurredAt.UnixNano() || projection.Summary.LastObservedUnixNano != child.OccurredAt.UnixNano() {
+		t.Fatalf("late-root Summary = %#v", projection.Summary)
+	}
+	if len(projection.Spans) != 2 || projection.Spans[0].SpanID != childID || projection.Spans[1].SpanID != rootID || projection.Spans[0].ParentSpanID != rootID {
+		t.Fatalf("late-root Spans = %#v", projection.Spans)
+	}
+}
+
+func TestBuildTraceProjectionKeepsMissingRootExplicitlyIncomplete(t *testing.T) {
+	traceID := agentobs.TraceID("trace-missing-root")
+	rootID := agentobs.SpanID("root-missing")
+	childID := agentobs.SpanID("attempt-without-root")
+	child := collectorRecord(traceID, childID, "missing-root/attempt/start", agentobs.RecordSpanStarted, "nano.job.attempt")
+	child.ParentSpanID = rootID
+	stored := collector.StoredTrace{
+		Trace: collector.TraceDescriptor{
+			TraceID: traceID, RunID: "run-missing-root", ChatID: "chat-missing-root", NotebookID: "notebook-missing-root",
+			RootSpanID: rootID, AgentName: "nano-research-agent", SchemaVersion: 1, SemanticConventionVersion: 1,
+		},
+		CommittedThrough: 1,
+		Records:          []collector.SequencedRecord{collectorEnvelope(t, 1, child)},
+	}
+
+	projection, err := collector.BuildTraceProjection(stored)
+	if err != nil {
+		t.Fatalf("BuildTraceProjection: %v", err)
+	}
+	if !projection.Summary.Active || projection.Summary.Status != "" || projection.Summary.EndedAtUnixNano != nil || projection.Summary.StartedAtUnixNano != child.OccurredAt.UnixNano() {
+		t.Fatalf("missing-root Summary = %#v", projection.Summary)
+	}
+	if len(projection.Spans) != 1 || projection.Spans[0].ParentSpanID != rootID {
+		t.Fatalf("missing-root Spans = %#v", projection.Spans)
+	}
+}
+
 func TestBuildTraceProjectionPreservesFailedAndCancelledRootStates(t *testing.T) {
 	for _, status := range []agentobs.Status{agentobs.StatusError, agentobs.StatusCancelled} {
 		t.Run(string(status), func(t *testing.T) {

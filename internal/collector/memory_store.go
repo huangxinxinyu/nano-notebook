@@ -131,6 +131,9 @@ func validateAndMergeTraceChunk(ctx context.Context, existing memoryTrace, chunk
 	}
 	for _, stored := range existing.records {
 		if err := validator.Export(ctx, stored.Record); err != nil {
+			if collectorSequence && (errors.Is(err, agentobs.ErrLifecycle) || errors.Is(err, agentobs.ErrUnresolvedLink)) {
+				continue
+			}
 			return memoryTrace{}, 0, fmt.Errorf("validate stored Collector record: %w", err)
 		}
 	}
@@ -185,7 +188,7 @@ func validateAndMergeTraceChunk(ctx context.Context, existing memoryTrace, chunk
 				Err: errors.New("Collector Trace Chunk sequence is not contiguous"),
 			}
 		}
-		if sequence == 1 && (envelope.Record.Kind != agentobs.RecordSpanStarted || envelope.Record.SpanID != chunk.Trace.RootSpanID || envelope.Record.ParentSpanID != "") {
+		if !collectorSequence && sequence == 1 && (envelope.Record.Kind != agentobs.RecordSpanStarted || envelope.Record.SpanID != chunk.Trace.RootSpanID || envelope.Record.ParentSpanID != "") {
 			return memoryTrace{}, 0, &ChunkError{
 				Code: CodeInvalidLifecycle, CommittedThrough: len(existing.records),
 				Err: fmt.Errorf("%w: first Collector record is not the Trace root", agentobs.ErrLifecycle),
@@ -201,13 +204,20 @@ func validateAndMergeTraceChunk(ctx context.Context, existing memoryTrace, chunk
 				if err != nil {
 					return memoryTrace{}, 0, err
 				}
-				if !found {
+				if !found && !collectorSequence {
 					return memoryTrace{}, 0, missingLinkDependency(len(existing.records), target)
 				}
-				resolvedLinks[target] = struct{}{}
+				if found {
+					resolvedLinks[target] = struct{}{}
+				}
 			}
 		}
 		if err := validator.Export(ctx, envelope.Record); err != nil {
+			if collectorSequence && (errors.Is(err, agentobs.ErrLifecycle) || errors.Is(err, agentobs.ErrUnresolvedLink)) {
+				candidate = append(candidate, cloneSequencedRecord(envelope))
+				byIdentity[envelope.Record.IdentityKey] = envelope
+				continue
+			}
 			if errors.Is(err, agentobs.ErrLifecycle) || errors.Is(err, agentobs.ErrUnresolvedLink) || errors.Is(err, agentobs.ErrLimitExceeded) {
 				return memoryTrace{}, 0, &ChunkError{Code: CodeInvalidLifecycle, CommittedThrough: len(existing.records), Err: err}
 			}

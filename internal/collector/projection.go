@@ -1,13 +1,11 @@
 package collector
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"sort"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
-	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/memory"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/semconv"
 	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 )
@@ -112,19 +110,6 @@ func BuildTraceProjection(stored StoredTrace) (TraceProjection, error) {
 	if stored.CommittedThrough < 1 || len(stored.Records) != stored.CommittedThrough {
 		return TraceProjection{}, errors.New("Collector projection requires a complete committed prefix")
 	}
-	externalLinks := make(map[linkTarget]struct{})
-	for _, envelope := range stored.Records {
-		if envelope.Record.Kind == agentobs.RecordLink && envelope.Record.TargetTraceID != stored.Trace.TraceID {
-			externalLinks[linkTarget{traceID: envelope.Record.TargetTraceID, spanID: envelope.Record.TargetSpanID}] = struct{}{}
-		}
-	}
-	validator, err := memory.NewWithConfig(memory.Config{ResolveLink: func(traceID agentobs.TraceID, spanID agentobs.SpanID) bool {
-		_, found := externalLinks[linkTarget{traceID: traceID, spanID: spanID}]
-		return found
-	}})
-	if err != nil {
-		return TraceProjection{}, err
-	}
 	projection := TraceProjection{Summary: TraceSummary{
 		TraceID: stored.Trace.TraceID, RunID: stored.Trace.RunID, ChatID: stored.Trace.ChatID,
 		NotebookID: stored.Trace.NotebookID, RootSpanID: stored.Trace.RootSpanID,
@@ -137,7 +122,7 @@ func BuildTraceProjection(stored StoredTrace) (TraceProjection, error) {
 		if envelope.Sequence != sequence || envelope.Record.TraceID != stored.Trace.TraceID {
 			return TraceProjection{}, errors.New("Collector projection record sequence changed")
 		}
-		if err := validator.Export(context.Background(), envelope.Record); err != nil {
+		if err := envelope.Record.Validate(); err != nil {
 			return TraceProjection{}, fmt.Errorf("validate Collector projection record %d: %w", sequence, err)
 		}
 		observed := envelope.Record.OccurredAt.UnixNano()
@@ -164,6 +149,9 @@ func BuildTraceProjection(stored StoredTrace) (TraceProjection, error) {
 			span.Replay = references
 			spanIndex[span.SpanID] = len(projection.Spans)
 			projection.Spans = append(projection.Spans, span)
+			if span.SpanID == stored.Trace.RootSpanID {
+				projection.Summary.StartedAtUnixNano = observed
+			}
 			if span.Name == "nano.job.attempt" {
 				projection.Summary.AttemptCount++
 			}
@@ -221,9 +209,6 @@ func BuildTraceProjection(stored StoredTrace) (TraceProjection, error) {
 				Attributes: cloneAttributes(envelope.Record.Attributes),
 			})
 		}
-	}
-	if len(projection.Spans) == 0 || projection.Spans[0].SpanID != stored.Trace.RootSpanID {
-		return TraceProjection{}, errors.New("Collector projection root Span is missing")
 	}
 	for model := range modelNames {
 		projection.Summary.Models = append(projection.Summary.Models, model)

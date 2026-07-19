@@ -159,6 +159,46 @@ func TestIngestorAssignsOneSequenceAcrossDirectProducerInstances(t *testing.T) {
 	}
 }
 
+func TestIngestorAcceptsDirectChildBeforeRootAndConverges(t *testing.T) {
+	store := collector.NewMemoryStore()
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerIDPrefix: "nano-", Store: store})
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+	childBatch := directCollectorBatch(t)
+	childBatch.BatchID = "batch-direct-child-first"
+	childBatch.ProducerID = "nano-worker/one"
+	child := childBatch.Chunks[0].Records[0].Record
+	child.IdentityKey = "run/run-1/attempt/1/start"
+	child.SpanID = "attempt-1"
+	child.ParentSpanID = childBatch.Chunks[0].Trace.RootSpanID
+	child.Name = "nano.job.attempt"
+	childBatch.Chunks[0].Records = []collector.SequencedRecord{collectorEnvelope(t, 0, child)}
+	first, err := ingestor.Ingest(context.Background(), childBatch)
+	if err != nil {
+		t.Fatalf("child Ingest: %v", err)
+	}
+	if got := first.Chunks[0]; got.Status != collector.ChunkCommitted || got.CommittedThrough != 1 {
+		t.Fatalf("child result = %#v", got)
+	}
+
+	rootBatch := directCollectorBatch(t)
+	rootBatch.BatchID = "batch-direct-root-late"
+	rootBatch.ProducerID = "nano-control-plane/one"
+	rootBatch.Chunks[0].Records = rootBatch.Chunks[0].Records[:1]
+	second, err := ingestor.Ingest(context.Background(), rootBatch)
+	if err != nil {
+		t.Fatalf("root Ingest: %v", err)
+	}
+	if got := second.Chunks[0]; got.Status != collector.ChunkCommitted || got.CommittedThrough != 2 {
+		t.Fatalf("root result = %#v", got)
+	}
+	stored := store.Records("trace-1")
+	if len(stored) != 2 || stored[0].Record.IdentityKey != child.IdentityKey || stored[1].Record.SpanID != rootBatch.Chunks[0].Trace.RootSpanID {
+		t.Fatalf("converged records = %#v", stored)
+	}
+}
+
 func TestIngestorAcknowledgesAnIdenticalTraceChunkResend(t *testing.T) {
 	store := collector.NewMemoryStore()
 	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})

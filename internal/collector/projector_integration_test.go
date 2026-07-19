@@ -65,6 +65,60 @@ func TestProjectorPersistsDeterministicViewsAndAdvancesWatermark(t *testing.T) {
 	}
 }
 
+func TestProjectorPersistsIncompleteDirectTraceAndConvergesAfterLateRoot(t *testing.T) {
+	ctx := context.Background()
+	pool := openObservabilityTestPool(t, ctx)
+	t.Cleanup(pool.Close)
+	resetObservabilityTestSchema(t, ctx, pool)
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{
+		ProducerIDPrefix: "nano-", Store: collector.NewPostgresStore(pool),
+	})
+	if err != nil {
+		t.Fatalf("NewIngestor: %v", err)
+	}
+	childBatch := directCollectorBatch(t)
+	childBatch.BatchID = "batch-projector-child-first"
+	childBatch.ProducerID = "nano-worker/one"
+	child := childBatch.Chunks[0].Records[0].Record
+	child.IdentityKey = "run/run-1/attempt/1/start"
+	child.SpanID = "attempt-projector-late"
+	child.ParentSpanID = childBatch.Chunks[0].Trace.RootSpanID
+	child.Name = "nano.job.attempt"
+	childBatch.Chunks[0].Records = []collector.SequencedRecord{collectorEnvelope(t, 0, child)}
+	if result, err := ingestor.Ingest(ctx, childBatch); err != nil || result.Chunks[0].Status != collector.ChunkCommitted {
+		t.Fatalf("child Ingest = %#v, %v", result, err)
+	}
+	projector, _ := collector.NewProjector(pool, collector.ProjectorConfig{RetryDelay: time.Millisecond})
+	if projected, err := projector.RunOnce(ctx); err != nil || !projected {
+		t.Fatalf("project child projected=%t error=%v", projected, err)
+	}
+	incomplete, err := collector.LoadProjectedTrace(ctx, pool, childBatch.Chunks[0].Trace.TraceID)
+	if err != nil {
+		t.Fatalf("LoadProjectedTrace incomplete: %v", err)
+	}
+	if !incomplete.Projection.Summary.Active || incomplete.ProjectedThrough != 1 || len(incomplete.Projection.Spans) != 1 {
+		t.Fatalf("incomplete projection = %#v", incomplete)
+	}
+
+	rootBatch := directCollectorBatch(t)
+	rootBatch.BatchID = "batch-projector-root-late"
+	rootBatch.ProducerID = "nano-control-plane/one"
+	rootBatch.Chunks[0].Records = rootBatch.Chunks[0].Records[:1]
+	if result, err := ingestor.Ingest(ctx, rootBatch); err != nil || result.Chunks[0].Status != collector.ChunkCommitted || result.Chunks[0].CommittedThrough != 2 {
+		t.Fatalf("root Ingest = %#v, %v", result, err)
+	}
+	if projected, err := projector.RunOnce(ctx); err != nil || !projected {
+		t.Fatalf("project root projected=%t error=%v", projected, err)
+	}
+	converged, err := collector.LoadProjectedTrace(ctx, pool, rootBatch.Chunks[0].Trace.TraceID)
+	if err != nil {
+		t.Fatalf("LoadProjectedTrace converged: %v", err)
+	}
+	if converged.ProjectedThrough != 2 || len(converged.Projection.Spans) != 2 {
+		t.Fatalf("converged projection = %#v", converged)
+	}
+}
+
 func collectorInvalidReplayReference() agentobs.Attribute {
 	return agentobs.String(replay.ModelRequestAttachmentKey, "not-an-attachment-id")
 }
