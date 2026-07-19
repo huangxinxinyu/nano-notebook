@@ -13,7 +13,11 @@ state_dir="${NANO_FAKE_DOCKER_STATE:?}"
 log="$state_dir/docker.log"
 printf '%s\n' "$*" >>"$log"
 
-if [[ "$*" == "compose -f infra/compose/compose.yaml up -d postgres" ]]; then
+if [[ "$*" == "compose -f infra/compose/compose.yaml up -d postgres minio minio-init" ]]; then
+  exit 0
+fi
+
+if [[ "$*" == "compose -f infra/compose/compose.yaml wait minio-init" ]]; then
   exit 0
 fi
 
