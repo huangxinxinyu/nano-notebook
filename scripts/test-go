@@ -25,15 +25,15 @@ if ! postgres_ready; then
   echo "postgres did not become ready" >&2
   exit 1
 fi
-if ! docker compose -f infra/compose/compose.yaml exec -T postgres psql -U nano -d nano -tc "select 1 from pg_database where datname='nano_test'" | grep -q 1; then
+if ! docker compose -f infra/compose/compose.yaml exec -T postgres psql -U nano -d nano -Atc "select 1 from pg_database where datname='nano_test'" | grep -qx 1; then
   docker compose -f infra/compose/compose.yaml exec -T postgres createdb -U nano nano_test
 fi
-if ! docker compose -f infra/compose/compose.yaml exec -T observability-postgres psql -U nano_observability -d nano_observability -tc "select 1 from pg_database where datname='nano_observability_test'" | grep -q 1; then
+if ! docker compose -f infra/compose/compose.yaml exec -T observability-postgres psql -U nano_observability -d nano_observability -Atc "select 1 from pg_database where datname='nano_observability_test'" | grep -qx 1; then
   docker compose -f infra/compose/compose.yaml exec -T observability-postgres createdb -U nano_observability nano_observability_test
 else
   docker compose -f infra/compose/compose.yaml exec -T observability-postgres psql -U nano_observability -d nano_observability -v ON_ERROR_STOP=1 -c "alter database nano_observability_test owner to nano_observability"
 fi
-if ! docker compose -f infra/compose/compose.yaml exec -T observability-postgres psql -U nano_observability -d nano_observability -tc "select 1 from pg_database where datname='nano_observability_migration_test'" | grep -q 1; then
+if ! docker compose -f infra/compose/compose.yaml exec -T observability-postgres psql -U nano_observability -d nano_observability -Atc "select 1 from pg_database where datname='nano_observability_migration_test'" | grep -qx 1; then
   docker compose -f infra/compose/compose.yaml exec -T observability-postgres createdb -U nano_observability nano_observability_migration_test
 else
   docker compose -f infra/compose/compose.yaml exec -T observability-postgres psql -U nano_observability -d nano_observability -v ON_ERROR_STOP=1 -c "alter database nano_observability_migration_test owner to nano_observability"
