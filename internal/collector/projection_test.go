@@ -55,6 +55,77 @@ func TestBuildTraceProjectionKeepsUnfinishedAndUnknownValuesExplicit(t *testing.
 	}
 }
 
+func TestBuildTraceProjectionPreservesFailedAndCancelledRootStates(t *testing.T) {
+	for _, status := range []agentobs.Status{agentobs.StatusError, agentobs.StatusCancelled} {
+		t.Run(string(status), func(t *testing.T) {
+			stored := projectionStoredTrace(t, true, true)
+			last := len(stored.Records) - 1
+			terminal := stored.Records[last].Record
+			terminal.Status = status
+			stored.Records[last] = collectorEnvelope(t, last+1, terminal)
+			projection, err := collector.BuildTraceProjection(stored)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if projection.Summary.Active || projection.Summary.Status != status || projection.Spans[0].Status != status {
+				t.Fatalf("%s projection = summary %#v root %#v", status, projection.Summary, projection.Spans[0])
+			}
+		})
+	}
+}
+
+func TestBuildTraceProjectionPreservesRecoveredAttemptRelationship(t *testing.T) {
+	traceID := agentobs.TraceID("trace-recovered-projection")
+	rootID := agentobs.SpanID("root-recovered-projection")
+	firstAttemptID := agentobs.SpanID("attempt-recovered-1")
+	secondAttemptID := agentobs.SpanID("attempt-recovered-2")
+	base := time.Unix(1_700_100_000, 0).UTC()
+	record := func(sequence int, kind agentobs.RecordKind, spanID agentobs.SpanID, name string) agentobs.Record {
+		item := collectorRecord(traceID, spanID, "recovered/record/"+time.Duration(sequence).String(), kind, name)
+		item.OccurredAt = base.Add(time.Duration(sequence-1) * time.Second)
+		return item
+	}
+	rootStart := record(1, agentobs.RecordSpanStarted, rootID, "agent.execution")
+	firstAttempt := record(2, agentobs.RecordSpanStarted, firstAttemptID, "nano.job.attempt")
+	firstAttempt.ParentSpanID = rootID
+	leaseExpired := record(3, agentobs.RecordEvent, firstAttemptID, "nano.job.lease_expired")
+	secondAttempt := record(4, agentobs.RecordSpanStarted, secondAttemptID, "nano.job.attempt")
+	secondAttempt.ParentSpanID = rootID
+	continues := record(5, agentobs.RecordLink, secondAttemptID, semconv.LinkContinues)
+	continues.TargetTraceID, continues.TargetSpanID = traceID, firstAttemptID
+	secondAttemptEnd := record(6, agentobs.RecordSpanEnded, secondAttemptID, "nano.job.attempt")
+	secondAttemptEnd.Status = agentobs.StatusOK
+	rootEnd := record(7, agentobs.RecordSpanEnded, rootID, "agent.execution")
+	rootEnd.Status = agentobs.StatusOK
+	stored := collector.StoredTrace{
+		Trace: collector.TraceDescriptor{
+			TraceID: traceID, RunID: "run-recovered", ChatID: "chat-recovered", NotebookID: "notebook-recovered",
+			RootSpanID: rootID, AgentName: "nano-research-agent", SchemaVersion: 1, SemanticConventionVersion: 1,
+		},
+		CommittedThrough: 7,
+		Records: []collector.SequencedRecord{
+			collectorEnvelope(t, 1, rootStart), collectorEnvelope(t, 2, firstAttempt),
+			collectorEnvelope(t, 3, leaseExpired), collectorEnvelope(t, 4, secondAttempt),
+			collectorEnvelope(t, 5, continues), collectorEnvelope(t, 6, secondAttemptEnd),
+			collectorEnvelope(t, 7, rootEnd),
+		},
+	}
+
+	projection, err := collector.BuildTraceProjection(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Summary.AttemptCount != 2 || projection.Summary.Status != agentobs.StatusOK || projection.Summary.Active {
+		t.Fatalf("recovered summary = %#v", projection.Summary)
+	}
+	if len(projection.Spans) != 3 || projection.Spans[1].EndSequence != nil || projection.Spans[2].Status != agentobs.StatusOK {
+		t.Fatalf("recovered attempt spans = %#v", projection.Spans)
+	}
+	if len(projection.Links) != 1 || projection.Links[0].Name != semconv.LinkContinues || projection.Links[0].TargetSpanID != firstAttemptID {
+		t.Fatalf("recovered links = %#v", projection.Links)
+	}
+}
+
 func TestBuildTraceProjectionRejectsInvalidReplayReference(t *testing.T) {
 	stored := projectionStoredTrace(t, true, true)
 	stored.Records[3].Record.Attributes = append(stored.Records[3].Record.Attributes,
