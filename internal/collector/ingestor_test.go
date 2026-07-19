@@ -3,6 +3,7 @@ package collector_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
+	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 )
 
 func TestIngestorCommitsContiguousTraceChunk(t *testing.T) {
@@ -498,6 +500,34 @@ func directCollectorBatch(t *testing.T) collector.Batch {
 		batch.Chunks[0].Records[index].Sequence = 0
 	}
 	return batch
+}
+
+func TestIngestorResolvesDirectReplayAttachmentByRecordIdentity(t *testing.T) {
+	store := collector.NewMemoryStore()
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := directCollectorBatch(t)
+	const attachmentID = "019bf000-0000-7000-8000-000000000202"
+	record := batch.Chunks[0].Records[1].Record
+	record.Attributes = append(record.Attributes, agentobs.String(replay.ModelRequestAttachmentKey, attachmentID))
+	batch.Chunks[0].Records[1] = collectorEnvelope(t, 0, record)
+	ciphertext := []byte("opaque-ciphertext")
+	digest := sha256.Sum256(ciphertext)
+	batch.Chunks[0].Attachments = []collector.AttachmentDescriptor{{
+		AttachmentID: attachmentID, RecordIdentityKey: record.IdentityKey,
+		Class: replay.ClassModelRequest, SchemaVersion: 1, PlaintextSHA256: strings.Repeat("b", 64),
+		StagingObjectKey: "producer-staging/direct-attachment", CiphertextBytes: len(ciphertext),
+		CiphertextSHA256: hex.EncodeToString(digest[:]), Compression: replay.CompressionGZIP,
+		Encryption: replay.EncryptionAES256GCM, KeyID: "dev-key-v1",
+		WrappedKey: bytes.Repeat([]byte{0xc3}, 60), Nonce: bytes.Repeat([]byte{0xd4}, 12),
+		ExpiresAt: time.Now().UTC().Add(7 * 24 * time.Hour),
+	}}
+	result, err := ingestor.Ingest(context.Background(), batch)
+	if err != nil || result.Chunks[0].Status != collector.ChunkCommitted || result.Chunks[0].CommittedThrough != 2 {
+		t.Fatalf("direct Replay ingest = %#v err=%v", result, err)
+	}
 }
 
 func collectorBatchFor(t *testing.T, suffix string) collector.Batch {

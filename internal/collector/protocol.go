@@ -74,20 +74,21 @@ type TraceChunk struct {
 }
 
 type AttachmentDescriptor struct {
-	AttachmentID     string       `json:"attachment_id"`
-	RecordSequence   int          `json:"record_sequence"`
-	Class            replay.Class `json:"class"`
-	SchemaVersion    int          `json:"schema_version"`
-	PlaintextSHA256  string       `json:"plaintext_sha256"`
-	StagingObjectKey string       `json:"staging_object_key"`
-	CiphertextBytes  int          `json:"ciphertext_bytes"`
-	CiphertextSHA256 string       `json:"ciphertext_sha256"`
-	Compression      string       `json:"compression"`
-	Encryption       string       `json:"encryption"`
-	KeyID            string       `json:"key_id"`
-	WrappedKey       []byte       `json:"wrapped_key"`
-	Nonce            []byte       `json:"nonce"`
-	ExpiresAt        time.Time    `json:"expires_at"`
+	AttachmentID      string       `json:"attachment_id"`
+	RecordSequence    int          `json:"record_sequence"`
+	RecordIdentityKey string       `json:"record_identity_key,omitempty"`
+	Class             replay.Class `json:"class"`
+	SchemaVersion     int          `json:"schema_version"`
+	PlaintextSHA256   string       `json:"plaintext_sha256"`
+	StagingObjectKey  string       `json:"staging_object_key"`
+	CiphertextBytes   int          `json:"ciphertext_bytes"`
+	CiphertextSHA256  string       `json:"ciphertext_sha256"`
+	Compression       string       `json:"compression"`
+	Encryption        string       `json:"encryption"`
+	KeyID             string       `json:"key_id"`
+	WrappedKey        []byte       `json:"wrapped_key"`
+	Nonce             []byte       `json:"nonce"`
+	ExpiresAt         time.Time    `json:"expires_at"`
 }
 
 type SequencedRecord struct {

@@ -9,6 +9,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agentbatch"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
+	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 )
 
 type AttemptTraceRecorder struct {
@@ -130,7 +131,11 @@ func (r *AttemptTraceRecorder) Record(ctx context.Context, record agentobs.Recor
 			record.SemanticConventionVersion != r.trace.SemanticConventionVersion {
 			return errors.New("Attempt Trace record changed its direct-delivery envelope")
 		}
-		return r.runtime.traceSink.Offer(ctx, agentbatch.Envelope{Trace: r.trace, Record: record})
+		attachments, err := directReplayAttachments(r.runtime.replayStager, record)
+		if err != nil {
+			return err
+		}
+		return r.runtime.traceSink.Offer(ctx, agentbatch.Envelope{Trace: r.trace, Record: record, Attachments: attachments})
 	}
 	var appendErr error
 	for try := 0; try < 2; try++ {
@@ -153,6 +158,38 @@ func (r *AttemptTraceRecorder) Record(ctx context.Context, record agentobs.Recor
 		}
 	}
 	return fmt.Errorf("Attempt Trace append exhausted retries: %w", appendErr)
+}
+
+type stagedReplaySource interface {
+	StagedAttachment(string) (replay.StagedAttachment, bool)
+}
+
+func directReplayAttachments(stager ReplayStager, record agentobs.Record) ([]collector.AttachmentDescriptor, error) {
+	references, err := replay.AttachmentReferences(record.Attributes)
+	if err != nil || len(references) == 0 {
+		return nil, err
+	}
+	source, ok := stager.(stagedReplaySource)
+	if !ok {
+		return nil, errors.New("direct Replay staging descriptor source is unavailable")
+	}
+	attachments := make([]collector.AttachmentDescriptor, 0, len(references))
+	for _, reference := range references {
+		staged, found := source.StagedAttachment(reference.AttachmentID)
+		if !found || staged.Class != reference.Class {
+			return nil, errors.New("direct Replay staging descriptor does not resolve")
+		}
+		attachments = append(attachments, collector.AttachmentDescriptor{
+			AttachmentID: staged.AttachmentID, RecordIdentityKey: record.IdentityKey,
+			Class: staged.Class, SchemaVersion: staged.SchemaVersion,
+			PlaintextSHA256: staged.PlaintextSHA256, StagingObjectKey: staged.ObjectKey,
+			CiphertextBytes: staged.CiphertextBytes, CiphertextSHA256: staged.CiphertextSHA256,
+			Compression: staged.Compression, Encryption: staged.Encryption, KeyID: staged.KeyID,
+			WrappedKey: append([]byte(nil), staged.WrappedKey...), Nonce: append([]byte(nil), staged.Nonce...),
+			ExpiresAt: staged.ExpiresAt,
+		})
+	}
+	return attachments, nil
 }
 
 func (r *AttemptTraceRecorder) SpanIDForIdentity(traceID agentobs.TraceID, identityKey string) agentobs.SpanID {

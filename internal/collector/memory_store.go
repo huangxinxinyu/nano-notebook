@@ -91,6 +91,11 @@ func validateAndMergeTraceChunk(ctx context.Context, existing memoryTrace, chunk
 	if (!collectorSequence && chunk.FirstSequence < 1) || (collectorSequence && chunk.FirstSequence != 0) || len(chunk.Records) == 0 {
 		return memoryTrace{}, 0, &ChunkError{Code: CodeInvalidChunk, Err: errors.New("Collector Trace Chunk is empty or unsequenced")}
 	}
+	var err error
+	chunk, err = resolveDirectAttachmentSequences(existing.records, chunk)
+	if err != nil {
+		return memoryTrace{}, 0, &ChunkError{Code: CodeInvalidChunk, CommittedThrough: len(existing.records), Err: err}
+	}
 	if err := validateAttachmentDescriptors(chunk); err != nil {
 		return memoryTrace{}, 0, &ChunkError{Code: CodeInvalidChunk, CommittedThrough: len(existing.records), Err: err}
 	}
@@ -255,6 +260,7 @@ func memoryTraceHasSpan(trace memoryTrace, spanID agentobs.SpanID) bool {
 func sameAttachmentIdentity(left, right AttachmentDescriptor) bool {
 	return left.AttachmentID == right.AttachmentID &&
 		left.RecordSequence == right.RecordSequence &&
+		left.RecordIdentityKey == right.RecordIdentityKey &&
 		left.Class == right.Class &&
 		left.SchemaVersion == right.SchemaVersion &&
 		left.PlaintextSHA256 == right.PlaintextSHA256 &&
@@ -282,9 +288,11 @@ func validateAttachmentDescriptors(chunk TraceChunk) error {
 	byRecordClass := make(map[string]struct{}, len(chunk.Attachments))
 	firstSequence := chunk.FirstSequence
 	lastSequence := firstSequence + len(chunk.Records) - 1
+	direct := chunk.SequenceAuthority == SequenceAuthorityCollector
 	for _, attachment := range chunk.Attachments {
 		if _, err := uuid.Parse(attachment.AttachmentID); err != nil ||
-			attachment.RecordSequence < firstSequence || attachment.RecordSequence > lastSequence ||
+			(!direct && (attachment.RecordSequence < firstSequence || attachment.RecordSequence > lastSequence)) ||
+			(direct && (attachment.RecordSequence < 1 || !validDescriptorText(attachment.RecordIdentityKey, 200))) ||
 			!attachment.Class.Valid() || attachment.SchemaVersion != 1 ||
 			!validSHA256(attachment.PlaintextSHA256) ||
 			!validDescriptorText(attachment.StagingObjectKey, 512) ||
@@ -312,13 +320,28 @@ func validateAttachmentDescriptors(chunk TraceChunk) error {
 		}
 		for _, reference := range references {
 			descriptor, found := byID[reference.AttachmentID]
-			if !found || descriptor.Class != reference.Class || descriptor.RecordSequence != firstSequence+index {
+			if !found || descriptor.Class != reference.Class ||
+				(!direct && descriptor.RecordSequence != firstSequence+index) ||
+				(direct && descriptor.RecordIdentityKey != envelope.Record.IdentityKey) {
 				return errors.New("Collector record Replay Attachment does not resolve")
 			}
 		}
 	}
 	for _, descriptor := range byID {
-		record := chunk.Records[descriptor.RecordSequence-firstSequence].Record
+		var record agentobs.Record
+		if direct {
+			for _, envelope := range chunk.Records {
+				if envelope.Record.IdentityKey == descriptor.RecordIdentityKey {
+					record = envelope.Record
+					break
+				}
+			}
+		} else {
+			record = chunk.Records[descriptor.RecordSequence-firstSequence].Record
+		}
+		if record.IdentityKey == "" {
+			return errors.New("Collector Replay Attachment record identity does not resolve")
+		}
 		references, _ := replay.AttachmentReferences(record.Attributes)
 		found := false
 		for _, reference := range references {
@@ -329,6 +352,33 @@ func validateAttachmentDescriptors(chunk TraceChunk) error {
 		}
 	}
 	return nil
+}
+
+func resolveDirectAttachmentSequences(existing []SequencedRecord, chunk TraceChunk) (TraceChunk, error) {
+	if chunk.SequenceAuthority != SequenceAuthorityCollector || len(chunk.Attachments) == 0 {
+		return chunk, nil
+	}
+	sequences := make(map[string]int, len(existing)+len(chunk.Records))
+	for _, record := range existing {
+		sequences[record.Record.IdentityKey] = record.Sequence
+	}
+	next := len(existing)
+	for _, record := range chunk.Records {
+		if _, found := sequences[record.Record.IdentityKey]; found {
+			continue
+		}
+		next++
+		sequences[record.Record.IdentityKey] = next
+	}
+	chunk.Attachments = append([]AttachmentDescriptor(nil), chunk.Attachments...)
+	for index := range chunk.Attachments {
+		sequence, found := sequences[chunk.Attachments[index].RecordIdentityKey]
+		if !found {
+			return TraceChunk{}, errors.New("Collector Replay Attachment record identity is unknown")
+		}
+		chunk.Attachments[index].RecordSequence = sequence
+	}
+	return chunk, nil
 }
 
 func validSHA256(value string) bool {

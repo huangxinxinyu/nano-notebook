@@ -49,19 +49,12 @@ func (s *PostgresStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk) 
 	if err := validateTraceDescriptor(chunk.Trace); err != nil {
 		return 0, &ChunkError{Code: CodeInvalidChunk, Err: err}
 	}
-	if err := validateAttachmentDescriptors(chunk); err != nil {
-		return 0, &ChunkError{Code: CodeInvalidChunk, Err: err}
-	}
 	var tombstoned bool
 	if err := s.pool.QueryRow(ctx, `select exists(select 1 from obs_trace_tombstones where trace_id = $1)`, chunk.Trace.TraceID).Scan(&tombstoned); err != nil {
 		return 0, err
 	}
 	if tombstoned {
 		return 0, &ChunkError{Code: CodeTombstoned, Err: errors.New("Collector Trace is tombstoned")}
-	}
-	preparedAttachments, err := s.prepareReplayAttachments(ctx, chunk)
-	if err != nil {
-		return 0, err
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -100,6 +93,10 @@ func (s *PostgresStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk) 
 			Err: errors.New("Collector Trace is tombstoned"),
 		}
 	}
+	chunk, err = resolveDirectAttachmentSequences(existing.Records, chunk)
+	if err != nil {
+		return 0, &ChunkError{Code: CodeInvalidChunk, CommittedThrough: existing.CommittedThrough, Err: err}
+	}
 	merged, committedThrough, err := validateAndMergeTraceChunk(ctx, memoryTrace{
 		descriptor: existing.Trace,
 		records:    existing.Records,
@@ -113,6 +110,10 @@ func (s *PostgresStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk) 
 		`, traceID, spanID).Scan(&found)
 		return found, err
 	})
+	if err != nil {
+		return 0, err
+	}
+	preparedAttachments, err := s.prepareReplayAttachments(ctx, chunk)
 	if err != nil {
 		return 0, err
 	}

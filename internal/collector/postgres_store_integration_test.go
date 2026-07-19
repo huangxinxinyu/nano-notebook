@@ -404,6 +404,48 @@ func TestPostgresStoreTakesOpaqueReplayCustodyBeforeACKAndReconcilesWithoutStagi
 	}
 }
 
+func TestPostgresStoreResolvesDirectReplayIdentityToCollectorSequence(t *testing.T) {
+	ctx := context.Background()
+	pool := openObservabilityTestPool(t, ctx)
+	t.Cleanup(pool.Close)
+	resetObservabilityTestSchema(t, ctx, pool)
+	producerObjects := objectstore.NewMemoryStore()
+	collectorObjects := objectstore.NewMemoryStore()
+	ciphertext := bytes.Repeat([]byte{0xb6}, 128)
+	if err := producerObjects.Put(ctx, "producer-staging/attachment-1", ciphertext); err != nil {
+		t.Fatal(err)
+	}
+	store, err := collector.NewPostgresStoreWithReplay(pool, producerObjects, collectorObjects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ingestor, err := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch := collectorBatchWithReplay(t, ciphertext)
+	batch.ProtocolVersion = collector.DirectProtocolVersion
+	batch.Chunks[0].SequenceAuthority = collector.SequenceAuthorityCollector
+	batch.Chunks[0].FirstSequence = 0
+	for index := range batch.Chunks[0].Records {
+		batch.Chunks[0].Records[index].Sequence = 0
+	}
+	batch.Chunks[0].Attachments[0].RecordSequence = 0
+	batch.Chunks[0].Attachments[0].RecordIdentityKey = batch.Chunks[0].Records[1].Record.IdentityKey
+	result, err := ingestor.Ingest(ctx, batch)
+	if err != nil || result.Chunks[0].Status != collector.ChunkCommitted {
+		t.Fatalf("direct Replay ingest = %#v err=%v", result, err)
+	}
+	var sequence int
+	if err := pool.QueryRow(ctx, `select record_sequence from obs_payload_refs where attachment_id = $1`,
+		batch.Chunks[0].Attachments[0].AttachmentID).Scan(&sequence); err != nil {
+		t.Fatal(err)
+	}
+	if sequence != 2 {
+		t.Fatalf("Collector Replay sequence = %d, want 2", sequence)
+	}
+}
+
 func TestPostgresStoreTreatsMissingReplayStagingObjectAsRetryableDependency(t *testing.T) {
 	ctx := context.Background()
 	pool := openObservabilityTestPool(t, ctx)

@@ -105,16 +105,9 @@ func main() {
 		slog.Error("Replay envelope encryption invalid", "error", err)
 		os.Exit(1)
 	}
-	replayStager, err := replay.NewPostgresStager(db.Pool(), sealer, stagingObjects, replay.StagerConfig{})
+	replayStager, err := replay.NewObjectStager(sealer, stagingObjects, replay.StagerConfig{})
 	if err != nil {
 		slog.Error("Replay Stager invalid", "error", err)
-		os.Exit(1)
-	}
-	stagingMaintenance, err := replay.NewStagingMaintenance(db.Pool(), stagingObjects, replay.StagingMaintenanceConfig{
-		ReportError: func(err error) { slog.Error("Replay staging maintenance failed", "error", err) },
-	})
-	if err != nil {
-		slog.Error("Replay staging maintenance invalid", "error", err)
 		os.Exit(1)
 	}
 	batchHTTP, err := agentbatch.NewHTTPSender(agentbatch.HTTPSenderConfig{
@@ -152,8 +145,6 @@ func main() {
 			stop()
 		}
 	}()
-	stagingMaintenanceDone := make(chan error, 1)
-	go func() { stagingMaintenanceDone <- stagingMaintenance.Run(ctx) }()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", func(w http.ResponseWriter, r *http.Request) {
@@ -193,16 +184,6 @@ func main() {
 		}
 	case <-shutdownCtx.Done():
 		slog.Error("agent worker did not release its lease before shutdown", "error", shutdownCtx.Err())
-		os.Exit(1)
-	}
-	select {
-	case err := <-stagingMaintenanceDone:
-		if err != nil {
-			slog.Error("Replay staging maintenance shutdown failed", "error", err)
-			os.Exit(1)
-		}
-	case <-shutdownCtx.Done():
-		slog.Error("Replay staging maintenance did not stop before shutdown", "error", shutdownCtx.Err())
 		os.Exit(1)
 	}
 	if err := shutdownTraceExporter(shutdownCtx, traceExporter); err != nil {
