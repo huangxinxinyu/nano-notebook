@@ -134,6 +134,88 @@ create index if not exists obs_projection_queue_ready_idx
 	on obs_projection_queue(available_at, trace_id)
 	where lease_token is null;
 
+create table if not exists obs_trace_summaries (
+	trace_id text primary key references obs_traces(trace_id) on delete cascade,
+	run_id text not null,
+	chat_id text not null,
+	notebook_id text not null,
+	root_span_id text not null,
+	agent_name text not null,
+	started_at_unix_nano bigint not null,
+	last_observed_unix_nano bigint not null,
+	ended_at_unix_nano bigint,
+	duration_nanoseconds bigint check (duration_nanoseconds is null or duration_nanoseconds >= 0),
+	status text not null default '',
+	active boolean not null,
+	models text[] not null default '{}',
+	input_tokens bigint,
+	output_tokens bigint,
+	total_tokens bigint,
+	cost_known boolean not null default false,
+	cost_amount double precision,
+	cost_currency text not null default '',
+	cost_source text not null default '',
+	attempt_count integer not null default 0 check (attempt_count >= 0),
+	projected_sequence integer not null check (projected_sequence >= 1),
+	updated_at timestamptz not null default now()
+);
+
+create index if not exists obs_trace_summaries_cursor_idx
+	on obs_trace_summaries(started_at_unix_nano desc, trace_id desc);
+create index if not exists obs_trace_summaries_run_idx on obs_trace_summaries(run_id);
+create index if not exists obs_trace_summaries_chat_idx on obs_trace_summaries(chat_id);
+create index if not exists obs_trace_summaries_notebook_idx on obs_trace_summaries(notebook_id);
+create index if not exists obs_trace_summaries_agent_idx on obs_trace_summaries(agent_name);
+create index if not exists obs_trace_summaries_status_idx on obs_trace_summaries(status, active);
+create index if not exists obs_trace_summaries_models_idx on obs_trace_summaries using gin(models);
+
+create table if not exists obs_spans (
+	trace_id text not null references obs_trace_summaries(trace_id) on delete cascade,
+	span_id text not null,
+	parent_span_id text not null default '',
+	name text not null,
+	start_sequence integer not null,
+	end_sequence integer,
+	started_at_unix_nano bigint not null,
+	ended_at_unix_nano bigint,
+	duration_nanoseconds bigint check (duration_nanoseconds is null or duration_nanoseconds >= 0),
+	status text not null default '',
+	start_attributes jsonb not null,
+	end_attributes jsonb not null,
+	replay_references jsonb not null,
+	model_analysis jsonb,
+	primary key (trace_id, span_id)
+);
+
+create index if not exists obs_spans_parent_idx on obs_spans(trace_id, parent_span_id, start_sequence);
+
+create table if not exists obs_events (
+	trace_id text not null references obs_trace_summaries(trace_id) on delete cascade,
+	sequence integer not null,
+	span_id text not null,
+	name text not null,
+	occurred_at_unix_nano bigint not null,
+	attributes jsonb not null,
+	primary key (trace_id, sequence)
+);
+
+create index if not exists obs_events_span_idx on obs_events(trace_id, span_id, sequence);
+
+create table if not exists obs_links (
+	trace_id text not null references obs_trace_summaries(trace_id) on delete cascade,
+	sequence integer not null,
+	span_id text not null,
+	name text not null,
+	target_trace_id text not null,
+	target_span_id text not null,
+	occurred_at_unix_nano bigint not null,
+	attributes jsonb not null,
+	primary key (trace_id, sequence)
+);
+
+create index if not exists obs_links_span_idx on obs_links(trace_id, span_id, sequence);
+create index if not exists obs_links_target_idx on obs_links(target_trace_id, target_span_id);
+
 create table if not exists obs_purge_queue (
 	trace_id text primary key references obs_trace_tombstones(trace_id) on delete cascade,
 	stage text not null default 'pending' check (stage in ('pending', 'objects_removed', 'content_removed')),

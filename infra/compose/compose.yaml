@@ -53,6 +53,10 @@ services:
       NANO_COLLECTOR_ADDR: ":8082"
       NANO_COLLECTOR_DATABASE_URL: postgres://nano_observability:nano-observability@postgres:5432/nano_observability?sslmode=disable
       NANO_COLLECTOR_SERVICE_TOKEN: nano-local-collector-token
+      NANO_COLLECTOR_QUERY_TOKEN: nano-local-collector-query-token
+      NANO_COLLECTOR_DATABASE_MAX_CONNS: "16"
+      NANO_COLLECTOR_PROJECTION_DATABASE_MAX_CONNS: "4"
+      NANO_COLLECTOR_QUERY_DATABASE_MAX_CONNS: "8"
       NANO_COLLECTOR_PRODUCER_ID: nano-worker
       NANO_REPLAY_STAGING_S3_ENDPOINT: minio:9000
       NANO_REPLAY_STAGING_S3_ACCESS_KEY_ID: nano

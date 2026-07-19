@@ -7,8 +7,13 @@ func TestLoadConfigUsesDedicatedCollectorDatabaseAndPool(t *testing.T) {
 	t.Setenv("NANO_COLLECTOR_DATABASE_URL", "postgres://observability")
 	t.Setenv("NANO_COLLECTOR_DATABASE_MAX_CONNS", "24")
 	t.Setenv("NANO_COLLECTOR_DATABASE_MIN_CONNS", "3")
+	t.Setenv("NANO_COLLECTOR_PROJECTION_DATABASE_MAX_CONNS", "5")
+	t.Setenv("NANO_COLLECTOR_PROJECTION_DATABASE_MIN_CONNS", "1")
+	t.Setenv("NANO_COLLECTOR_QUERY_DATABASE_MAX_CONNS", "7")
+	t.Setenv("NANO_COLLECTOR_QUERY_DATABASE_MIN_CONNS", "2")
 	t.Setenv("NANO_COLLECTOR_ADDR", ":18082")
 	t.Setenv("NANO_COLLECTOR_SERVICE_TOKEN", "test-service-token")
+	t.Setenv("NANO_COLLECTOR_QUERY_TOKEN", "test-query-token")
 	t.Setenv("NANO_COLLECTOR_PRODUCER_ID", "test-worker")
 	t.Setenv("NANO_REPLAY_STAGING_S3_ENDPOINT", "staging.internal:9000")
 	t.Setenv("NANO_REPLAY_STAGING_S3_ACCESS_KEY_ID", "collector-staging-reader")
@@ -29,7 +34,10 @@ func TestLoadConfigUsesDedicatedCollectorDatabaseAndPool(t *testing.T) {
 	if config.DatabaseMaxConns != 24 || config.DatabaseMinConns != 3 {
 		t.Fatalf("database pool = %d/%d", config.DatabaseMaxConns, config.DatabaseMinConns)
 	}
-	if config.Addr != ":18082" || config.ServiceToken != "test-service-token" || config.ProducerID != "test-worker" {
+	if config.ProjectionDatabaseMaxConns != 5 || config.ProjectionDatabaseMinConns != 1 || config.QueryDatabaseMaxConns != 7 || config.QueryDatabaseMinConns != 2 {
+		t.Fatalf("projection/query pools = %#v", config)
+	}
+	if config.Addr != ":18082" || config.ServiceToken != "test-service-token" || config.QueryToken != "test-query-token" || config.ProducerID != "test-worker" {
 		t.Fatalf("Collector config = %#v", config)
 	}
 	if config.ReplayStagingS3.Endpoint != "staging.internal:9000" || config.ReplayStagingS3.AccessKeyID != "collector-staging-reader" || config.ReplayStagingS3.Bucket != "worker-staging" ||

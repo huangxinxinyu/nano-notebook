@@ -129,6 +129,29 @@ create table if not exists identity_auth_attempts (
 create index if not exists identity_auth_attempts_recent_idx
 	on identity_auth_attempts(canonical_email, attempted_at desc);
 
+create table if not exists platform_capability_grants (
+	user_id text not null references identity_users(id) on delete cascade,
+	capability text not null check (capability in ('platform.trace.read', 'platform.trace.replay')),
+	granted_by text,
+	granted_at timestamptz not null default now(),
+	primary key (user_id, capability)
+);
+
+create table if not exists platform_replay_access_audit (
+	id text primary key,
+	operator_user_id text not null references identity_users(id) on delete restrict,
+	trace_id text not null check (char_length(trace_id) between 1 and 128),
+	span_id text not null check (char_length(span_id) between 1 and 128),
+	replay_id text not null check (char_length(replay_id) between 1 and 128),
+	replay_class text not null default '' check (replay_class in ('', 'model_request', 'model_decision', 'action_input', 'action_result')),
+	outcome text not null check (outcome in ('allowed', 'denied', 'failed')),
+	failure_code text not null default '' check (char_length(failure_code) <= 64),
+	requested_at timestamptz not null default now()
+);
+
+create index if not exists platform_replay_access_audit_operator_idx
+	on platform_replay_access_audit(operator_user_id, requested_at desc);
+
 create table if not exists notebook_notebooks (
 	id text primary key,
 	title text not null check (char_length(title) between 1 and 160),
@@ -949,6 +972,8 @@ alter table identity_users enable row level security;
 alter table identity_local_credentials enable row level security;
 alter table identity_sessions enable row level security;
 alter table identity_auth_attempts enable row level security;
+alter table platform_capability_grants enable row level security;
+alter table platform_replay_access_audit enable row level security;
 alter table notebook_notebooks enable row level security;
 alter table notebook_memberships enable row level security;
 alter table platform_idempotency_keys enable row level security;
@@ -971,6 +996,8 @@ grant select, insert, update, delete on
 	identity_local_credentials,
 	identity_sessions,
 	identity_auth_attempts,
+	platform_capability_grants,
+	platform_replay_access_audit,
 	notebook_notebooks,
 	notebook_memberships,
 	platform_idempotency_keys,
@@ -979,6 +1006,9 @@ grant select, insert, update, delete on
 	agent_runs,
 	agent_jobs
 to nano_app;
+revoke update, delete on platform_capability_grants, platform_replay_access_audit from nano_app;
+revoke insert on platform_capability_grants from nano_app;
+revoke select on platform_replay_access_audit from nano_app;
 grant select on
 	identity_users,
 	identity_sessions,
@@ -1014,6 +1044,16 @@ create policy identity_sessions_owner on identity_sessions
 	for all to nano_app
 	using (user_id = nullif(current_setting('app.principal_id', true), ''))
 	with check (user_id = nullif(current_setting('app.principal_id', true), ''));
+
+drop policy if exists platform_capability_grants_owner on platform_capability_grants;
+create policy platform_capability_grants_owner on platform_capability_grants
+	for select to nano_app
+	using (user_id = nullif(current_setting('app.principal_id', true), ''));
+
+drop policy if exists platform_replay_access_audit_append on platform_replay_access_audit;
+create policy platform_replay_access_audit_append on platform_replay_access_audit
+	for insert to nano_app
+	with check (operator_user_id = nullif(current_setting('app.principal_id', true), ''));
 
 drop policy if exists notebook_memberships_owner on notebook_memberships;
 create policy notebook_memberships_owner on notebook_memberships

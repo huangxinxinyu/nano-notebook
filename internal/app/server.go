@@ -14,9 +14,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/chat"
+	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 	"github.com/huangxinxinyu/nano-notebook/internal/identity"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/notebook"
+	"github.com/huangxinxinyu/nano-notebook/internal/replay"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -26,6 +28,8 @@ type Config struct {
 	Version      string
 	DefaultModel string
 	AgentRun     agent.RunConfig
+	AdminTraces  collector.QueryClient
+	ReplaySealer *replay.Sealer
 }
 
 type Server struct {
@@ -35,6 +39,8 @@ type Server struct {
 	notebookStore *notebook.Store
 	mux           *http.ServeMux
 	runHub        *runHub
+	adminTraces   collector.QueryClient
+	replaySealer  *replay.Sealer
 }
 
 func NewServer(cfg Config, db *DB) *Server {
@@ -45,7 +51,7 @@ func NewServer(cfg Config, db *DB) *Server {
 		cfg.DefaultModel = "aliyun/qwen-flash"
 	}
 	cfg.AgentRun = normalizedRunConfig(cfg.AgentRun)
-	s := &Server{cfg: cfg, db: db, identity: identity.NewStore(db.Pool()), notebookStore: notebook.NewStore(db.Pool()), mux: http.NewServeMux(), runHub: newRunHub()}
+	s := &Server{cfg: cfg, db: db, identity: identity.NewStore(db.Pool()), notebookStore: notebook.NewStore(db.Pool()), mux: http.NewServeMux(), runHub: newRunHub(), adminTraces: cfg.AdminTraces, replaySealer: cfg.ReplaySealer}
 	s.routes()
 	return s
 }
@@ -66,6 +72,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/notebooks/", s.notebookByID)
 	s.mux.HandleFunc("/api/v1/chats/", s.chatByID)
 	s.mux.HandleFunc("/api/v1/agent-runs/", s.agentRunByID)
+	s.mux.HandleFunc("/api/admin/traces", s.adminTraceList)
+	s.mux.HandleFunc("/api/admin/traces/", s.adminTraceByID)
 }
 
 func (s *Server) NotifyRun(runID string) {
@@ -120,7 +128,12 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, http.StatusUnauthorized, "session_expired", "error.session_expired")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"user": scopedUser})
+	capabilities, err := s.platformCapabilities(r.Context(), user.ID)
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user": scopedUser, "platform_capabilities": capabilities})
 }
 
 func (s *Server) register(w http.ResponseWriter, r *http.Request) {

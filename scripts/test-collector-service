@@ -8,6 +8,7 @@ export NANO_DATABASE_URL="${NANO_DATABASE_URL:-postgres://nano:nano@localhost:55
 export NANO_COLLECTOR_DATABASE_URL="${NANO_COLLECTOR_DATABASE_URL:-postgres://nano_observability:nano-observability@localhost:55432/nano_observability?sslmode=disable}"
 export NANO_COLLECTOR_ADDR="${NANO_COLLECTOR_ADDR:-127.0.0.1:18082}"
 export NANO_COLLECTOR_SERVICE_TOKEN="${NANO_COLLECTOR_SERVICE_TOKEN:-nano-local-collector-token}"
+export NANO_COLLECTOR_QUERY_TOKEN="${NANO_COLLECTOR_QUERY_TOKEN:-nano-local-collector-query-token}"
 
 docker compose -f infra/compose/compose.yaml up -d postgres minio minio-init >/dev/null
 docker compose -f infra/compose/compose.yaml wait minio-init >/dev/null

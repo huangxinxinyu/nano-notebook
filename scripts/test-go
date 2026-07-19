@@ -44,4 +44,4 @@ fi
 packages="$(go list ./... | grep -v '/web/node_modules/')"
 go test -count=1 $packages
 go vet $packages
-go build ./cmd/control-plane ./cmd/worker ./cmd/migrate ./cmd/collector
+go build ./cmd/control-plane ./cmd/worker ./cmd/migrate ./cmd/collector ./cmd/platform-grant ./cmd/collector-rebuild
