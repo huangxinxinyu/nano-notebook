@@ -48,6 +48,7 @@ If this PRD conflicts with an approved architecture or product decision, the app
 3. **Replay content:** Trace records continue to exclude raw prompts, responses, and Action Results. Sprint 5 separately captures encrypted, application-normalized Replay Payloads. Raw Bifrost or Provider envelopes, credentials, and hidden model reasoning remain prohibited.
 4. **Independent payload retention:** Trace metadata follows the parent Run lifecycle. Replay Payloads have a shorter configurable TTL with a seven-day default.
 5. **Administrative projection:** Durable Agent Trace remains distinct from a user-visible Reasoning Trace, but Sprint 5 adds an internal Operator projection and Dashboard.
+6. **Deferred production key custody:** Sprint 5 preserves the `KeyProvider` boundary and ships a repository-owned development provider for local and test use. A concrete cloud or Vault KMS adapter, production key policy, and production Replay key custody are deferred deployment prerequisites rather than Sprint 5 acceptance criteria.
 
 ## 3. Sprint Goal
 
@@ -267,6 +268,8 @@ Changing PostgreSQL instance, adding a query replica, partitioning records, or r
 
 Sprint 5 does not introduce Kafka, a managed queue, Kubernetes, ClickHouse, or a second buffering system. Operational evidence must justify those later changes.
 
+The topology above is the production target, but Sprint 5 does not claim that Replay is production-deployable with its development key provider. A production deployment that enables Replay must first supply a reviewed cloud or Vault KMS implementation behind `KeyProvider`, together with key policy, rotation, recovery, and access-audit procedures.
+
 ## 9. Producer Data Model
 
 Application PostgreSQL retains minimal Trace identity and transport state.
@@ -482,7 +485,7 @@ Replay Payloads are:
 5. integrity-protected by ciphertext SHA-256;
 6. staged durably before the referencing Outbox commit.
 
-The Collector stores opaque ciphertext and cannot decrypt it. Local development uses a repository-owned development key provider. Production uses a configured KMS-backed key provider. Object keys are opaque and are never sent to the browser.
+The Collector stores opaque ciphertext and cannot decrypt it. Sprint 5 uses a repository-owned development key provider for local and test deployments while keeping encryption and decryption behind `KeyProvider`. A concrete cloud or Vault KMS adapter is deferred: production Replay must remain disabled until that adapter and its operational policy are supplied. Object keys are opaque and are never sent to the browser.
 
 Initial configurable bounds are 2 MiB ciphertext per Attachment, 32 Replay Attachments per Trace, and 16 MiB Replay ciphertext per Trace. Bounds must remain above the product's accepted Model and Action context limits. Oversize content fails before the corresponding Model or Action boundary rather than producing an unmarked partial Replay.
 
@@ -933,6 +936,7 @@ Recovery proves no logical duplicates, no missing acknowledged records, bounded 
 - changing Agent Run, Job, Checkpoint, Lease, Publication Barrier, or cancellation authority
 - using Trace or Replay records to resume Agent execution
 - fabricating historical Sprint 4 Replay data
+- a concrete cloud or Vault KMS adapter, production key policy, rotation automation, and production Replay key custody
 
 ## 27. Delivery Sequence
 
@@ -949,6 +953,6 @@ Implementation preserves independently verifiable seams in this order:
 9. Trace Detail Tree, synchronized Timeline, Inspector, Replay, and per-Trace analysis;
 10. Sprint 4 backfill verifier, maintenance cutover, and legacy storage retirement;
 11. failure-injection, deletion, security, browser, real-model, regression, and capacity gates;
-12. production-shaped runbook covering separate databases, S3, credentials, encryption keys, migration, health, backlog, projection rebuild, and recovery.
+12. production-shaped runbook covering separate databases, S3, credentials, the development key provider's non-production boundary, the deferred KMS prerequisite, migration, health, backlog, projection rebuild, and recovery.
 
 Each step must leave existing Agent correctness tests green or deliberately replace them with stronger equivalent coverage. No step may introduce a second Dashboard data path, synchronous Agent dependence on Collector availability, silent Trace loss, plaintext Replay storage, or coupling between future Prometheus/Grafana metrics and Durable Agent Trace authority.
