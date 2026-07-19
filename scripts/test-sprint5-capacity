@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+compose_file="infra/compose/compose.yaml"
+docker compose -f "$compose_file" up -d postgres observability-postgres >/dev/null
+scripts/prepare-observability-db
+
+if ! docker compose -f "$compose_file" exec -T postgres psql -U nano -d nano -Atc "select 1 from pg_database where datname='nano_capacity'" | grep -qx 1; then
+  docker compose -f "$compose_file" exec -T postgres createdb -U nano nano_capacity
+fi
+if ! docker compose -f "$compose_file" exec -T observability-postgres psql -U nano_observability -d nano_observability -Atc "select 1 from pg_database where datname='nano_observability_capacity'" | grep -qx 1; then
+  docker compose -f "$compose_file" exec -T observability-postgres createdb -U nano_observability nano_observability_capacity
+fi
+
+export NANO_RUN_SPRINT5_CAPACITY=1
+export NANO_TEST_DATABASE_URL="${NANO_TEST_DATABASE_URL:-postgres://nano:nano@localhost:55432/nano_capacity?sslmode=disable}"
+export NANO_TEST_OBSERVABILITY_CAPACITY_DATABASE_URL="${NANO_TEST_OBSERVABILITY_CAPACITY_DATABASE_URL:-postgres://nano_observability:nano-observability@localhost:55433/nano_observability_capacity?sslmode=disable}"
+
+go test ./internal/app -run '^TestSprint5(BoundedMemoryTenConcurrentTraceProducers|QueryCapacityAtControlPlaneBoundary)$' -count=1 -v -timeout 10m
