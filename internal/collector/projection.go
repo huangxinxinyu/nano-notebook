@@ -116,7 +116,7 @@ func BuildTraceProjection(stored StoredTrace) (TraceProjection, error) {
 	projection := TraceProjection{Summary: TraceSummary{
 		TraceID: stored.Trace.TraceID, RunID: stored.Trace.RunID, ChatID: stored.Trace.ChatID,
 		NotebookID: stored.Trace.NotebookID, RootSpanID: stored.Trace.RootSpanID,
-		AgentName: stored.Trace.AgentName, Active: true,
+		AgentName: stored.Trace.AgentName, Active: true, Models: []string{},
 	}}
 	spanIndex := make(map[agentobs.SpanID]int)
 	modelNames := make(map[string]struct{})

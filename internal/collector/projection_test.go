@@ -78,6 +78,28 @@ func TestBuildTraceProjectionUsesRootStartAsTraceStart(t *testing.T) {
 	}
 }
 
+func TestBuildTraceProjectionUsesAnEmptyModelListForAModelFreeTrace(t *testing.T) {
+	traceID := agentobs.TraceID("trace-without-model")
+	rootID := agentobs.SpanID("root-without-model")
+	started := collectorRecord(traceID, rootID, "model-free/root/start", agentobs.RecordSpanStarted, "agent.execution")
+	ended := collectorRecord(traceID, rootID, "model-free/root/end", agentobs.RecordSpanEnded, "agent.execution")
+	ended.Status = agentobs.StatusOK
+	projection, err := collector.BuildTraceProjection(collector.StoredTrace{
+		Trace: collector.TraceDescriptor{
+			TraceID: traceID, RunID: "run-without-model", ChatID: "chat-without-model", NotebookID: "notebook-without-model",
+			RootSpanID: rootID, AgentName: "nano-research-agent", SchemaVersion: 1, SemanticConventionVersion: 1,
+		},
+		CommittedThrough: 2,
+		Records:          []collector.SequencedRecord{collectorEnvelope(t, 1, started), collectorEnvelope(t, 2, ended)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Summary.Models == nil || len(projection.Summary.Models) != 0 {
+		t.Fatalf("model-free Summary models = %#v, want non-nil empty list", projection.Summary.Models)
+	}
+}
+
 func projectionStoredTrace(t *testing.T, complete, known bool) collector.StoredTrace {
 	t.Helper()
 	traceID := agentobs.TraceID("trace-projection")
