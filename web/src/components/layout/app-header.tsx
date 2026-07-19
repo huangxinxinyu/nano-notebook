@@ -15,9 +15,11 @@ type LibraryHeaderProps = {
   signOutLabel: string;
   signingOutLabel: string;
   comingSoonMessage: string;
+  traceLabel?: string;
   signingOut: boolean;
   onLanguage: () => void;
   onSignOut: () => void;
+  onTraces?: () => void;
 };
 
 export function LibraryHeader(props: LibraryHeaderProps) {
@@ -25,6 +27,7 @@ export function LibraryHeader(props: LibraryHeaderProps) {
     <header className="app-header">
       <ProductMark name={props.appName} />
       <div className="app-header-actions">
+        {props.onTraces ? <Button className="header-settings" variant="outline" onClick={props.onTraces}><MaterialSymbol name="account_tree" size={19} />{props.traceLabel}</Button> : null}
         <Button className="header-settings" variant="outline" onClick={() => toast(props.comingSoonMessage)}>
           <MaterialSymbol name="settings" size={19} />
           {props.settingsLabel}

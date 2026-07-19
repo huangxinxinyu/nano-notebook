@@ -1,5 +1,5 @@
 import { QueryClientProvider, useQuery } from "@tanstack/react-query";
-import { useLayoutEffect, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useState, type ReactNode } from "react";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
 import { z } from "zod";
@@ -17,12 +17,13 @@ import { NotebookTable } from "../components/library/notebook-table";
 import { LibraryHeader } from "../components/layout/app-header";
 import { NotebookWorkspace } from "../components/workspace/notebook-workspace";
 import { WorkspaceHeader } from "../components/workspace/workspace-header";
+import { TraceDashboard } from "../components/traces/trace-dashboard";
 import { queryClient } from "./queryClient";
 
 type Locale = "en" | "zh";
 type User = { id: string; email: string };
 type Notebook = { id: string; title: string; recent_at?: string };
-type SessionState = { status: "anonymous" | "expired" } | { status: "authenticated"; user: User };
+type SessionState = { status: "anonymous" | "expired" } | { status: "authenticated"; user: User; capabilities: string[] };
 
 const strings = {
   en: {
@@ -133,7 +134,8 @@ const strings = {
     flashcards: "Flashcards",
     quiz: "Quiz",
     dataTable: "Data table",
-    infographic: "Infographic"
+    infographic: "Infographic",
+    traces: "Traces"
   },
   zh: {
     languageSwitch: "切换到 English",
@@ -243,7 +245,8 @@ const strings = {
     flashcards: "闪卡",
     quiz: "测验",
     dataTable: "数据表格",
-    infographic: "信息图"
+    infographic: "信息图",
+    traces: "Trace 调试"
   }
 } satisfies Record<Locale, Record<string, string>>;
 
@@ -281,10 +284,17 @@ function AppShell() {
   const [user, setUser] = useState<User | null>(null);
   const [route, setRoute] = useState(() => window.location.pathname);
   const notebookID = route.startsWith("/notebooks/") ? route.replace("/notebooks/", "") : "";
+  const traceRoute = route === "/admin/traces" || route.startsWith("/admin/traces/");
 
   useLayoutEffect(() => {
     document.documentElement.lang = documentLanguage(locale);
   }, [locale]);
+
+  useEffect(() => {
+    const onPopState = () => setRoute(window.location.pathname);
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
 
   const session = useQuery({
     queryKey: ["session"],
@@ -295,13 +305,14 @@ function AppShell() {
         return { status: code === "session_expired" ? "expired" : "anonymous" } satisfies SessionState;
       }
       if (!response.ok) throw new Error(t.unreachable);
-      const payload = (await response.json()) as { user: User };
-      return { status: "authenticated", user: payload.user } satisfies SessionState;
+      const payload = (await response.json()) as { user: User; platform_capabilities?: string[] };
+      return { status: "authenticated", user: payload.user, capabilities: payload.platform_capabilities ?? [] } satisfies SessionState;
     },
     retry: false
   });
 
   const activeUser = user ?? (session.data?.status === "authenticated" ? session.data.user : null);
+  const capabilities = session.data?.status === "authenticated" ? session.data.capabilities : [];
   const sessionNotice = !user && session.data?.status === "expired" ? t.sessionExpired : null;
 
   function switchLocale() {
@@ -313,7 +324,7 @@ function AppShell() {
 
   function navigate(path: string) {
     window.history.pushState(null, "", path);
-    setRoute(path);
+    setRoute(window.location.pathname);
   }
 
   let shell: ReactNode;
@@ -322,14 +333,19 @@ function AppShell() {
   } else if (!activeUser && session.isError) {
     shell = <SystemState t={t} onLocale={switchLocale} message={t.unreachable} alert onRetry={() => void session.refetch()} />;
   } else if (!activeUser) {
-    shell = <AuthScreen t={t} locale={locale} sessionNotice={sessionNotice} onLocale={switchLocale} onAuthed={setUser} />;
+    shell = <AuthScreen t={t} locale={locale} sessionNotice={sessionNotice} onLocale={switchLocale} onAuthed={(authenticatedUser) => {
+      setUser(authenticatedUser);
+      void session.refetch();
+    }} />;
+  } else if (traceRoute) {
+    shell = <TraceDashboard locale={locale} routePath={route} canRead={capabilities.includes("platform.trace.read")} canReplay={capabilities.includes("platform.trace.replay")} onNavigate={navigate} onLibrary={() => navigate("/")} />;
   } else if (notebookID) {
     shell = <Workspace t={t} onLocale={switchLocale} user={activeUser} notebookID={notebookID} onLibrary={() => navigate("/")} onOpen={(id) => navigate(`/notebooks/${id}`)} onSignedOut={() => {
       clearAuthenticatedQueries();
       setUser(null);
     }} />;
   } else {
-    shell = <LibraryScreen t={t} locale={locale} onLocale={switchLocale} user={activeUser} onOpen={(id) => navigate(`/notebooks/${id}`)} onSignedOut={() => {
+    shell = <LibraryScreen t={t} locale={locale} onLocale={switchLocale} user={activeUser} canTrace={capabilities.includes("platform.trace.read")} onTraces={() => navigate("/admin/traces")} onOpen={(id) => navigate(`/notebooks/${id}`)} onSignedOut={() => {
       clearAuthenticatedQueries();
       setUser(null);
     }} />;
@@ -422,7 +438,7 @@ function AuthScreen({ t, locale, sessionNotice, onLocale, onAuthed }: { t: typeo
   );
 }
 
-function LibraryScreen({ t, locale, user, onLocale, onOpen, onSignedOut }: { t: typeof strings.en; locale: Locale; user: User; onLocale: () => void; onOpen: (id: string) => void; onSignedOut: () => void }) {
+function LibraryScreen({ t, locale, user, canTrace, onTraces, onLocale, onOpen, onSignedOut }: { t: typeof strings.en; locale: Locale; user: User; canTrace: boolean; onTraces: () => void; onLocale: () => void; onOpen: (id: string) => void; onSignedOut: () => void }) {
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [view, setView] = useState<LibraryView>("list");
@@ -465,7 +481,7 @@ function LibraryScreen({ t, locale, user, onLocale, onOpen, onSignedOut }: { t: 
 
   return (
     <main className="library-layout">
-      <LibraryHeader appName={t.app} email={user.email} settingsLabel={t.settings} appsLabel={t.apps} openUserMenuLabel={t.openUserMenu} languageLabel={t.languageSwitch} signOutLabel={t.signOut} signingOutLabel={t.signingOut} comingSoonMessage={t.comingSoon} signingOut={signingOut} onLanguage={onLocale} onSignOut={() => void signOut()} />
+      <LibraryHeader appName={t.app} email={user.email} settingsLabel={t.settings} appsLabel={t.apps} openUserMenuLabel={t.openUserMenu} languageLabel={t.languageSwitch} signOutLabel={t.signOut} signingOutLabel={t.signingOut} comingSoonMessage={t.comingSoon} traceLabel={t.traces} signingOut={signingOut} onLanguage={onLocale} onSignOut={() => void signOut()} onTraces={canTrace ? onTraces : undefined} />
       <h1 className="sr-only">{t.library}</h1>
       <div className="library-content">
         {signOutError ? <Alert variant="destructive"><AlertDescription>{signOutError}</AlertDescription></Alert> : null}

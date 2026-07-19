@@ -203,7 +203,8 @@ test("creates the first private Chat with one bootstrap idempotency key", async 
   render(<App />);
 
   const chat = await screen.findByRole("region", { name: "Chat" });
-  expect(await within(chat).findByRole("textbox", { name: "Message Nano Notebook" })).toBeEnabled();
+  const composer = await within(chat).findByRole("textbox", { name: "Message Nano Notebook" });
+  await waitFor(() => expect(composer).toBeEnabled());
   expect(bootstrapKey).toMatch(/^[0-9a-f-]{36}$/);
   expect(fetch).toHaveBeenCalledWith("/api/v1/notebooks/nb_test/chats", expect.objectContaining({ method: "POST" }));
 });
@@ -491,6 +492,35 @@ test("surfaces invalid sign-in credentials as a distinct localized error", async
   expect(await screen.findByRole("alert")).toHaveTextContent("Email or password is incorrect.");
 });
 
+test("refreshes platform capabilities after an operator signs in", async () => {
+  let sessionRequests = 0;
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/session")) {
+      sessionRequests++;
+      if (sessionRequests === 1) return json({ error: { code: "unauthorized" } }, 401);
+      return json({
+        user: { id: "usr_operator", email: "operator@example.com" },
+        platform_capabilities: ["platform.trace.read", "platform.trace.replay"]
+      });
+    }
+    if (url.endsWith("/api/v1/auth/sign-in") && method === "POST") return json({ user: { id: "usr_operator", email: "operator@example.com" } });
+    if (url.endsWith("/api/v1/notebooks") && method === "GET") return json({ notebooks: [] });
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("tab", { name: "Sign in" }));
+  await user.type(screen.getByLabelText("Email"), "operator@example.com");
+  await user.type(screen.getByLabelText("Password"), "unique local sprint phrase 2026");
+  await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+  expect(await screen.findByRole("button", { name: /Traces/ })).toBeInTheDocument();
+  expect(sessionRequests).toBe(2);
+});
+
 test("surfaces notebook quota as a distinct localized create error", async () => {
   fetchHandler = async (input, init) => {
     const url = String(input);
@@ -622,6 +652,292 @@ test("keeps featured notebook rows isolated as coming-soon placeholders", async 
   expect(await screen.findByText("Featured notebooks are coming soon.")).toBeInTheDocument();
 });
 
+test("blocks the Trace Explorer route when the session lacks platform Trace capability", async () => {
+  window.history.pushState(null, "", "/admin/traces");
+  fetchHandler = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "owner@example.com" }, platform_capabilities: [] });
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+
+  expect(await screen.findByRole("heading", { name: "Trace access restricted" })).toBeInTheDocument();
+  expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining("/api/admin/traces"), expect.anything());
+});
+
+test("does not treat unrelated path prefixes as Trace admin routes", async () => {
+  window.history.pushState(null, "", "/admin/traces-archive");
+  fetchHandler = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "owner@example.com" }, platform_capabilities: [] });
+    if (url.endsWith("/api/v1/notebooks")) return json({ notebooks: [] });
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+
+  expect(await screen.findByRole("heading", { name: "Library" })).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Trace access restricted" })).not.toBeInTheDocument();
+});
+
+test("shows a forbidden Trace Explorer state when the server revokes a stale session grant", async () => {
+  window.history.pushState(null, "", "/admin/traces");
+  fetchHandler = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/session")) return json({
+      user: { id: "usr_operator", email: "operator@example.com" },
+      platform_capabilities: ["platform.trace.read"]
+    });
+    if (url.startsWith("/api/admin/traces?")) return json({ error: { code: "trace_forbidden" } }, 403);
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+
+  expect(await screen.findByText("Trace access restricted")).toBeInTheDocument();
+  expect(screen.queryByText("Trace data is temporarily unavailable.")).not.toBeInTheDocument();
+});
+
+test("retries a temporarily unavailable Trace Explorer without losing the route", async () => {
+  window.history.pushState(null, "", "/admin/traces");
+  let requests = 0;
+  fetchHandler = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/session")) return json({
+      user: { id: "usr_operator", email: "operator@example.com" },
+      platform_capabilities: ["platform.trace.read"]
+    });
+    if (url.startsWith("/api/admin/traces?")) {
+      requests++;
+      if (requests === 1) return json({ error: { code: "trace_temporarily_unavailable" } }, 503);
+      return json({ schema_version: 1, data: { items: [] } });
+    }
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  expect(await screen.findByText("Trace data is temporarily unavailable.")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Retry" }));
+
+  expect(await screen.findByText("No Traces match these filters.")).toBeInTheDocument();
+  expect(window.location.pathname).toBe("/admin/traces");
+  expect(requests).toBe(2);
+});
+
+test("applies a bounded time range to Trace Explorer queries", async () => {
+  window.history.pushState(null, "", "/admin/traces");
+  const traceQueries: string[] = [];
+  fetchHandler = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/session")) return json({
+      user: { id: "usr_operator", email: "operator@example.com" },
+      platform_capabilities: ["platform.trace.read"]
+    });
+    if (url.startsWith("/api/admin/traces?")) {
+      traceQueries.push(url);
+      const cursor = new URL(url, window.location.origin).searchParams.get("cursor");
+      return json({ schema_version: 1, data: { items: [], next_cursor: cursor ? undefined : "cursor-page-2" } });
+    }
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  expect(await screen.findByRole("heading", { name: "Trace Explorer" })).toBeInTheDocument();
+  expect(await screen.findByText("No Traces match these filters.")).toBeInTheDocument();
+  await user.type(screen.getByLabelText("Trace, Run, or Chat prefix"), "run-admin");
+  await user.type(screen.getByLabelText("Agent"), "nano-research-agent");
+  await user.type(screen.getByLabelText("Model"), "qwen-flash");
+  await user.selectOptions(screen.getByLabelText("Status"), "error");
+  await user.selectOptions(screen.getByLabelText("State"), "false");
+  await user.selectOptions(screen.getByLabelText("Time range"), "24h");
+  await user.click(screen.getByRole("button", { name: "Apply filters" }));
+
+  await waitFor(() => expect(traceQueries.some((url) => {
+    const query = new URL(url, window.location.origin).searchParams;
+    return query.has("started_after") && !query.has("started_before") && query.get("identity_prefix") === "run-admin" &&
+      query.get("agent") === "nano-research-agent" && query.get("model") === "qwen-flash" &&
+      query.get("status") === "error" && query.get("active") === "false";
+  })).toBe(true));
+  await user.click(screen.getByRole("button", { name: "Next page" }));
+  await waitFor(() => expect(traceQueries.some((url) => new URL(url, window.location.origin).searchParams.get("cursor") === "cursor-page-2")).toBe(true));
+  expect(screen.getByRole("button", { name: "Previous page" })).toBeEnabled();
+});
+
+test("explores a Trace with synchronized Tree, Timeline, and explicit Replay loading", async () => {
+  window.history.pushState(null, "", "/admin/traces");
+  let replayRequests = 0;
+  fetchHandler = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/session")) return json({
+      user: { id: "usr_operator", email: "operator@example.com" },
+      platform_capabilities: ["platform.trace.read", "platform.trace.replay"]
+    });
+    if (url.startsWith("/api/admin/traces?") || url === "/api/admin/traces") return json({ schema_version: 1, data: {
+      items: [{
+        summary: {
+          trace_id: "trace-admin", run_id: "run-admin", chat_id: "chat-admin", notebook_id: "notebook-admin",
+          root_span_id: "root-admin", agent_name: "nano-research-agent", started_at_unix_nano: 1700000000000000000,
+          last_observed_unix_nano: 1700000005000000000, ended_at_unix_nano: null, duration_nanoseconds: null,
+          status: "", active: true, models: ["qwen-flash"], input_tokens: 12, output_tokens: null,
+          total_tokens: null, cost: { known: true, amount: 0.002, currency: "USD", source: "provider_reported" }, attempt_count: 1
+        },
+        committed_sequence: 6, projected_sequence: 5, projection_lagged: true
+      }],
+      next_cursor: "next-page"
+    }});
+    if (url === "/api/admin/traces/trace-admin") return json({ schema_version: 1, data: {
+      committed_sequence: 6, projected_sequence: 6,
+      projection: {
+        summary: {
+          trace_id: "trace-admin", run_id: "run-admin", chat_id: "chat-admin", notebook_id: "notebook-admin",
+          root_span_id: "root-admin", agent_name: "nano-research-agent", started_at_unix_nano: 1700000000000000000,
+          last_observed_unix_nano: 1700000005000000000, ended_at_unix_nano: null, duration_nanoseconds: null,
+          status: "", active: true, models: ["qwen-flash"], input_tokens: 12, output_tokens: null,
+          total_tokens: null, cost: { known: false, amount: null, currency: "", source: "" }, attempt_count: 1
+        },
+        spans: [
+          { trace_id: "trace-admin", span_id: "root-admin", parent_span_id: "", name: "agent.execution", start_sequence: 1, end_sequence: null, started_at_unix_nano: 1700000000000000000, ended_at_unix_nano: null, duration_nanoseconds: null, status: "", start_attributes: [], end_attributes: [], replay: [], model: null },
+          { trace_id: "trace-admin", span_id: "model-admin", parent_span_id: "root-admin", name: "gen_ai.model.call", start_sequence: 2, end_sequence: 4, started_at_unix_nano: 1700000001000000000, ended_at_unix_nano: 1700000003000000000, duration_nanoseconds: 2000000000, status: "ok", start_attributes: [], end_attributes: [{ Key: "agent.error.kind", Value: { Kind: "string", String: "gateway_timeout" } }], replay: [{ attachment_id: "019bf000-0000-7000-8000-000000000555", class: "model_request", record_sequence: 2 }], model: { requested_model: "qwen-flash", selected_model: "qwen-flash", provider: "aliyun", input_tokens: 12, output_tokens: null, total_tokens: null, cached_tokens: null, reasoning_tokens: null, gateway_retries: 0, gateway_fallbacks: 0, duration_nanoseconds: 2000000000, cost: { known: true, amount: 0.002, currency: "USD", source: "provider_reported" } } }
+        ],
+        events: [{ trace_id: "trace-admin", sequence: 3, span_id: "root-admin", name: "nano.run.admitted", occurred_at_unix_nano: 1700000000500000000, attributes: [] }],
+        links: [{ trace_id: "trace-admin", sequence: 5, span_id: "model-admin", name: "retries", target_trace_id: "trace-previous", target_span_id: "child-previous", occurred_at_unix_nano: 1700000004000000000, attributes: [] }]
+      }
+    }});
+    if (url === "/api/admin/traces/trace-previous") return json({ schema_version: 1, data: linkedTraceDetail() });
+    if (url.includes("/api/admin/traces/trace-admin/replay/019bf000-0000-7000-8000-000000000555")) {
+      replayRequests++;
+      return json({ schema_version: 1, data: {
+        replay_id: "019bf000-0000-7000-8000-000000000555", trace_id: "trace-admin", span_id: "model-admin",
+        class: "model_request", payload: { messages: [{ role: "user", content: "Explain KV cache" }] }
+      }});
+    }
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  const view = render(<App />);
+  const user = userEvent.setup();
+  expect(await screen.findByRole("heading", { name: "Trace Explorer" })).toBeInTheDocument();
+  expect(await screen.findByText("Projection lagged")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Open Trace run-admin" }));
+
+  const summary = await screen.findByRole("region", { name: "Trace summary" });
+  expect(within(summary).getByText("Started")).toBeInTheDocument();
+  expect(within(summary).getByText("Last observed")).toBeInTheDocument();
+  expect(within(summary).getByText("Attempts")).toBeInTheDocument();
+  const tree = await screen.findByRole("tree", { name: "Trace Tree" });
+  const timeline = screen.getByRole("region", { name: "Trace Timeline" });
+  expect(within(tree).getByText("agent.execution")).toBeInTheDocument();
+  expect(within(timeline).getByText("Unfinished")).toBeInTheDocument();
+  await user.click(within(timeline).getByRole("button", { name: "Select gen_ai.model.call in Timeline" }));
+  expect(within(tree).getByRole("treeitem", { name: /gen_ai.model.call/ })).toHaveAttribute("aria-selected", "true");
+  const inspector = screen.getByRole("region", { name: "Inspector" });
+  expect(within(inspector).getByText("Kind")).toBeInTheDocument();
+  expect(within(inspector).getByText("Model call")).toBeInTheDocument();
+  expect(within(inspector).getByText("Started")).toBeInTheDocument();
+  expect(within(inspector).getByText("Ended")).toBeInTheDocument();
+  expect(within(inspector).getByText("gateway_timeout")).toBeInTheDocument();
+  await user.click(within(tree).getByRole("button", { name: "Collapse agent.execution" }));
+  expect(within(tree).queryByRole("treeitem", { name: /gen_ai.model.call/ })).not.toBeInTheDocument();
+  await user.click(within(timeline).getByRole("button", { name: "Select gen_ai.model.call in Timeline" }));
+  expect(within(tree).getByRole("treeitem", { name: /gen_ai.model.call/ })).toHaveAttribute("aria-selected", "true");
+  expect(window.location.search).toBe("?span=model-admin");
+
+  await user.click(screen.getByRole("tab", { name: "Replay" }));
+  expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining("/replay/019bf000"), expect.anything());
+  await user.click(screen.getByRole("button", { name: "Load sensitive Replay" }));
+  expect(await screen.findByText("Explain KV cache")).toBeInTheDocument();
+  expect(screen.getAllByText("Unknown").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("0.002 USD").length).toBeGreaterThan(0);
+  expect(screen.getByText("provider_reported")).toBeInTheDocument();
+  expect(JSON.stringify(localStorage)).not.toContain("Explain KV cache");
+  expect(replayRequests).toBe(1);
+
+  view.unmount();
+  queryClient.clear();
+  render(<App />);
+  const refreshedTree = await screen.findByRole("tree", { name: "Trace Tree" });
+  expect(within(refreshedTree).getByRole("treeitem", { name: /gen_ai.model.call/ })).toHaveAttribute("aria-selected", "true");
+  expect(screen.queryByText("Explain KV cache")).not.toBeInTheDocument();
+  expect(replayRequests).toBe(1);
+
+  const refreshedTimeline = screen.getByRole("region", { name: "Trace Timeline" });
+  await user.click(within(refreshedTimeline).getByRole("button", { name: "Open retries link to trace-previous" }));
+  expect(window.location.pathname).toBe("/admin/traces/trace-previous");
+  expect(window.location.search).toBe("?span=child-previous");
+  const linkedTree = await screen.findByRole("tree", { name: "Trace Tree" });
+  expect(within(linkedTree).getByRole("treeitem", { name: /agent.action/ })).toHaveAttribute("aria-selected", "true");
+});
+
+test("distinguishes expired Replay from a transient unavailable response", async () => {
+  window.history.pushState(null, "", "/admin/traces/trace-expired?span=model-expired");
+  fetchHandler = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/session")) return json({
+      user: { id: "usr_operator", email: "operator@example.com" },
+      platform_capabilities: ["platform.trace.read", "platform.trace.replay"]
+    });
+    if (url === "/api/admin/traces/trace-expired") return json({ schema_version: 1, data: replayTraceDetail("trace-expired", "model-expired", "replay-expired") });
+    if (url.includes("/replay/replay-expired")) return json({ error: { code: "replay_expired" } }, 410);
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("tab", { name: "Replay" }));
+  await user.click(screen.getByRole("button", { name: "Load sensitive Replay" }));
+
+  expect(await screen.findByText("Replay has expired.")).toBeInTheDocument();
+  expect(screen.queryByText("Replay is unavailable.")).not.toBeInTheDocument();
+  expect(screen.getAllByText("Unknown cost").length).toBeGreaterThan(0);
+});
+
+test("keeps Replay forbidden when Trace read is granted without Replay capability", async () => {
+  window.history.pushState(null, "", "/admin/traces/trace-forbidden?span=model-forbidden");
+  fetchHandler = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/session")) return json({
+      user: { id: "usr_operator", email: "operator@example.com" },
+      platform_capabilities: ["platform.trace.read"]
+    });
+    if (url === "/api/admin/traces/trace-forbidden") return json({ schema_version: 1, data: replayTraceDetail("trace-forbidden", "model-forbidden", "replay-forbidden") });
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("tab", { name: "Replay" }));
+
+  expect(screen.getByText("Replay capability is not granted.")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Load sensitive Replay" })).not.toBeInTheDocument();
+  expect(fetch).not.toHaveBeenCalledWith(expect.stringContaining("/replay/"), expect.anything());
+});
+
+test("renders unavailable Replay as retryable without hiding Trace metadata", async () => {
+  window.history.pushState(null, "", "/admin/traces/trace-unavailable?span=model-unavailable");
+  fetchHandler = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/session")) return json({
+      user: { id: "usr_operator", email: "operator@example.com" },
+      platform_capabilities: ["platform.trace.read", "platform.trace.replay"]
+    });
+    if (url === "/api/admin/traces/trace-unavailable") return json({ schema_version: 1, data: replayTraceDetail("trace-unavailable", "model-unavailable", "replay-unavailable") });
+    if (url.includes("/replay/replay-unavailable")) return json({ error: { code: "replay_unavailable" } }, 503);
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("tab", { name: "Replay" }));
+  await user.click(screen.getByRole("button", { name: "Load sensitive Replay" }));
+
+  expect(await screen.findByText("Replay is unavailable.")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  expect(screen.getByText("trace-unavailable")).toBeInTheDocument();
+});
+
 function authenticatedLibraryHandler(notebooks: Array<{ id: string; title: string; recent_at?: string }>) {
   return async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
@@ -630,6 +946,50 @@ function authenticatedLibraryHandler(notebooks: Array<{ id: string; title: strin
     if (url.startsWith("/api/v1/notebooks?") && method === "GET") return json({ notebooks });
     if (url.endsWith("/api/v1/auth/sign-out")) return new Response(null, { status: 204 });
     return json({ error: { code: "not_found" } }, 404);
+  };
+}
+
+function replayTraceDetail(traceID: string, spanID: string, replayID: string) {
+  return {
+    committed_sequence: 2,
+    projected_sequence: 2,
+    projection: {
+      summary: {
+        trace_id: traceID, run_id: `run-${traceID}`, chat_id: `chat-${traceID}`, notebook_id: `notebook-${traceID}`,
+        root_span_id: spanID, agent_name: "nano-research-agent", started_at_unix_nano: 1700000000000000000,
+        last_observed_unix_nano: 1700000001000000000, ended_at_unix_nano: 1700000001000000000,
+        duration_nanoseconds: 1000000000, status: "ok", active: false, models: ["qwen-flash"], input_tokens: 4,
+        output_tokens: 8, total_tokens: 12, cost: { known: false, amount: null, currency: "", source: "" }, attempt_count: 1
+      },
+      spans: [{
+        trace_id: traceID, span_id: spanID, parent_span_id: "", name: "gen_ai.model.call",
+        start_sequence: 1, end_sequence: 2, started_at_unix_nano: 1700000000000000000,
+        ended_at_unix_nano: 1700000001000000000, duration_nanoseconds: 1000000000, status: "ok",
+        start_attributes: [], end_attributes: [], replay: [{ attachment_id: replayID, class: "model_response", record_sequence: 2 }], model: null
+      }],
+      events: [], links: []
+    }
+  };
+}
+
+function linkedTraceDetail() {
+  return {
+    committed_sequence: 3,
+    projected_sequence: 3,
+    projection: {
+      summary: {
+        trace_id: "trace-previous", run_id: "run-previous", chat_id: "chat-previous", notebook_id: "notebook-previous",
+        root_span_id: "root-previous", agent_name: "nano-research-agent", started_at_unix_nano: 1699999990000000000,
+        last_observed_unix_nano: 1699999992000000000, ended_at_unix_nano: 1699999992000000000,
+        duration_nanoseconds: 2000000000, status: "ok", active: false, models: [], input_tokens: null,
+        output_tokens: null, total_tokens: null, cost: { known: false, amount: null, currency: "", source: "" }, attempt_count: 1
+      },
+      spans: [
+        { trace_id: "trace-previous", span_id: "root-previous", parent_span_id: "", name: "agent.execution", start_sequence: 1, end_sequence: 3, started_at_unix_nano: 1699999990000000000, ended_at_unix_nano: 1699999992000000000, duration_nanoseconds: 2000000000, status: "ok", start_attributes: [], end_attributes: [], replay: [], model: null },
+        { trace_id: "trace-previous", span_id: "child-previous", parent_span_id: "root-previous", name: "agent.action", start_sequence: 2, end_sequence: 3, started_at_unix_nano: 1699999990500000000, ended_at_unix_nano: 1699999991500000000, duration_nanoseconds: 1000000000, status: "ok", start_attributes: [], end_attributes: [], replay: [], model: null }
+      ],
+      events: [], links: []
+    }
   };
 }
 
