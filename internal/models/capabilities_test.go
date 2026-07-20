@@ -3,11 +3,116 @@ package models
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 )
+
+func TestBifrostTranscriptionReturnsTimestampedProviderNeutralSegments(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/audio/transcriptions" || r.Header.Get("X-Request-ID") == "" {
+			t.Fatalf("request=%s %s", r.Method, r.URL.Path)
+		}
+		if err := r.ParseMultipartForm(1 << 20); err != nil {
+			t.Fatal(err)
+		}
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload, _ := io.ReadAll(file)
+		if r.FormValue("model") != "openai/whisper-1" || r.FormValue("response_format") != "verbose_json" ||
+			header.Filename != "source.wav" || string(payload) != "RIFFaudio" {
+			t.Fatalf("form model=%q format=%q file=%q payload=%q", r.FormValue("model"), r.FormValue("response_format"), header.Filename, payload)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"text":"First. Second.","segments":[
+				{"id":0,"start":0.0,"end":1.25,"text":" First. "},
+				{"id":1,"start":1.25,"end":2.5,"text":"Second."}
+			],"usage":{"input_tokens":10,"total_tokens":14},
+			"extra_fields":{"provider":"openai","model_requested":"openai/whisper-1","model_deployment":"whisper-1"}
+		}`))
+	}))
+	defer server.Close()
+	client := NewBifrostClient(server.URL, server.Client(), 128)
+	outcome, err := client.Transcribe(context.Background(), TranscriptionRequest{
+		Model: "openai/whisper-1", Filename: "source.wav", MediaType: "audio/wav", Audio: []byte("RIFFaudio"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(outcome.Segments, []TranscriptSegment{
+		{StartMS: 0, EndMS: 1250, Text: "First."}, {StartMS: 1250, EndMS: 2500, Text: "Second."},
+	}) || outcome.Metadata.Provider != "openai" || outcome.Metadata.Model != "whisper-1" {
+		t.Fatalf("transcription outcome=%+v", outcome)
+	}
+}
+
+func TestBifrostVisionReturnsOnlyBoundedImageRegions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+		var request struct {
+			Model    string `json:"model"`
+			Messages []struct {
+				Role    string          `json:"role"`
+				Content json.RawMessage `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.Model != "gemini/gemini-2.5-flash" || len(request.Messages) != 2 ||
+			!strings.Contains(string(request.Messages[1].Content), "data:image/png;base64,aW1hZ2U=") {
+			t.Fatalf("vision request=%+v", request)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"provider":"gemini","model":"gemini-2.5-flash",
+			"choices":[{"message":{"role":"assistant","content":"{\"regions\":[{\"text\":\"Chart: revenue rose.\",\"x\":10,\"y\":20,\"width\":100,\"height\":50}]}"},"finish_reason":"stop"}],
+			"usage":{"prompt_tokens":20,"total_tokens":30}
+		}`))
+	}))
+	defer server.Close()
+	client := NewBifrostClient(server.URL, server.Client(), 128)
+	outcome, err := client.DescribeImage(context.Background(), VisionRequest{
+		Model: "gemini/gemini-2.5-flash", MediaType: "image/png", Image: []byte("image"), Width: 320, Height: 200,
+		PromptVersion: "vision-normalize-v1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(outcome.Regions, []VisionRegion{{Text: "Chart: revenue rose.", X: 10, Y: 20, Width: 100, Height: 50}}) ||
+		outcome.Metadata.Provider != "gemini" {
+		t.Fatalf("vision outcome=%+v", outcome)
+	}
+}
+
+func TestBifrostMediaCapabilitiesRejectUnboundedProviderResults(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/audio/transcriptions" {
+			_, _ = w.Write([]byte(`{"segments":[{"start":2,"end":1,"text":"backwards"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"regions\":[{\"text\":\"outside\",\"x\":90,\"y\":0,\"width\":20,\"height\":10}]}"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+	client := NewBifrostClient(server.URL, server.Client(), 128)
+	if _, err := client.Transcribe(context.Background(), TranscriptionRequest{Model: "m", Filename: "a.mp3", MediaType: "audio/mpeg", Audio: []byte("audio")}); err == nil {
+		t.Fatal("Transcribe accepted a backwards interval")
+	}
+	if _, err := client.DescribeImage(context.Background(), VisionRequest{
+		Model: "m", MediaType: "image/png", Image: []byte("image"), Width: 100, Height: 100, PromptVersion: "v1",
+	}); err == nil {
+		t.Fatal("DescribeImage accepted an out-of-bounds region")
+	}
+}
 
 func TestBifrostEmbeddingReturnsProviderNeutralOrderedVectors(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
