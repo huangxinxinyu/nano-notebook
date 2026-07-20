@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -64,6 +65,28 @@ func TestPPTXAdapterPreservesSlideAndRegionCoordinates(t *testing.T) {
 		first.Blocks[0].Coordinate.Slide != 1 || first.Blocks[1].Coordinate.Slide != 2 ||
 		first.Blocks[0].Coordinate.X != 72 || first.Blocks[0].Coordinate.Width != 288 || first.SHA256 != second.SHA256 {
 		t.Fatalf("PPTX artifact=%+v", first)
+	}
+}
+
+func TestPPTXAdapterUsesVisionOnlyForSlidesWithoutUsableNativeText(t *testing.T) {
+	payload := ooxmlFixture(map[string]string{
+		"[Content_Types].xml":   `<Types><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/><Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>`,
+		"ppt/slides/slide1.xml": pptxSlide("Native slide", 914400, 1828800, 3657600, 914400),
+		"ppt/slides/slide2.xml": pptxSlide("", 1, 1, 1, 1),
+	})
+	missing, err := normalize.PPTXSlidesRequiringVision(payload)
+	if err != nil || !reflect.DeepEqual(missing, []int{2}) {
+		t.Fatalf("missing=%v err=%v", missing, err)
+	}
+	artifact, err := normalize.PPTXWithVisualSlides(normalize.Input{
+		SourceID: "src_mixed_pptx", ExtractionConfigID: "extract-mixed-v1", Format: "pptx", Payload: payload,
+	}, []normalize.VisualPage{{Ordinal: 2, Width: 1280, Height: 720, Regions: []normalize.ImageRegion{{Text: "Visual slide", X: 50, Y: 60, Width: 400, Height: 100}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifact.Blocks) != 2 || artifact.Blocks[0].Text != "Native slide" || artifact.Blocks[1].Text != "Visual slide" ||
+		artifact.Blocks[1].Coordinate.Slide != 2 || artifact.Blocks[1].Coordinate.X != 50 {
+		t.Fatalf("artifact=%+v", artifact)
 	}
 }
 

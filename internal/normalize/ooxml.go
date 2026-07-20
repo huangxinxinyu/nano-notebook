@@ -85,6 +85,142 @@ func OOXML(input Input) (Artifact, error) {
 	return finalizeOfficeArtifact(input, blocks)
 }
 
+func PPTXSlidesRequiringVision(payload []byte) ([]int, error) {
+	parts, slideNumbers, err := pptxPackage(payload)
+	if err != nil {
+		return nil, err
+	}
+	missing := make([]int, 0)
+	for _, slide := range slideNumbers {
+		content, err := readOOXMLPart(parts[fmt.Sprintf("ppt/slides/slide%d.xml", slide)])
+		if err != nil {
+			return nil, err
+		}
+		blocks, err := parsePPTXSlide(content, slide)
+		if err != nil {
+			return nil, err
+		}
+		if len(blocks) == 0 {
+			missing = append(missing, slide)
+		}
+	}
+	return missing, nil
+}
+
+func PPTXWithVisualSlides(input Input, visualSlides []VisualPage) (Artifact, error) {
+	input.SourceID = strings.TrimSpace(input.SourceID)
+	input.ExtractionConfigID = strings.TrimSpace(input.ExtractionConfigID)
+	input.Format = strings.TrimSpace(input.Format)
+	if input.SourceID == "" || input.ExtractionConfigID == "" || input.Format != "pptx" || len(input.Payload) == 0 {
+		return Artifact{}, errors.New("invalid PPTX normalization input")
+	}
+	parts, slideNumbers, err := pptxPackage(input.Payload)
+	if err != nil {
+		return Artifact{}, err
+	}
+	visualBySlide := make(map[int]VisualPage, len(visualSlides))
+	for _, visual := range visualSlides {
+		if visual.Ordinal < 1 || visual.Width < 1 || visual.Height < 1 || len(visual.Regions) < 1 || len(visual.Regions) > 256 {
+			return Artifact{}, errors.New("invalid PPTX visual slide")
+		}
+		if _, duplicate := visualBySlide[visual.Ordinal]; duplicate {
+			return Artifact{}, errors.New("duplicate PPTX visual slide")
+		}
+		visualBySlide[visual.Ordinal] = visual
+	}
+	blocks := make([]officeBlock, 0)
+	for _, slide := range slideNumbers {
+		content, err := readOOXMLPart(parts[fmt.Sprintf("ppt/slides/slide%d.xml", slide)])
+		if err != nil {
+			return Artifact{}, err
+		}
+		native, err := parsePPTXSlide(content, slide)
+		if err != nil {
+			return Artifact{}, err
+		}
+		if len(native) > 0 {
+			if _, exists := visualBySlide[slide]; exists {
+				return Artifact{}, errors.New("visual Evidence supplied for PPTX slide with usable native text")
+			}
+			blocks = append(blocks, native...)
+			continue
+		}
+		visual, exists := visualBySlide[slide]
+		if !exists {
+			return Artifact{}, fmt.Errorf("PPTX slide %d has no usable native text; vision extraction required", slide)
+		}
+		regions := append([]ImageRegion(nil), visual.Regions...)
+		for index := range regions {
+			region := &regions[index]
+			region.Text = strings.TrimSpace(region.Text)
+			if region.Text == "" || !utf8.ValidString(region.Text) || utf8.RuneCountInString(region.Text) > 8_000 ||
+				invalidMediaNumber(region.X) || invalidMediaNumber(region.Y) || invalidMediaNumber(region.Width) || invalidMediaNumber(region.Height) ||
+				region.X < 0 || region.Y < 0 || region.Width <= 0 || region.Height <= 0 ||
+				region.X+region.Width > float64(visual.Width) || region.Y+region.Height > float64(visual.Height) {
+				return Artifact{}, errors.New("invalid PPTX visual Evidence region")
+			}
+		}
+		sort.SliceStable(regions, func(left, right int) bool {
+			if regions[left].Y != regions[right].Y {
+				return regions[left].Y < regions[right].Y
+			}
+			if regions[left].X != regions[right].X {
+				return regions[left].X < regions[right].X
+			}
+			return regions[left].Text < regions[right].Text
+		})
+		for _, region := range regions {
+			blocks = append(blocks, officeBlock{kind: "paragraph", text: region.Text, coordinate: SourceCoordinate{
+				Kind: "slide_region", Slide: slide, X: region.X, Y: region.Y, Width: region.Width, Height: region.Height,
+			}})
+		}
+		delete(visualBySlide, slide)
+	}
+	if len(visualBySlide) != 0 {
+		return Artifact{}, errors.New("unused PPTX visual Evidence")
+	}
+	return finalizeOfficeArtifact(input, blocks)
+}
+
+func pptxPackage(payload []byte) (map[string]*zip.File, []int, error) {
+	archive, err := zip.NewReader(bytes.NewReader(payload), int64(len(payload)))
+	if err != nil {
+		return nil, nil, fmt.Errorf("open OOXML package: %w", err)
+	}
+	parts, err := boundedOOXMLParts(archive.File)
+	if err != nil {
+		return nil, nil, err
+	}
+	contentTypes, ok := parts["[Content_Types].xml"]
+	if !ok {
+		return nil, nil, errors.New("OOXML content types are missing")
+	}
+	contentTypeXML, err := readOOXMLPart(contentTypes)
+	if err != nil || !bytes.Contains(contentTypeXML, []byte("presentationml.slide+xml")) {
+		return nil, nil, errors.New("OOXML package is not a PPTX presentation")
+	}
+	slideNumbers := make([]int, 0)
+	for name := range parts {
+		if !strings.HasPrefix(name, "ppt/slides/slide") || !strings.HasSuffix(name, ".xml") {
+			continue
+		}
+		number, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(name, "ppt/slides/slide"), ".xml"))
+		if err == nil && number > 0 {
+			slideNumbers = append(slideNumbers, number)
+		}
+	}
+	if len(slideNumbers) < 1 || len(slideNumbers) > maxOOXMLSlides {
+		return nil, nil, fmt.Errorf("%w: PPTX slide count", ErrProcessingBudget)
+	}
+	sort.Ints(slideNumbers)
+	for index, number := range slideNumbers {
+		if number != index+1 {
+			return nil, nil, errors.New("PPTX slide numbering is not contiguous")
+		}
+	}
+	return parts, slideNumbers, nil
+}
+
 func boundedOOXMLParts(files []*zip.File) (map[string]*zip.File, error) {
 	if len(files) == 0 || len(files) > maxOOXMLEntries {
 		return nil, fmt.Errorf("%w: OOXML entry count", ErrProcessingBudget)

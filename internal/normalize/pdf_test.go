@@ -3,6 +3,7 @@ package normalize_test
 import (
 	"bytes"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -42,6 +43,32 @@ func TestPDFAdapterRejectsMalformedOrNativeTextlessDocuments(t *testing.T) {
 		}); err == nil {
 			t.Fatalf("PDF accepted malformed/textless payload of %d bytes", len(payload))
 		}
+	}
+}
+
+func TestPDFAdapterUsesVisionOnlyForPagesWithoutUsableNativeText(t *testing.T) {
+	payload := minimalTextPDF("Native evidence.", "")
+	missing, err := normalize.PDFPagesRequiringVision(payload)
+	if err != nil || !reflect.DeepEqual(missing, []int{2}) {
+		t.Fatalf("missing=%v err=%v", missing, err)
+	}
+	artifact, err := normalize.PDFWithVisualPages(normalize.Input{
+		SourceID: "src_mixed_pdf", ExtractionConfigID: "extract-mixed-v1", Format: "pdf", Payload: payload,
+	}, []normalize.VisualPage{{
+		Ordinal: 2, Width: 1224, Height: 1584,
+		Regions: []normalize.ImageRegion{{Text: "Scanned page evidence.", X: 100, Y: 200, Width: 400, Height: 80}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(artifact.Blocks) != 2 || artifact.Blocks[0].Text != "Native evidence." || artifact.Blocks[0].Coordinate.Page != 1 ||
+		artifact.Blocks[1].Text != "Scanned page evidence." || artifact.Blocks[1].Coordinate.Page != 2 || artifact.Blocks[1].Coordinate.X != 100 {
+		t.Fatalf("artifact=%+v", artifact)
+	}
+	if _, err := normalize.PDFWithVisualPages(normalize.Input{
+		SourceID: "src_mixed_pdf", ExtractionConfigID: "extract-mixed-v1", Format: "pdf", Payload: payload,
+	}, nil); err == nil {
+		t.Fatal("accepted missing visual page Evidence")
 	}
 }
 

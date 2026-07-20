@@ -194,15 +194,25 @@ func TestEvidenceCompletionRejectsMissingVerifiedActiveProjection(t *testing.T) 
 	}
 }
 
-func evidenceTestPDF(text string) []byte {
-	objects := []string{
-		"<< /Type /Catalog /Pages 2 0 R >>",
-		"<< /Type /Pages /Kids [4 0 R] /Count 1 >>",
-		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>",
+func evidenceTestPDF(pageTexts ...string) []byte {
+	objects := make([]string, 3+2*len(pageTexts))
+	objects[0] = "<< /Type /Catalog /Pages 2 0 R >>"
+	kids := make([]string, 0, len(pageTexts))
+	for index := range pageTexts {
+		kids = append(kids, fmt.Sprintf("%d 0 R", 4+index*2))
 	}
-	content := "BT /F1 12 Tf 72 720 Td (" + strings.NewReplacer("\\", "\\\\", "(", "\\(", ")", "\\)").Replace(text) + ") Tj ET"
-	objects = append(objects, fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content))
+	objects[1] = fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", strings.Join(kids, " "), len(kids))
+	objects[2] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+	for index, text := range pageTexts {
+		pageObject := 4 + index*2
+		contentObject := pageObject + 1
+		objects[pageObject-1] = fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>", contentObject)
+		content := ""
+		if text != "" {
+			content = "BT /F1 12 Tf 72 720 Td (" + strings.NewReplacer("\\", "\\\\", "(", "\\(", ")", "\\)").Replace(text) + ") Tj ET"
+		}
+		objects[contentObject-1] = fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content)
+	}
 	var document bytes.Buffer
 	document.WriteString("%PDF-1.4\n")
 	offsets := make([]int, len(objects)+1)

@@ -48,6 +48,10 @@ type Extractor interface {
 	Extract(context.Context, source.Source, []byte, string) (normalize.Artifact, error)
 }
 
+type RenderedExtractor interface {
+	ExtractRendered(context.Context, source.Source, []byte, string, documentrender.Result) (normalize.Artifact, error)
+}
+
 type MediaModels interface {
 	Transcribe(context.Context, models.TranscriptionRequest) (models.TranscriptionOutcome, error)
 	DescribeImage(context.Context, models.VisionRequest) (models.VisionOutcome, error)
@@ -57,6 +61,7 @@ type NativeExtractorConfig struct {
 	VisionModel         string
 	TranscriptionModel  string
 	VisionPromptVersion string
+	MaxVisionPages      int
 }
 
 type queue interface {
@@ -144,7 +149,16 @@ func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) (r
 	}
 
 	trace.moveStage("source.normalizing")
-	artifact, err := p.extractor.Extract(ctx, item, payload, p.config.ExtractionConfigID)
+	rendered, viewerArtifacts, err := p.renderViewerArtifacts(ctx, item, payload)
+	if err != nil {
+		return p.failTraced(ctx, lease, trace, "extraction_invalid")
+	}
+	var artifact normalize.Artifact
+	if extractor, ok := p.extractor.(RenderedExtractor); ok && (item.Format == source.FormatPDF || item.Format == source.FormatPPTX) {
+		artifact, err = extractor.ExtractRendered(ctx, item, payload, p.config.ExtractionConfigID, rendered)
+	} else {
+		artifact, err = p.extractor.Extract(ctx, item, payload, p.config.ExtractionConfigID)
+	}
 	if errors.Is(err, normalize.ErrProcessingBudget) {
 		return p.failTraced(ctx, lease, trace, "processing_budget_exceeded")
 	}
@@ -156,10 +170,6 @@ func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) (r
 		return p.failTraced(ctx, lease, trace, "processing_budget_exceeded")
 	}
 	revisionID := stableRevisionID(item.ID, p.config.ExtractionConfigID)
-	viewerArtifacts, err := p.renderViewerArtifacts(ctx, item, payload)
-	if err != nil {
-		return p.failTraced(ctx, lease, trace, "extraction_invalid")
-	}
 	trace.moveStage("source.segmenting")
 	if item.State == source.StateNormalizing {
 		if _, _, err := p.publisher.Publish(ctx, evidence.PublishCommand{
@@ -202,13 +212,13 @@ func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) (r
 	return p.queue.CompleteEvidence(ctx, lease.ID, lease.LeaseToken, revisionID)
 }
 
-func (p *Processor) renderViewerArtifacts(ctx context.Context, item source.Source, payload []byte) ([]evidence.ViewerArtifact, error) {
+func (p *Processor) renderViewerArtifacts(ctx context.Context, item source.Source, payload []byte) (documentrender.Result, []evidence.ViewerArtifact, error) {
 	if item.Format != source.FormatPDF && item.Format != source.FormatPPTX {
-		return nil, nil
+		return documentrender.Result{}, nil, nil
 	}
 	if p.renderer == nil || strings.TrimSpace(p.config.RenderConfigID) == "" || p.config.RenderMaxPages < 1 || p.config.RenderDPI < 72 ||
 		p.config.RenderMaxPixelsPerPage < 1 || p.config.RenderMaxOutputBytes < 1 {
-		return nil, errors.New("document renderer is not configured")
+		return documentrender.Result{}, nil, errors.New("document renderer is not configured")
 	}
 	format := documentrender.FormatPDF
 	if item.Format == source.FormatPPTX {
@@ -220,7 +230,7 @@ func (p *Processor) renderViewerArtifacts(ctx context.Context, item source.Sourc
 		MaxPixelsPerPage: p.config.RenderMaxPixelsPerPage, MaxOutputBytes: p.config.RenderMaxOutputBytes,
 	}, payload)
 	if err != nil {
-		return nil, err
+		return documentrender.Result{}, nil, err
 	}
 	viewers := make([]evidence.ViewerArtifact, 0, len(result.Assets))
 	for _, asset := range result.Assets {
@@ -230,7 +240,7 @@ func (p *Processor) renderViewerArtifacts(ctx context.Context, item source.Sourc
 			RenderConfigID: result.Manifest.RenderConfigID, Payload: asset.Payload,
 		})
 	}
-	return viewers, nil
+	return result, viewers, nil
 }
 
 func (p *Processor) validate(lease sourcejobs.Lease) error {
@@ -284,7 +294,65 @@ func NewNativeExtractor(media MediaModels, config NativeExtractorConfig) *Native
 	config.VisionModel = strings.TrimSpace(config.VisionModel)
 	config.TranscriptionModel = strings.TrimSpace(config.TranscriptionModel)
 	config.VisionPromptVersion = strings.TrimSpace(config.VisionPromptVersion)
+	if config.MaxVisionPages == 0 {
+		config.MaxVisionPages = 20
+	}
 	return &NativeExtractor{media: media, config: config}
+}
+
+func (e *NativeExtractor) ExtractRendered(ctx context.Context, item source.Source, payload []byte, extractionConfigID string, rendered documentrender.Result) (normalize.Artifact, error) {
+	if item.Format != source.FormatPDF && item.Format != source.FormatPPTX {
+		return e.Extract(ctx, item, payload, extractionConfigID)
+	}
+	var missing []int
+	var err error
+	if item.Format == source.FormatPDF {
+		missing, err = normalize.PDFPagesRequiringVision(payload)
+	} else {
+		missing, err = normalize.PPTXSlidesRequiringVision(payload)
+	}
+	if err != nil {
+		return normalize.Artifact{}, err
+	}
+	if len(missing) == 0 {
+		return e.Extract(ctx, item, payload, extractionConfigID)
+	}
+	if e == nil || e.media == nil || e.config.VisionModel == "" || e.config.VisionPromptVersion == "" ||
+		e.config.MaxVisionPages < 1 || len(missing) > e.config.MaxVisionPages {
+		return normalize.Artifact{}, normalize.ErrProcessingBudget
+	}
+	assets := make(map[int]documentrender.Asset, len(rendered.Assets))
+	for _, asset := range rendered.Assets {
+		assets[asset.Page.Ordinal] = asset
+	}
+	visualPages := make([]normalize.VisualPage, 0, len(missing))
+	for _, ordinal := range missing {
+		asset, ok := assets[ordinal]
+		if !ok {
+			return normalize.Artifact{}, errors.New("rendered PDF page is missing")
+		}
+		outcome, err := e.media.DescribeImage(ctx, models.VisionRequest{
+			Model: e.config.VisionModel, MediaType: "image/png", Image: asset.Payload,
+			Width: asset.Page.Width, Height: asset.Page.Height, PromptVersion: e.config.VisionPromptVersion,
+		})
+		if err != nil {
+			return normalize.Artifact{}, err
+		}
+		regions := make([]normalize.ImageRegion, 0, len(outcome.Regions))
+		for _, region := range outcome.Regions {
+			regions = append(regions, normalize.ImageRegion{Text: region.Text, X: region.X, Y: region.Y, Width: region.Width, Height: region.Height})
+		}
+		visualPages = append(visualPages, normalize.VisualPage{
+			Ordinal: ordinal, Width: asset.Page.Width, Height: asset.Page.Height, Regions: regions,
+		})
+	}
+	input := normalize.Input{
+		SourceID: item.ID, ExtractionConfigID: extractionConfigID, Format: string(item.Format), Payload: payload,
+	}
+	if item.Format == source.FormatPPTX {
+		return normalize.PPTXWithVisualSlides(input, visualPages)
+	}
+	return normalize.PDFWithVisualPages(input, visualPages)
 }
 
 func (e *NativeExtractor) Extract(ctx context.Context, item source.Source, payload []byte, extractionConfigID string) (normalize.Artifact, error) {

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -178,6 +179,61 @@ func TestPDFSourceProcessorPublishesCoordinateEvidenceAndReady(t *testing.T) {
 	}
 	if state != source.StateReady || coordinateKind != "pdf_region" {
 		t.Fatalf("state=%q coordinate=%q", state, coordinateKind)
+	}
+}
+
+func TestPDFSourceProcessorCallsVisionOnlyForNativeTextlessPages(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "source-processing-mixed-pdf@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-processing-mixed-pdf")
+	ownerID := sourceTestUserID(t, api, "source-processing-mixed-pdf@example.com")
+	payload := evidenceTestPDF("Native page evidence.", "")
+	objectKey := seedProcessableSource(t, api, ownerID, notebookID, "src_processing_mixed_pdf", "srcjob_processing_mixed_pdf", source.FormatPDF, payload)
+	objects := objectstore.NewMemoryStore()
+	if err := objects.Put(context.Background(), objectKey, payload); err != nil {
+		t.Fatal(err)
+	}
+	queue := sourcejobs.NewQueue(api.db.Pool(), time.Minute)
+	lease, ok, err := queue.Claim(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
+	}
+	media := &recordingMediaModels{}
+	pageOne, pageTwo := evidenceViewerPNG(t, 64, 32), evidenceViewerPNG(t, 64, 32)
+	processor := sourceprocessing.NewProcessorWithExtractorTraceAndRenderer(
+		api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, newRecordingEvidenceProjection(t, api),
+		sourceprocessing.NewNativeExtractor(media, sourceprocessing.NativeExtractorConfig{VisionModel: "vision-model", VisionPromptVersion: "vision-v1"}),
+		fixedDocumentRenderer{pages: [][]byte{pageOne, pageTwo}}, nil,
+		sourceprocessing.Config{ExtractionConfigID: "extract-mixed-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000,
+			RenderConfigID: "pdfium-v1", RenderMaxPages: 10, RenderDPI: 144, RenderMaxPixelsPerPage: 1_000_000, RenderMaxOutputBytes: 1 << 20},
+	)
+	if err := processor.ProcessLease(context.Background(), lease); err != nil {
+		t.Fatal(err)
+	}
+	var state source.State
+	var texts []string
+	rows, err := api.db.Pool().Query(context.Background(), `
+		select s.state,u.text_content from source_sources s
+		join source_evidence_revisions r on r.source_id=s.id and r.status='active'
+		join source_evidence_units u on u.revision_id=r.id
+		where s.id='src_processing_mixed_pdf' order by u.ordinal
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var text string
+		if err := rows.Scan(&state, &text); err != nil {
+			t.Fatal(err)
+		}
+		texts = append(texts, text)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if state != source.StateReady || !reflect.DeepEqual(texts, []string{"Native page evidence.", "One pixel evidence."}) || media.calls != 1 {
+		t.Fatalf("state=%q texts=%v vision calls=%d", state, texts, media.calls)
 	}
 }
 
@@ -535,28 +591,39 @@ type fixedExtractor struct {
 }
 
 type fixedDocumentRenderer struct {
-	page []byte
-	err  error
+	page  []byte
+	pages [][]byte
+	err   error
 }
 
 func (r fixedDocumentRenderer) Render(_ context.Context, request documentrender.Request, _ []byte) (documentrender.Result, error) {
 	if r.err != nil {
 		return documentrender.Result{}, r.err
 	}
-	digest := sha256.Sum256(r.page)
+	pages := r.pages
+	if len(pages) == 0 {
+		pages = [][]byte{r.page}
+	}
 	prefix := "page"
 	if request.Format == documentrender.FormatPPTX {
 		prefix = "slide"
 	}
-	page := documentrender.Page{
-		Ordinal: 1, Width: 64, Height: 32, MediaType: "image/png", Bytes: int64(len(r.page)),
-		SHA256: hex.EncodeToString(digest[:]), Filename: prefix + "-000001.png",
-	}
 	manifest := documentrender.Manifest{
 		SchemaVersion: 1, SourceID: request.SourceID, Format: request.Format, InputSHA256: request.InputSHA256,
-		RenderConfigID: request.RenderConfigID, Pages: []documentrender.Page{page},
+		RenderConfigID: request.RenderConfigID, Pages: make([]documentrender.Page, 0, len(pages)),
 	}
-	return documentrender.Result{Manifest: manifest, Assets: []documentrender.Asset{{Page: page, Payload: r.page}}}, nil
+	result := documentrender.Result{Assets: make([]documentrender.Asset, 0, len(pages))}
+	for index, payload := range pages {
+		digest := sha256.Sum256(payload)
+		page := documentrender.Page{
+			Ordinal: index + 1, Width: 64, Height: 32, MediaType: "image/png", Bytes: int64(len(payload)),
+			SHA256: hex.EncodeToString(digest[:]), Filename: fmt.Sprintf("%s-%06d.png", prefix, index+1),
+		}
+		manifest.Pages = append(manifest.Pages, page)
+		result.Assets = append(result.Assets, documentrender.Asset{Page: page, Payload: payload})
+	}
+	result.Manifest = manifest
+	return result, nil
 }
 
 type recordingSourceTraceSink struct {

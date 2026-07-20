@@ -43,6 +43,7 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 	t.Setenv("NANO_SOURCE_VISION_MODEL", "gemini/gemini-2.5-flash")
 	t.Setenv("NANO_SOURCE_TRANSCRIPTION_MODEL", "openai/whisper-1")
 	t.Setenv("NANO_SOURCE_VISION_PROMPT_VERSION", "vision-normalize-v1")
+	t.Setenv("NANO_SOURCE_MAX_VISION_PAGES", "12")
 	t.Setenv("NANO_DOCUMENT_RENDERER_URL", "http://renderer.internal:8084/")
 	t.Setenv("NANO_DOCUMENT_RENDERER_SERVICE_TOKEN", "renderer-secret")
 	t.Setenv("NANO_DOCUMENT_RENDER_CONFIG_ID", "pdfium-lo-v7")
@@ -89,7 +90,7 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 		config.SourceProcessingLease != 45*time.Second || config.SourceProcessingHeartbeat != 10*time.Second ||
 		config.SourceProcessingPoll != 250*time.Millisecond || config.SourceExtractionConfigID != "extract-text-v1" ||
 		config.SourceVisionModel != "gemini/gemini-2.5-flash" || config.SourceTranscriptionModel != "openai/whisper-1" ||
-		config.SourceVisionPromptVersion != "vision-normalize-v1" ||
+		config.SourceVisionPromptVersion != "vision-normalize-v1" || config.SourceMaxVisionPages != 12 ||
 		config.DocumentRendererURL != "http://renderer.internal:8084" || config.DocumentRendererServiceToken != "renderer-secret" ||
 		config.DocumentRenderConfigID != "pdfium-lo-v7" || config.DocumentRenderTimeout != 70*time.Second ||
 		config.DocumentRenderMaxPages != 25 || config.DocumentRenderDPI != 144 || config.DocumentRenderMaxPixelsPerPage != 3_000_000 ||

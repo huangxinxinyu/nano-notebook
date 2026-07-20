@@ -67,6 +67,7 @@ type workerConfig struct {
 	SourceVisionModel              string
 	SourceTranscriptionModel       string
 	SourceVisionPromptVersion      string
+	SourceMaxVisionPages           int
 	DocumentRendererURL            string
 	DocumentRendererServiceToken   string
 	DocumentRenderConfigID         string
@@ -252,7 +253,7 @@ func main() {
 		sourceprojection.New(db.Pool(), qdrant, modelClient),
 		sourceprocessing.NewNativeExtractor(modelClient, sourceprocessing.NativeExtractorConfig{
 			VisionModel: config.SourceVisionModel, TranscriptionModel: config.SourceTranscriptionModel,
-			VisionPromptVersion: config.SourceVisionPromptVersion,
+			VisionPromptVersion: config.SourceVisionPromptVersion, MaxVisionPages: config.SourceMaxVisionPages,
 		}), documentRenderer, traceExporter,
 		sourceprocessing.Config{
 			ExtractionConfigID: config.SourceExtractionConfigID,
@@ -455,6 +456,10 @@ func loadWorkerConfig() (workerConfig, error) {
 	if err != nil {
 		return workerConfig{}, err
 	}
+	sourceMaxVisionPages, err := workerEnvInt("NANO_SOURCE_MAX_VISION_PAGES", 20)
+	if err != nil {
+		return workerConfig{}, err
+	}
 	agentInteractiveConcurrency, err := workerEnvInt("NANO_AGENT_INTERACTIVE_CONCURRENCY", workload.DefaultAgentConcurrency)
 	if err != nil {
 		return workerConfig{}, err
@@ -502,6 +507,7 @@ func loadWorkerConfig() (workerConfig, error) {
 		SourceVisionModel:            env("NANO_SOURCE_VISION_MODEL", "gemini/gemini-2.5-flash"),
 		SourceTranscriptionModel:     env("NANO_SOURCE_TRANSCRIPTION_MODEL", "openai/whisper-1"),
 		SourceVisionPromptVersion:    env("NANO_SOURCE_VISION_PROMPT_VERSION", "vision-normalize-v1"),
+		SourceMaxVisionPages:         sourceMaxVisionPages,
 		DocumentRendererURL:          strings.TrimRight(env("NANO_DOCUMENT_RENDERER_URL", "http://127.0.0.1:8084"), "/"),
 		DocumentRendererServiceToken: env("NANO_DOCUMENT_RENDERER_SERVICE_TOKEN", "nano-local-renderer-token"),
 		DocumentRenderConfigID:       env("NANO_DOCUMENT_RENDER_CONFIG_ID", "pdfium-libreoffice-v1"),
@@ -528,7 +534,7 @@ func loadWorkerConfig() (workerConfig, error) {
 		config.SourceProcessingLease <= 0 || config.SourceProcessingHeartbeat <= 0 || config.SourceProcessingHeartbeat >= config.SourceProcessingLease ||
 		config.SourceProcessingPoll <= 0 || strings.TrimSpace(config.SourceExtractionConfigID) == "" ||
 		strings.TrimSpace(config.SourceVisionModel) == "" || strings.TrimSpace(config.SourceTranscriptionModel) == "" ||
-		strings.TrimSpace(config.SourceVisionPromptVersion) == "" ||
+		strings.TrimSpace(config.SourceVisionPromptVersion) == "" || config.SourceMaxVisionPages < 1 || config.SourceMaxVisionPages > 500 ||
 		strings.TrimSpace(config.DocumentRendererURL) == "" || strings.TrimSpace(config.DocumentRendererServiceToken) == "" ||
 		strings.TrimSpace(config.DocumentRenderConfigID) == "" || config.DocumentRenderTimeout <= 0 ||
 		config.DocumentRenderMaxPages < 1 || config.DocumentRenderMaxPages > 500 || config.DocumentRenderDPI < 72 || config.DocumentRenderDPI > 300 ||
