@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
+	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/normalize"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
@@ -189,6 +191,62 @@ func TestHTMLSnapshotProcessorPublishesPrimaryEvidenceAndReady(t *testing.T) {
 	}
 }
 
+func TestMediaSourceProcessorPublishesModelOutputOnlyThroughNativeBounds(t *testing.T) {
+	tests := []struct {
+		name           string
+		format         source.Format
+		payload        []byte
+		coordinateKind string
+	}{
+		{name: "image", format: source.FormatPNG, payload: mustDecodeBase64("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2n0YAAAAASUVORK5CYII="), coordinateKind: "image_region"},
+		{name: "audio", format: source.FormatMP3, payload: []byte("ID3-audio-fixture"), coordinateKind: "time_interval"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			api := newTestAPI(t)
+			owner := api.register(t, "source-processing-media-"+test.name+"@example.com")
+			notebookID := createSourceTestNotebook(t, api, owner, "source-processing-media-"+test.name)
+			ownerID := sourceTestUserID(t, api, "source-processing-media-"+test.name+"@example.com")
+			sourceID, jobID := "src_processing_media_"+test.name, "srcjob_processing_media_"+test.name
+			objectKey := seedProcessableSource(t, api, ownerID, notebookID, sourceID, jobID, test.format, test.payload)
+			objects := objectstore.NewMemoryStore()
+			if err := objects.Put(context.Background(), objectKey, test.payload); err != nil {
+				t.Fatal(err)
+			}
+			queue := sourcejobs.NewQueue(api.db.Pool(), time.Minute)
+			lease, ok, err := queue.Claim(context.Background())
+			if err != nil || !ok {
+				t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
+			}
+			media := &recordingMediaModels{}
+			extractor := sourceprocessing.NewNativeExtractor(media, sourceprocessing.NativeExtractorConfig{
+				VisionModel: "gemini/vision", TranscriptionModel: "openai/whisper-1", VisionPromptVersion: "vision-normalize-v1",
+			})
+			processor := sourceprocessing.NewProcessorWithExtractor(
+				api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, newRecordingEvidenceProjection(t, api), extractor,
+				sourceprocessing.Config{ExtractionConfigID: "extract-media-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000},
+			)
+			if err := processor.ProcessLease(context.Background(), lease); err != nil {
+				t.Fatal(err)
+			}
+			var state source.State
+			var coordinateKind string
+			if err := api.db.Pool().QueryRow(context.Background(), `
+				select s.state, u.coordinate_json->>'kind'
+				from source_sources s
+				join source_evidence_revisions r on r.source_id=s.id and r.status='active'
+				join source_evidence_units u on u.revision_id=r.id
+				where s.id=$1
+			`, sourceID).Scan(&state, &coordinateKind); err != nil {
+				t.Fatal(err)
+			}
+			if state != source.StateReady || coordinateKind != test.coordinateKind || media.calls != 1 {
+				t.Fatalf("state=%q coordinate=%q model calls=%d", state, coordinateKind, media.calls)
+			}
+		})
+	}
+}
+
 func TestSourceProcessorPublishesOnlyBoundedNonPrimaryCoverageGaps(t *testing.T) {
 	t.Run("bounded gap reaches Ready", func(t *testing.T) {
 		api := newTestAPI(t)
@@ -323,7 +381,29 @@ type fixedExtractor struct {
 	artifact normalize.Artifact
 }
 
-func (f fixedExtractor) Extract(_ source.Source, _ []byte, _ string) (normalize.Artifact, error) {
+type recordingMediaModels struct {
+	calls int
+}
+
+func (m *recordingMediaModels) DescribeImage(_ context.Context, request models.VisionRequest) (models.VisionOutcome, error) {
+	m.calls++
+	return models.VisionOutcome{Regions: []models.VisionRegion{{Text: "One pixel evidence.", X: 0, Y: 0, Width: float64(request.Width), Height: float64(request.Height)}}}, nil
+}
+
+func (m *recordingMediaModels) Transcribe(context.Context, models.TranscriptionRequest) (models.TranscriptionOutcome, error) {
+	m.calls++
+	return models.TranscriptionOutcome{Segments: []models.TranscriptSegment{{StartMS: 0, EndMS: 1250, Text: "Audio evidence."}}}, nil
+}
+
+func mustDecodeBase64(value string) []byte {
+	payload, err := base64.StdEncoding.DecodeString(value)
+	if err != nil {
+		panic(err)
+	}
+	return payload
+}
+
+func (f fixedExtractor) Extract(_ context.Context, _ source.Source, _ []byte, _ string) (normalize.Artifact, error) {
 	return f.artifact, nil
 }
 
@@ -418,6 +498,12 @@ func sourceProcessingMediaType(format source.Format) string {
 	}
 	if format == source.FormatDOCX {
 		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	}
+	if format == source.FormatPNG {
+		return "image/png"
+	}
+	if format == source.FormatMP3 {
+		return "audio/mpeg"
 	}
 	return "text/plain"
 }

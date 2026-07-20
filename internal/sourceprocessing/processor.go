@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
+	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/normalize"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
@@ -37,7 +38,18 @@ type Projection interface {
 }
 
 type Extractor interface {
-	Extract(source.Source, []byte, string) (normalize.Artifact, error)
+	Extract(context.Context, source.Source, []byte, string) (normalize.Artifact, error)
+}
+
+type MediaModels interface {
+	Transcribe(context.Context, models.TranscriptionRequest) (models.TranscriptionOutcome, error)
+	DescribeImage(context.Context, models.VisionRequest) (models.VisionOutcome, error)
+}
+
+type NativeExtractorConfig struct {
+	VisionModel         string
+	TranscriptionModel  string
+	VisionPromptVersion string
 }
 
 type queue interface {
@@ -65,7 +77,7 @@ type Processor struct {
 }
 
 func NewProcessor(pool *pgxpool.Pool, queue queue, publisher publisher, objects objectReader, projection Projection, config Config) *Processor {
-	return NewProcessorWithExtractor(pool, queue, publisher, objects, projection, nativeExtractor{}, config)
+	return NewProcessorWithExtractor(pool, queue, publisher, objects, projection, NewNativeExtractor(nil, NativeExtractorConfig{}), config)
 }
 
 func NewProcessorWithExtractor(pool *pgxpool.Pool, queue queue, publisher publisher, objects objectReader, projection Projection, extractor Extractor, config Config) *Processor {
@@ -108,7 +120,7 @@ func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) er
 		item.State = source.StateNormalizing
 	}
 
-	artifact, err := p.extractor.Extract(item, payload, p.config.ExtractionConfigID)
+	artifact, err := p.extractor.Extract(ctx, item, payload, p.config.ExtractionConfigID)
 	if err != nil || normalize.Validate(artifact) != nil {
 		return p.fail(ctx, lease, "extraction_invalid")
 	}
@@ -197,9 +209,19 @@ func (p *Processor) loadSource(ctx context.Context, lease sourcejobs.Lease) (sou
 	return item, nil
 }
 
-type nativeExtractor struct{}
+type NativeExtractor struct {
+	media  MediaModels
+	config NativeExtractorConfig
+}
 
-func (nativeExtractor) Extract(item source.Source, payload []byte, extractionConfigID string) (normalize.Artifact, error) {
+func NewNativeExtractor(media MediaModels, config NativeExtractorConfig) *NativeExtractor {
+	config.VisionModel = strings.TrimSpace(config.VisionModel)
+	config.TranscriptionModel = strings.TrimSpace(config.TranscriptionModel)
+	config.VisionPromptVersion = strings.TrimSpace(config.VisionPromptVersion)
+	return &NativeExtractor{media: media, config: config}
+}
+
+func (e *NativeExtractor) Extract(ctx context.Context, item source.Source, payload []byte, extractionConfigID string) (normalize.Artifact, error) {
 	input := normalize.Input{
 		SourceID: item.ID, ExtractionConfigID: extractionConfigID,
 		Format: string(item.Format), Payload: payload,
@@ -213,6 +235,43 @@ func (nativeExtractor) Extract(item source.Source, payload []byte, extractionCon
 		return normalize.OOXML(input)
 	case source.FormatHTML:
 		return normalize.HTML(input)
+	case source.FormatPNG, source.FormatJPEG, source.FormatWebP:
+		if e == nil || e.media == nil || e.config.VisionModel == "" || e.config.VisionPromptVersion == "" {
+			return normalize.Artifact{}, errors.New("vision Extractor Adapter is not configured")
+		}
+		width, height, err := normalize.ImageDimensions(string(item.Format), payload)
+		if err != nil {
+			return normalize.Artifact{}, err
+		}
+		outcome, err := e.media.DescribeImage(ctx, models.VisionRequest{
+			Model: e.config.VisionModel, MediaType: item.MediaType, Image: payload,
+			Width: width, Height: height, PromptVersion: e.config.VisionPromptVersion,
+		})
+		if err != nil {
+			return normalize.Artifact{}, err
+		}
+		regions := make([]normalize.ImageRegion, 0, len(outcome.Regions))
+		for _, region := range outcome.Regions {
+			regions = append(regions, normalize.ImageRegion{
+				Text: region.Text, X: region.X, Y: region.Y, Width: region.Width, Height: region.Height,
+			})
+		}
+		return normalize.Image(input, regions)
+	case source.FormatMP3, source.FormatWAV, source.FormatM4A:
+		if e == nil || e.media == nil || e.config.TranscriptionModel == "" {
+			return normalize.Artifact{}, errors.New("transcription Extractor Adapter is not configured")
+		}
+		outcome, err := e.media.Transcribe(ctx, models.TranscriptionRequest{
+			Model: e.config.TranscriptionModel, Filename: item.Title, MediaType: item.MediaType, Audio: payload,
+		})
+		if err != nil {
+			return normalize.Artifact{}, err
+		}
+		segments := make([]normalize.TranscriptSegment, 0, len(outcome.Segments))
+		for _, segment := range outcome.Segments {
+			segments = append(segments, normalize.TranscriptSegment{StartMS: segment.StartMS, EndMS: segment.EndMS, Text: segment.Text})
+		}
+		return normalize.Transcript(input, segments)
 	default:
 		return normalize.Artifact{}, errors.New("Extractor Adapter is not configured for Source format")
 	}

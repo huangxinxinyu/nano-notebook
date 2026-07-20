@@ -43,14 +43,16 @@ type Block struct {
 }
 
 type SourceCoordinate struct {
-	Kind   string  `json:"kind"`
-	Page   int     `json:"page,omitempty"`
-	Slide  int     `json:"slide,omitempty"`
-	Block  int     `json:"block,omitempty"`
-	X      float64 `json:"x,omitempty"`
-	Y      float64 `json:"y,omitempty"`
-	Width  float64 `json:"width,omitempty"`
-	Height float64 `json:"height,omitempty"`
+	Kind    string  `json:"kind"`
+	Page    int     `json:"page,omitempty"`
+	Slide   int     `json:"slide,omitempty"`
+	Block   int     `json:"block,omitempty"`
+	StartMS int64   `json:"start_ms,omitempty"`
+	EndMS   int64   `json:"end_ms,omitempty"`
+	X       float64 `json:"x,omitempty"`
+	Y       float64 `json:"y,omitempty"`
+	Width   float64 `json:"width,omitempty"`
+	Height  float64 `json:"height,omitempty"`
 }
 
 type Coverage struct {
@@ -127,7 +129,8 @@ func canonicalArtifact(artifact Artifact) ([]byte, error) {
 func Validate(artifact Artifact) error {
 	if artifact.SchemaVersion != "nano.normalized-source.v1" || strings.TrimSpace(artifact.SourceID) == "" ||
 		strings.TrimSpace(artifact.ExtractionConfigID) == "" ||
-		(artifact.Format != "txt" && artifact.Format != "markdown" && artifact.Format != "pdf" && artifact.Format != "docx" && artifact.Format != "pptx" && artifact.Format != "html") ||
+		(artifact.Format != "txt" && artifact.Format != "markdown" && artifact.Format != "pdf" && artifact.Format != "docx" && artifact.Format != "pptx" && artifact.Format != "html" &&
+			artifact.Format != "png" && artifact.Format != "jpeg" && artifact.Format != "webp" && artifact.Format != "mp3" && artifact.Format != "wav" && artifact.Format != "m4a" && artifact.Format != "youtube") ||
 		!utf8.ValidString(artifact.Text) || len(artifact.Blocks) == 0 {
 		return errors.New("invalid normalized artifact identity or primary content")
 	}
@@ -156,8 +159,8 @@ func Validate(artifact Artifact) error {
 		if gap.Impact != "non_primary" || !knownGapReason(gap.Reason) {
 			return errors.New("invalid normalized artifact coverage gap")
 		}
-		if artifact.Format == "pdf" {
-			if gap.StartRune != 0 || gap.EndRune != 0 || !validCoordinate("pdf", gap.Coordinate) || gap.Coordinate.Page < previousPage {
+		if gap.Coordinate != nil {
+			if gap.StartRune != 0 || gap.EndRune != 0 || !validCoordinate(artifact.Format, gap.Coordinate) || gap.Coordinate.Page < previousPage {
 				return errors.New("invalid normalized artifact coverage gap")
 			}
 			previousPage = gap.Coordinate.Page
@@ -201,6 +204,12 @@ func validCoordinate(format string, coordinate *SourceCoordinate) bool {
 	}
 	if format == "html" {
 		return coordinate.Kind == "html_block" && coordinate.Block > 0
+	}
+	if format == "png" || format == "jpeg" || format == "webp" {
+		return coordinate.Kind == "image_region" && coordinate.X >= 0 && coordinate.Y >= 0 && validRegionCoordinate(coordinate)
+	}
+	if format == "mp3" || format == "wav" || format == "m4a" || format == "youtube" {
+		return coordinate.Kind == "time_interval" && coordinate.StartMS >= 0 && coordinate.EndMS > coordinate.StartMS
 	}
 	if format == "pptx" {
 		return coordinate.Kind == "slide_region" && coordinate.Slide > 0 && validRegionCoordinate(coordinate)

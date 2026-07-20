@@ -40,6 +40,9 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 	t.Setenv("NANO_SOURCE_PROCESSING_HEARTBEAT_INTERVAL", "10s")
 	t.Setenv("NANO_SOURCE_PROCESSING_POLL_INTERVAL", "250ms")
 	t.Setenv("NANO_SOURCE_EXTRACTION_CONFIG_ID", "extract-text-v1")
+	t.Setenv("NANO_SOURCE_VISION_MODEL", "gemini/gemini-2.5-flash")
+	t.Setenv("NANO_SOURCE_TRANSCRIPTION_MODEL", "openai/whisper-1")
+	t.Setenv("NANO_SOURCE_VISION_PROMPT_VERSION", "vision-normalize-v1")
 	t.Setenv("NANO_SOURCE_PROCESSING_MAX_BYTES", "1048576")
 	t.Setenv("NANO_SOURCE_PROCESSING_MAX_RUNES", "200000")
 	t.Setenv("NANO_REPLAY_KEY_ID", "replay-key-7")
@@ -75,6 +78,8 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 		config.QdrantCollection != "source-evidence" || config.QdrantDenseDimensions != 768 ||
 		config.SourceProcessingLease != 45*time.Second || config.SourceProcessingHeartbeat != 10*time.Second ||
 		config.SourceProcessingPoll != 250*time.Millisecond || config.SourceExtractionConfigID != "extract-text-v1" ||
+		config.SourceVisionModel != "gemini/gemini-2.5-flash" || config.SourceTranscriptionModel != "openai/whisper-1" ||
+		config.SourceVisionPromptVersion != "vision-normalize-v1" ||
 		config.SourceProcessingMaxBytes != 1048576 || config.SourceProcessingMaxRunes != 200000 {
 		t.Fatalf("Source processing config = %#v", config)
 	}

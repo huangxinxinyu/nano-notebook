@@ -62,6 +62,9 @@ type workerConfig struct {
 	SourceProcessingHeartbeat time.Duration
 	SourceProcessingPoll      time.Duration
 	SourceExtractionConfigID  string
+	SourceVisionModel         string
+	SourceTranscriptionModel  string
+	SourceVisionPromptVersion string
 	SourceProcessingMaxBytes  int64
 	SourceProcessingMaxRunes  int
 	ReplayKeyID               string
@@ -215,9 +218,13 @@ func main() {
 	sourcePurgeProcessor := sourcepurge.NewProcessor(db.Pool(), sourceObjects, config.SourcePurgeLease)
 	go func() { sourcePurgeDone <- sourcePurgeProcessor.Run(ctx, config.SourcePurgePoll) }()
 	sourceQueue := sourcejobs.NewQueue(db.Pool(), config.SourceProcessingLease)
-	sourceProcessor := sourceprocessing.NewProcessor(
+	sourceProcessor := sourceprocessing.NewProcessorWithExtractor(
 		db.Pool(), sourceQueue, evidence.NewPublisher(db.Pool(), sourceObjects), sourceObjects,
 		sourceprojection.New(db.Pool(), qdrant, modelClient),
+		sourceprocessing.NewNativeExtractor(modelClient, sourceprocessing.NativeExtractorConfig{
+			VisionModel: config.SourceVisionModel, TranscriptionModel: config.SourceTranscriptionModel,
+			VisionPromptVersion: config.SourceVisionPromptVersion,
+		}),
 		sourceprocessing.Config{
 			ExtractionConfigID: config.SourceExtractionConfigID,
 			MaxSourceBytes:     config.SourceProcessingMaxBytes, MaxNormalizedRunes: config.SourceProcessingMaxRunes,
@@ -431,7 +438,10 @@ func loadWorkerConfig() (workerConfig, error) {
 		QdrantDenseDimensions: qdrantDenseDimensions,
 		SourceProcessingLease: sourceProcessingLease, SourceProcessingHeartbeat: sourceProcessingHeartbeat,
 		SourceProcessingPoll: sourceProcessingPoll, SourceExtractionConfigID: env("NANO_SOURCE_EXTRACTION_CONFIG_ID", "extract-text-v1"),
-		SourceProcessingMaxBytes: int64(sourceProcessingMaxBytes), SourceProcessingMaxRunes: sourceProcessingMaxRunes,
+		SourceVisionModel:         env("NANO_SOURCE_VISION_MODEL", "gemini/gemini-2.5-flash"),
+		SourceTranscriptionModel:  env("NANO_SOURCE_TRANSCRIPTION_MODEL", "openai/whisper-1"),
+		SourceVisionPromptVersion: env("NANO_SOURCE_VISION_PROMPT_VERSION", "vision-normalize-v1"),
+		SourceProcessingMaxBytes:  int64(sourceProcessingMaxBytes), SourceProcessingMaxRunes: sourceProcessingMaxRunes,
 		ReplayKeyID: env("NANO_REPLAY_KEY_ID", "nano-local-replay-key-v1"), ReplayKEK: replayKEK,
 	}
 	if strings.TrimSpace(config.DatabaseURL) == "" || strings.TrimSpace(config.Addr) == "" ||
@@ -447,6 +457,8 @@ func loadWorkerConfig() (workerConfig, error) {
 		strings.TrimSpace(config.QdrantURL) == "" || strings.TrimSpace(config.QdrantCollection) == "" || config.QdrantDenseDimensions <= 0 ||
 		config.SourceProcessingLease <= 0 || config.SourceProcessingHeartbeat <= 0 || config.SourceProcessingHeartbeat >= config.SourceProcessingLease ||
 		config.SourceProcessingPoll <= 0 || strings.TrimSpace(config.SourceExtractionConfigID) == "" ||
+		strings.TrimSpace(config.SourceVisionModel) == "" || strings.TrimSpace(config.SourceTranscriptionModel) == "" ||
+		strings.TrimSpace(config.SourceVisionPromptVersion) == "" ||
 		config.SourceProcessingMaxBytes <= 0 || config.SourceProcessingMaxBytes > 100*1024*1024 || config.SourceProcessingMaxRunes <= 0 ||
 		strings.TrimSpace(config.ReplayKeyID) == "" || len(config.ReplayKEK) != 32 {
 		return workerConfig{}, errors.New("worker configuration is incomplete or inconsistent")
