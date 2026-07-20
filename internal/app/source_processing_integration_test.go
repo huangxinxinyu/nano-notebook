@@ -1,0 +1,181 @@
+package app_test
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
+	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
+	"github.com/huangxinxinyu/nano-notebook/internal/source"
+	"github.com/huangxinxinyu/nano-notebook/internal/sourcejobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/sourceprocessing"
+	"github.com/jackc/pgx/v5"
+)
+
+func TestTextSourceProcessorPublishesActiveEvidenceAndReadyAtomically(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "source-processing@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-processing")
+	ownerID := sourceTestUserID(t, api, "source-processing@example.com")
+	payload := []byte("# Evidence\n\nFirst 段落.\n")
+	objectKey := seedProcessableSource(t, api, ownerID, notebookID, "src_processing", "srcjob_processing", source.FormatMarkdown, payload)
+
+	objects := objectstore.NewMemoryStore()
+	if err := objects.Put(context.Background(), objectKey, payload); err != nil {
+		t.Fatal(err)
+	}
+	queue := sourcejobs.NewQueue(api.db.Pool(), time.Minute)
+	lease, ok, err := queue.Claim(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
+	}
+	projection := &recordingEvidenceProjection{}
+	processor := sourceprocessing.NewProcessor(api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, projection, sourceprocessing.Config{
+		ExtractionConfigID: "extract-text-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000,
+	})
+	if err := processor.ProcessLease(context.Background(), lease); err != nil {
+		t.Fatalf("ProcessLease: %v", err)
+	}
+
+	var sourceState source.State
+	var jobState, revisionState string
+	var activeRevisionCount int
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select s.state, j.status,
+			(select count(*) from source_evidence_revisions r where r.source_id=s.id and r.status='active'),
+			(select status from source_evidence_revisions r where r.source_id=s.id order by revision_no desc limit 1)
+		from source_sources s join source_processing_jobs j on j.source_id=s.id
+		where s.id='src_processing'
+	`).Scan(&sourceState, &jobState, &activeRevisionCount, &revisionState); err != nil {
+		t.Fatal(err)
+	}
+	if sourceState != source.StateReady || jobState != "succeeded" || activeRevisionCount != 1 || revisionState != "active" {
+		t.Fatalf("source=%s job=%s active=%d revision=%s", sourceState, jobState, activeRevisionCount, revisionState)
+	}
+	if projection.builds != 1 || projection.verifications != 1 || projection.revisionID == "" || projection.unitCount != 2 {
+		t.Fatalf("projection = %+v", projection)
+	}
+	if objects.Len() != 2 {
+		t.Fatalf("object count=%d, want original plus normalized artifact", objects.Len())
+	}
+}
+
+func TestTextSourceProcessorTerminallyFailsIntegrityMismatch(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "source-processing-mismatch@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-processing-mismatch")
+	ownerID := sourceTestUserID(t, api, "source-processing-mismatch@example.com")
+	expected := []byte("right")
+	objectKey := seedProcessableSource(t, api, ownerID, notebookID, "src_processing_bad", "srcjob_processing_bad", source.FormatTXT, expected)
+
+	objects := objectstore.NewMemoryStore()
+	if err := objects.Put(context.Background(), objectKey, []byte("wrong")); err != nil {
+		t.Fatal(err)
+	}
+	queue := sourcejobs.NewQueue(api.db.Pool(), time.Minute)
+	lease, ok, err := queue.Claim(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
+	}
+	processor := sourceprocessing.NewProcessor(api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, &recordingEvidenceProjection{}, sourceprocessing.Config{
+		ExtractionConfigID: "extract-text-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000,
+	})
+	if err := processor.ProcessLease(context.Background(), lease); err != nil {
+		t.Fatalf("handled permanent failure returned error: %v", err)
+	}
+	assertSourceJobState(t, api, "src_processing_bad", "srcjob_processing_bad", source.StateFailed, "failed", "source_integrity_mismatch")
+}
+
+func TestTextSourceProcessorResumesFromPublishedEvidenceBoundary(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "source-processing-resume@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-processing-resume")
+	ownerID := sourceTestUserID(t, api, "source-processing-resume@example.com")
+	payload := []byte("One.\n\nTwo.\n")
+	objectKey := seedProcessableSource(t, api, ownerID, notebookID, "src_processing_resume", "srcjob_processing_resume", source.FormatTXT, payload)
+	objects := objectstore.NewMemoryStore()
+	if err := objects.Put(context.Background(), objectKey, payload); err != nil {
+		t.Fatal(err)
+	}
+	queue := sourcejobs.NewQueue(api.db.Pool(), time.Minute)
+	lease, ok, err := queue.Claim(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
+	}
+	projection := &recordingEvidenceProjection{buildError: errors.New("Qdrant temporarily unavailable")}
+	processor := sourceprocessing.NewProcessor(api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, projection, sourceprocessing.Config{
+		ExtractionConfigID: "extract-text-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000,
+	})
+	if err := processor.ProcessLease(context.Background(), lease); err == nil {
+		t.Fatal("first processing attempt unexpectedly succeeded")
+	}
+	assertSourceJobState(t, api, "src_processing_resume", "srcjob_processing_resume", source.StateSegmenting, "running", "")
+	projection.buildError = nil
+	if err := processor.ProcessLease(context.Background(), lease); err != nil {
+		t.Fatalf("resumed ProcessLease: %v", err)
+	}
+	assertSourceJobState(t, api, "src_processing_resume", "srcjob_processing_resume", source.StateReady, "succeeded", "")
+	if objects.Len() != 2 || projection.builds != 2 || projection.verifications != 1 {
+		t.Fatalf("objects=%d projection=%+v", objects.Len(), projection)
+	}
+}
+
+type recordingEvidenceProjection struct {
+	builds        int
+	verifications int
+	revisionID    string
+	unitCount     int
+	buildError    error
+}
+
+func (p *recordingEvidenceProjection) Build(_ context.Context, command sourceprocessing.ProjectionCommand) error {
+	p.builds++
+	p.revisionID = command.RevisionID
+	p.unitCount = len(command.Artifact.Blocks)
+	return p.buildError
+}
+
+func (p *recordingEvidenceProjection) Verify(_ context.Context, command sourceprocessing.ProjectionCommand) error {
+	p.verifications++
+	if command.RevisionID != p.revisionID {
+		return sourceprocessing.ErrProjectionInvalid
+	}
+	return nil
+}
+
+func seedProcessableSource(t *testing.T, api *testAPI, ownerID, notebookID, sourceID, jobID string, format source.Format, payload []byte) string {
+	t.Helper()
+	digest := sha256.Sum256(payload)
+	sha := hex.EncodeToString(digest[:])
+	objectKey := "sources/" + sourceID + "/original/" + sha
+	err := api.db.WithRequestPrincipal(context.Background(), ownerID, func(tx pgx.Tx) error {
+		created, err := source.NewStore(tx).CreateUploaded(context.Background(), source.CreateUploadedCommand{
+			ID: sourceID, NotebookID: notebookID, Title: sourceID + "." + string(format), Format: format,
+			MediaType: sourceProcessingMediaType(format), ByteSize: int64(len(payload)), ContentSHA256: sha,
+			OriginalObjectKey: objectKey,
+		})
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(context.Background(), `
+			insert into source_processing_jobs(id, source_id, notebook_id, status)
+			values ($1, $2, $3, 'queued')
+		`, jobID, created.ID, created.NotebookID)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return objectKey
+}
+
+func sourceProcessingMediaType(format source.Format) string {
+	if format == source.FormatMarkdown {
+		return "text/markdown"
+	}
+	return "text/plain"
+}

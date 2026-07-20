@@ -47,7 +47,10 @@ func (q *Queue) Claim(ctx context.Context) (Lease, bool, error) {
 	if _, err := tx.Exec(ctx, `set local role nano_worker`); err != nil {
 		return Lease{}, false, err
 	}
-	now := time.Now().UTC()
+	var now time.Time
+	if err := tx.QueryRow(ctx, `select clock_timestamp()`).Scan(&now); err != nil {
+		return Lease{}, false, err
+	}
 	if _, err := tx.Exec(ctx, `
 		with exhausted as (
 			update source_processing_jobs
@@ -159,7 +162,11 @@ func (q *Queue) Renew(ctx context.Context, jobID, leaseToken string) (time.Time,
 	if _, err := tx.Exec(ctx, `set local role nano_worker`); err != nil {
 		return time.Time{}, err
 	}
-	expiresAt := time.Now().UTC().Add(q.leaseDuration)
+	var databaseNow time.Time
+	if err := tx.QueryRow(ctx, `select clock_timestamp()`).Scan(&databaseNow); err != nil {
+		return time.Time{}, err
+	}
+	expiresAt := databaseNow.Add(q.leaseDuration)
 	err = tx.QueryRow(ctx, `
 		update source_processing_jobs
 		set lease_expires_at=$3, updated_at=now()
@@ -180,6 +187,81 @@ func (q *Queue) Renew(ctx context.Context, jobID, leaseToken string) (time.Time,
 
 func (q *Queue) Complete(ctx context.Context, jobID, leaseToken string) error {
 	return q.finish(ctx, jobID, leaseToken, true, "")
+}
+
+func (q *Queue) CompleteEvidence(ctx context.Context, jobID, leaseToken, revisionID string) error {
+	if q == nil || q.pool == nil || strings.TrimSpace(revisionID) == "" {
+		return errors.New("invalid Source Evidence completion")
+	}
+	tx, err := q.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `set local role nano_worker`); err != nil {
+		return err
+	}
+	var sourceID string
+	var current source.State
+	err = tx.QueryRow(ctx, `
+		select s.id, s.state
+		from source_processing_jobs j
+		join source_sources s on s.id=j.source_id
+		where j.id=$1 and j.status='running' and j.lease_token=$2::uuid and j.lease_expires_at > now()
+		for update of j, s
+	`, jobID, leaseToken).Scan(&sourceID, &current)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrLeaseLost
+	}
+	if err != nil {
+		return err
+	}
+	if current != source.StateVerifying {
+		return ErrTransitionConflict
+	}
+	var revisionSourceID, revisionStatus string
+	err = tx.QueryRow(ctx, `
+		select source_id, status from source_evidence_revisions where id=$1 for update
+	`, revisionID).Scan(&revisionSourceID, &revisionStatus)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrTransitionConflict
+	}
+	if err != nil {
+		return err
+	}
+	if revisionSourceID != sourceID || revisionStatus != "building" {
+		return ErrTransitionConflict
+	}
+	now := time.Now().UTC()
+	if _, err := tx.Exec(ctx, `
+		update source_evidence_revisions
+		set status='superseded'
+		where source_id=$1 and status='active'
+	`, sourceID); err != nil {
+		return err
+	}
+	commandTag, err := tx.Exec(ctx, `
+		update source_evidence_revisions
+		set status='active', activated_at=$2
+		where id=$1 and source_id=$3 and status='building'
+	`, revisionID, now, sourceID)
+	if err != nil {
+		return err
+	}
+	if commandTag.RowsAffected() != 1 {
+		return ErrTransitionConflict
+	}
+	if _, err := tx.Exec(ctx, `update source_sources set state='ready', updated_at=$2 where id=$1`, sourceID, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		update source_processing_jobs
+		set status='succeeded', lease_token=null, lease_expires_at=null, last_error_code=null, updated_at=$2
+		where id=$1
+	`, jobID, now); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (q *Queue) Fail(ctx context.Context, jobID, leaseToken, errorCode string) error {

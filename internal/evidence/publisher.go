@@ -103,6 +103,11 @@ func (p *Publisher) Publish(ctx context.Context, command PublishCommand) (Revisi
 			existing.ExtractionConfigID != command.Artifact.ExtractionConfigID {
 			return Revision{}, false, ErrPublicationConflict
 		}
+		if sourceState == "normalizing" && existing.Status == RevisionBuilding {
+			if _, err := tx.Exec(ctx, `update source_sources set state='segmenting', updated_at=now() where id=$1`, sourceID); err != nil {
+				return Revision{}, false, err
+			}
+		}
 		if err := tx.Commit(ctx); err != nil {
 			return Revision{}, false, err
 		}
