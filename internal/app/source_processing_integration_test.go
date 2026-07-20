@@ -106,6 +106,45 @@ func TestPDFSourceProcessorPublishesCoordinateEvidenceAndReady(t *testing.T) {
 	}
 }
 
+func TestDOCXSourceProcessorPublishesStructuralEvidenceAndReady(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "source-processing-docx@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-processing-docx")
+	ownerID := sourceTestUserID(t, api, "source-processing-docx@example.com")
+	payload := evidenceTestDOCX("DOCX pipeline evidence.")
+	objectKey := seedProcessableSource(t, api, ownerID, notebookID, "src_processing_docx", "srcjob_processing_docx", source.FormatDOCX, payload)
+	objects := objectstore.NewMemoryStore()
+	if err := objects.Put(context.Background(), objectKey, payload); err != nil {
+		t.Fatal(err)
+	}
+	queue := sourcejobs.NewQueue(api.db.Pool(), time.Minute)
+	lease, ok, err := queue.Claim(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
+	}
+	processor := sourceprocessing.NewProcessor(
+		api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, newRecordingEvidenceProjection(t, api),
+		sourceprocessing.Config{ExtractionConfigID: "extract-native-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000},
+	)
+	if err := processor.ProcessLease(context.Background(), lease); err != nil {
+		t.Fatalf("ProcessLease: %v", err)
+	}
+	var state source.State
+	var coordinateKind string
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select s.state, u.coordinate_json->>'kind'
+		from source_sources s
+		join source_evidence_revisions r on r.source_id=s.id and r.status='active'
+		join source_evidence_units u on u.revision_id=r.id
+		where s.id='src_processing_docx'
+	`).Scan(&state, &coordinateKind); err != nil {
+		t.Fatal(err)
+	}
+	if state != source.StateReady || coordinateKind != "document_block" {
+		t.Fatalf("state=%q coordinate=%q", state, coordinateKind)
+	}
+}
+
 func TestSourceProcessorPublishesOnlyBoundedNonPrimaryCoverageGaps(t *testing.T) {
 	t.Run("bounded gap reaches Ready", func(t *testing.T) {
 		api := newTestAPI(t)
@@ -332,6 +371,9 @@ func sourceProcessingMediaType(format source.Format) string {
 	}
 	if format == source.FormatPDF {
 		return "application/pdf"
+	}
+	if format == source.FormatDOCX {
+		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 	}
 	return "text/plain"
 }

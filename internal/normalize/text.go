@@ -45,6 +45,8 @@ type Block struct {
 type SourceCoordinate struct {
 	Kind   string  `json:"kind"`
 	Page   int     `json:"page,omitempty"`
+	Slide  int     `json:"slide,omitempty"`
+	Block  int     `json:"block,omitempty"`
 	X      float64 `json:"x,omitempty"`
 	Y      float64 `json:"y,omitempty"`
 	Width  float64 `json:"width,omitempty"`
@@ -124,7 +126,8 @@ func canonicalArtifact(artifact Artifact) ([]byte, error) {
 
 func Validate(artifact Artifact) error {
 	if artifact.SchemaVersion != "nano.normalized-source.v1" || strings.TrimSpace(artifact.SourceID) == "" ||
-		strings.TrimSpace(artifact.ExtractionConfigID) == "" || (artifact.Format != "txt" && artifact.Format != "markdown" && artifact.Format != "pdf") ||
+		strings.TrimSpace(artifact.ExtractionConfigID) == "" ||
+		(artifact.Format != "txt" && artifact.Format != "markdown" && artifact.Format != "pdf" && artifact.Format != "docx" && artifact.Format != "pptx") ||
 		!utf8.ValidString(artifact.Text) || len(artifact.Blocks) == 0 {
 		return errors.New("invalid normalized artifact identity or primary content")
 	}
@@ -187,10 +190,23 @@ func knownGapReason(reason string) bool {
 }
 
 func validCoordinate(format string, coordinate *SourceCoordinate) bool {
-	if format != "pdf" {
+	if format == "txt" || format == "markdown" {
 		return coordinate == nil
 	}
-	return coordinate != nil && coordinate.Kind == "pdf_region" && coordinate.Page > 0 && coordinate.Width > 0 && coordinate.Height > 0 &&
+	if coordinate == nil {
+		return false
+	}
+	if format == "docx" {
+		return coordinate.Kind == "document_block" && coordinate.Block > 0
+	}
+	if format == "pptx" {
+		return coordinate.Kind == "slide_region" && coordinate.Slide > 0 && validRegionCoordinate(coordinate)
+	}
+	return format == "pdf" && coordinate.Kind == "pdf_region" && coordinate.Page > 0 && validRegionCoordinate(coordinate)
+}
+
+func validRegionCoordinate(coordinate *SourceCoordinate) bool {
+	return coordinate.Width > 0 && coordinate.Height > 0 &&
 		!math.IsNaN(coordinate.X) && !math.IsInf(coordinate.X, 0) && !math.IsNaN(coordinate.Y) && !math.IsInf(coordinate.Y, 0) &&
 		!math.IsNaN(coordinate.Width) && !math.IsInf(coordinate.Width, 0) && !math.IsNaN(coordinate.Height) && !math.IsInf(coordinate.Height, 0)
 }

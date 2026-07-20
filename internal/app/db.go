@@ -412,29 +412,24 @@ create table if not exists source_evidence_units (
 	constraint source_evidence_units_coordinate_check check (
 		coordinate_json is null or (
 			jsonb_typeof(coordinate_json)='object'
-			and coordinate_json->>'kind'='pdf_region'
-			and coordinate_json ?& array['page','x','y','width','height']
+			and coordinate_json->>'kind' in (
+				'pdf_region','slide_region','image_region','document_block','html_block','time_interval'
+			)
 		)
 	),
 	unique (revision_id, ordinal)
 );
 
 alter table source_evidence_units add column if not exists coordinate_json jsonb;
-
-do $$
-begin
-	if not exists (
-		select 1 from pg_constraint where conname='source_evidence_units_coordinate_check'
-	) then
-		alter table source_evidence_units add constraint source_evidence_units_coordinate_check check (
-			coordinate_json is null or (
-				jsonb_typeof(coordinate_json)='object'
-				and coordinate_json->>'kind'='pdf_region'
-				and coordinate_json ?& array['page','x','y','width','height']
-			)
-		);
-	end if;
-end $$;
+alter table source_evidence_units drop constraint if exists source_evidence_units_coordinate_check;
+alter table source_evidence_units add constraint source_evidence_units_coordinate_check check (
+	coordinate_json is null or (
+		jsonb_typeof(coordinate_json)='object'
+		and coordinate_json->>'kind' in (
+			'pdf_region','slide_region','image_region','document_block','html_block','time_interval'
+		)
+	)
+);
 
 create table if not exists retrieval_index_versions (
 	id text primary key,

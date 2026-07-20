@@ -1,6 +1,7 @@
 package app_test
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"errors"
@@ -187,4 +188,26 @@ func evidenceTestPDF(text string) []byte {
 	}
 	fmt.Fprintf(&document, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xref)
 	return document.Bytes()
+}
+
+func evidenceTestDOCX(text string) []byte {
+	var payload bytes.Buffer
+	archive := zip.NewWriter(&payload)
+	parts := map[string]string{
+		"[Content_Types].xml": `<Types><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`,
+		"word/document.xml":   `<w:document xmlns:w="w"><w:body><w:p><w:r><w:t>` + text + `</w:t></w:r></w:p></w:body></w:document>`,
+	}
+	for name, value := range parts {
+		entry, err := archive.Create(name)
+		if err != nil {
+			panic(err)
+		}
+		if _, err := entry.Write([]byte(value)); err != nil {
+			panic(err)
+		}
+	}
+	if err := archive.Close(); err != nil {
+		panic(err)
+	}
+	return payload.Bytes()
 }
