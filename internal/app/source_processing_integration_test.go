@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
+	"github.com/huangxinxinyu/nano-notebook/internal/normalize"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcejobs"
@@ -105,6 +106,65 @@ func TestPDFSourceProcessorPublishesCoordinateEvidenceAndReady(t *testing.T) {
 	}
 }
 
+func TestSourceProcessorPublishesOnlyBoundedNonPrimaryCoverageGaps(t *testing.T) {
+	t.Run("bounded gap reaches Ready", func(t *testing.T) {
+		api := newTestAPI(t)
+		owner := api.register(t, "source-processing-gap@example.com")
+		notebookID := createSourceTestNotebook(t, api, owner, "source-processing-gap")
+		ownerID := sourceTestUserID(t, api, "source-processing-gap@example.com")
+		payload := []byte("bounded-pdf-fixture")
+		objectKey := seedProcessableSource(t, api, ownerID, notebookID, "src_processing_gap", "srcjob_processing_gap", source.FormatPDF, payload)
+		objects := objectstore.NewMemoryStore()
+		if err := objects.Put(context.Background(), objectKey, payload); err != nil {
+			t.Fatal(err)
+		}
+		artifact := processingGapArtifact(t, "src_processing_gap")
+		queue := sourcejobs.NewQueue(api.db.Pool(), time.Minute)
+		lease, ok, err := queue.Claim(context.Background())
+		if err != nil || !ok {
+			t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
+		}
+		processor := sourceprocessing.NewProcessorWithExtractor(
+			api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, newRecordingEvidenceProjection(t, api),
+			fixedExtractor{artifact: artifact},
+			sourceprocessing.Config{ExtractionConfigID: "extract-gap-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000},
+		)
+		if err := processor.ProcessLease(context.Background(), lease); err != nil {
+			t.Fatal(err)
+		}
+		assertSourceJobState(t, api, "src_processing_gap", "srcjob_processing_gap", source.StateReady, "succeeded", "")
+	})
+
+	t.Run("unknown gap fails before publication", func(t *testing.T) {
+		api := newTestAPI(t)
+		owner := api.register(t, "source-processing-unknown-gap@example.com")
+		notebookID := createSourceTestNotebook(t, api, owner, "source-processing-unknown-gap")
+		ownerID := sourceTestUserID(t, api, "source-processing-unknown-gap@example.com")
+		payload := []byte("unknown-pdf-fixture")
+		objectKey := seedProcessableSource(t, api, ownerID, notebookID, "src_processing_unknown_gap", "srcjob_processing_unknown_gap", source.FormatPDF, payload)
+		objects := objectstore.NewMemoryStore()
+		if err := objects.Put(context.Background(), objectKey, payload); err != nil {
+			t.Fatal(err)
+		}
+		artifact := processingGapArtifact(t, "src_processing_unknown_gap")
+		artifact.Coverage.Gaps[0].Coordinate = nil
+		queue := sourcejobs.NewQueue(api.db.Pool(), time.Minute)
+		lease, ok, err := queue.Claim(context.Background())
+		if err != nil || !ok {
+			t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
+		}
+		processor := sourceprocessing.NewProcessorWithExtractor(
+			api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, &recordingEvidenceProjection{},
+			fixedExtractor{artifact: artifact},
+			sourceprocessing.Config{ExtractionConfigID: "extract-gap-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000},
+		)
+		if err := processor.ProcessLease(context.Background(), lease); err != nil {
+			t.Fatal(err)
+		}
+		assertSourceJobState(t, api, "src_processing_unknown_gap", "srcjob_processing_unknown_gap", source.StateFailed, "failed", "extraction_invalid")
+	})
+}
+
 func TestTextSourceProcessorTerminallyFailsIntegrityMismatch(t *testing.T) {
 	api := newTestAPI(t)
 	owner := api.register(t, "source-processing-mismatch@example.com")
@@ -174,6 +234,34 @@ type recordingEvidenceProjection struct {
 	buildError     error
 	pool           *pgxpool.Pool
 	indexVersionID string
+}
+
+type fixedExtractor struct {
+	artifact normalize.Artifact
+}
+
+func (f fixedExtractor) Extract(_ source.Source, _ []byte, _ string) (normalize.Artifact, error) {
+	return f.artifact, nil
+}
+
+func processingGapArtifact(t *testing.T, sourceID string) normalize.Artifact {
+	t.Helper()
+	artifact, err := normalize.Finalize(normalize.Artifact{
+		SchemaVersion: "nano.normalized-source.v1", SourceID: sourceID,
+		ExtractionConfigID: "extract-gap-v1", Format: "pdf", Text: "Primary evidence.",
+		Blocks: []normalize.Block{{
+			ID: "block_000001", Ordinal: 0, Kind: "paragraph", Text: "Primary evidence.", StartRune: 0, EndRune: 17,
+			Coordinate: &normalize.SourceCoordinate{Kind: "pdf_region", Page: 1, X: 72, Y: 700, Width: 110, Height: 12},
+		}},
+		Coverage: normalize.Coverage{Status: "partial", TotalRunes: 17, Gaps: []normalize.Gap{{
+			Reason: "decorative_visual_skipped", Impact: "non_primary",
+			Coordinate: &normalize.SourceCoordinate{Kind: "pdf_region", Page: 1, X: 300, Y: 500, Width: 80, Height: 60},
+		}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return artifact
 }
 
 func (p *recordingEvidenceProjection) Build(_ context.Context, command sourceprocessing.ProjectionCommand) error {

@@ -16,7 +16,9 @@ func TestReadySourceViewerReturnsAuthoritativeUnitsAndCoverageWithoutCustody(t *
 	notebookID := createSourceTestNotebook(t, api, owner, "source-view")
 	ownerID := sourceTestUserID(t, api, "source-view@example.com")
 	seedSourceProcessingJob(t, api, ownerID, notebookID, "src_view", "srcjob_view", "4")
-	if _, err := api.db.Pool().Exec(context.Background(), `update source_sources set state='ready' where id='src_view'`); err != nil {
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		update source_sources set state='ready', format='pdf', media_type='application/pdf' where id='src_view'
+	`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := api.db.Pool().Exec(context.Background(), `
@@ -36,8 +38,12 @@ func TestReadySourceViewerReturnsAuthoritativeUnitsAndCoverageWithoutCustody(t *
 		t.Fatal(err)
 	}
 	if _, err := api.db.Pool().Exec(context.Background(), `
-		insert into source_evidence_coverage_gaps(revision_id,ordinal,start_rune,end_rune,reason)
-		values ('evr_view',0,10,12,'decorative_image_skipped')
+		insert into source_evidence_coverage_gaps(
+			revision_id,ordinal,start_rune,end_rune,reason,impact,coordinate_json
+		) values (
+			'evr_view',0,null,null,'decorative_visual_skipped','non_primary',
+			'{"kind":"pdf_region","page":1,"x":300,"y":500,"width":80,"height":60}'::jsonb
+		)
 	`); err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +72,12 @@ func TestReadySourceViewerReturnsAuthoritativeUnitsAndCoverageWithoutCustody(t *
 				Coverage struct {
 					Status string `json:"status"`
 					Gaps   []struct {
-						Reason string `json:"reason"`
+						Reason     string `json:"reason"`
+						Impact     string `json:"impact"`
+						Coordinate *struct {
+							Kind string `json:"kind"`
+							Page int    `json:"page"`
+						} `json:"coordinate"`
 					} `json:"gaps"`
 				} `json:"coverage"`
 				Units []struct {
@@ -85,7 +96,10 @@ func TestReadySourceViewerReturnsAuthoritativeUnitsAndCoverageWithoutCustody(t *
 	}
 	if decoded.Source.ID != "src_view" || decoded.Source.Revision.ID != "evr_view" ||
 		decoded.Source.Revision.Coverage.Status != "partial" || len(decoded.Source.Revision.Coverage.Gaps) != 1 ||
-		decoded.Source.Revision.Coverage.Gaps[0].Reason != "decorative_image_skipped" || len(decoded.Source.Revision.Units) != 2 ||
+		decoded.Source.Revision.Coverage.Gaps[0].Reason != "decorative_visual_skipped" ||
+		decoded.Source.Revision.Coverage.Gaps[0].Impact != "non_primary" ||
+		decoded.Source.Revision.Coverage.Gaps[0].Coordinate == nil ||
+		decoded.Source.Revision.Coverage.Gaps[0].Coordinate.Page != 1 || len(decoded.Source.Revision.Units) != 2 ||
 		decoded.Source.Revision.Units[0].ID != "unit_view_1" || decoded.Source.Revision.Units[0].Coordinate == nil ||
 		decoded.Source.Revision.Units[0].Coordinate.Kind != "pdf_region" || decoded.Source.Revision.Units[0].Coordinate.Page != 2 ||
 		decoded.Source.Revision.Units[1].Coordinate != nil {

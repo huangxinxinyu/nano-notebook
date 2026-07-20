@@ -58,9 +58,11 @@ type Coverage struct {
 }
 
 type Gap struct {
-	StartRune int    `json:"start_rune"`
-	EndRune   int    `json:"end_rune"`
-	Reason    string `json:"reason"`
+	StartRune  int               `json:"start_rune,omitempty"`
+	EndRune    int               `json:"end_rune,omitempty"`
+	Reason     string            `json:"reason"`
+	Impact     string            `json:"impact"`
+	Coordinate *SourceCoordinate `json:"coordinate,omitempty"`
 }
 
 func Text(input Input) (Artifact, error) {
@@ -87,6 +89,14 @@ func Text(input Input) (Artifact, error) {
 		ExtractionConfigID: input.ExtractionConfigID, Format: input.Format, Text: text, Blocks: blocks,
 		Coverage: Coverage{Status: "complete", TotalRunes: utf8.RuneCountInString(text), Gaps: make([]Gap, 0)},
 	}
+	return Finalize(artifact)
+}
+
+// Finalize canonicalizes, signs, and validates an adapter-produced artifact.
+// Extractor adapters must use this boundary before returning publication data.
+func Finalize(artifact Artifact) (Artifact, error) {
+	artifact.SHA256 = ""
+	artifact.CanonicalJSON = nil
 	canonical, err := canonicalArtifact(artifact)
 	if err != nil {
 		return Artifact{}, err
@@ -94,6 +104,9 @@ func Text(input Input) (Artifact, error) {
 	digest := sha256.Sum256(canonical)
 	artifact.SHA256 = hex.EncodeToString(digest[:])
 	artifact.CanonicalJSON = canonical
+	if err := Validate(artifact); err != nil {
+		return Artifact{}, err
+	}
 	return artifact, nil
 }
 
@@ -118,7 +131,8 @@ func Validate(artifact Artifact) error {
 	textRunes := []rune(artifact.Text)
 	if artifact.Coverage.TotalRunes != len(textRunes) ||
 		(artifact.Coverage.Status != "complete" && artifact.Coverage.Status != "partial") ||
-		(artifact.Coverage.Status == "complete" && len(artifact.Coverage.Gaps) != 0) {
+		(artifact.Coverage.Status == "complete" && len(artifact.Coverage.Gaps) != 0) ||
+		(artifact.Coverage.Status == "partial" && len(artifact.Coverage.Gaps) == 0) {
 		return errors.New("invalid normalized artifact coverage")
 	}
 	previousEnd := 0
@@ -134,8 +148,19 @@ func Validate(artifact Artifact) error {
 		previousEnd = block.EndRune
 	}
 	previousEnd = 0
+	previousPage := 0
 	for _, gap := range artifact.Coverage.Gaps {
-		if gap.StartRune < previousEnd || gap.EndRune <= gap.StartRune || gap.EndRune > len(textRunes) || strings.TrimSpace(gap.Reason) == "" {
+		if gap.Impact != "non_primary" || !knownGapReason(gap.Reason) {
+			return errors.New("invalid normalized artifact coverage gap")
+		}
+		if artifact.Format == "pdf" {
+			if gap.StartRune != 0 || gap.EndRune != 0 || !validCoordinate("pdf", gap.Coordinate) || gap.Coordinate.Page < previousPage {
+				return errors.New("invalid normalized artifact coverage gap")
+			}
+			previousPage = gap.Coordinate.Page
+			continue
+		}
+		if gap.Coordinate != nil || gap.StartRune < previousEnd || gap.EndRune <= gap.StartRune || gap.EndRune > len(textRunes) {
 			return errors.New("invalid normalized artifact coverage gap")
 		}
 		previousEnd = gap.EndRune
@@ -150,6 +175,15 @@ func Validate(artifact Artifact) error {
 		return errors.New("normalized artifact checksum mismatch")
 	}
 	return nil
+}
+
+func knownGapReason(reason string) bool {
+	switch reason {
+	case "decorative_visual_skipped", "decorative_image_skipped", "non_primary_visual_model_failed", "non_primary_media_unsupported":
+		return true
+	default:
+		return false
+	}
 }
 
 func validCoordinate(format string, coordinate *SourceCoordinate) bool {

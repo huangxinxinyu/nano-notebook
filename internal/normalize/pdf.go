@@ -2,8 +2,6 @@ package normalize
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -77,17 +75,7 @@ func PDF(input Input) (Artifact, error) {
 		ExtractionConfigID: input.ExtractionConfigID, Format: "pdf", Text: text.String(), Blocks: blocks,
 		Coverage: Coverage{Status: "complete", TotalRunes: runeCursor, Gaps: make([]Gap, 0)},
 	}
-	canonical, err := canonicalArtifact(artifact)
-	if err != nil {
-		return Artifact{}, err
-	}
-	digest := sha256.Sum256(canonical)
-	artifact.SHA256 = hex.EncodeToString(digest[:])
-	artifact.CanonicalJSON = canonical
-	if err := Validate(artifact); err != nil {
-		return Artifact{}, err
-	}
-	return artifact, nil
+	return Finalize(artifact)
 }
 
 func safePDFContent(page pdfreader.Page) (content pdfreader.Content, err error) {

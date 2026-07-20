@@ -360,11 +360,41 @@ create table if not exists source_evidence_coverage (
 create table if not exists source_evidence_coverage_gaps (
 	revision_id text not null references source_evidence_revisions(id) on delete cascade,
 	ordinal integer not null check (ordinal >= 0),
-	start_rune integer not null check (start_rune >= 0),
-	end_rune integer not null check (end_rune > start_rune),
+	start_rune integer check (start_rune >= 0),
+	end_rune integer check (end_rune > start_rune),
 	reason text not null check (char_length(reason) between 1 and 255),
+	impact text not null check (impact='non_primary'),
+	coordinate_json jsonb,
+	constraint source_evidence_coverage_gaps_bound_check check (
+		(start_rune is not null and end_rune is not null and coordinate_json is null)
+		or (start_rune is null and end_rune is null and jsonb_typeof(coordinate_json)='object')
+	),
 	primary key (revision_id, ordinal)
 );
+
+alter table source_evidence_coverage_gaps add column if not exists impact text;
+update source_evidence_coverage_gaps set impact='non_primary' where impact is null;
+alter table source_evidence_coverage_gaps alter column impact set not null;
+alter table source_evidence_coverage_gaps add column if not exists coordinate_json jsonb;
+alter table source_evidence_coverage_gaps alter column start_rune drop not null;
+alter table source_evidence_coverage_gaps alter column end_rune drop not null;
+
+do $$
+begin
+	if not exists (
+		select 1 from pg_constraint where conname='source_evidence_coverage_gaps_impact_check'
+	) then
+		alter table source_evidence_coverage_gaps add constraint source_evidence_coverage_gaps_impact_check check (impact='non_primary');
+	end if;
+	if not exists (
+		select 1 from pg_constraint where conname='source_evidence_coverage_gaps_bound_check'
+	) then
+		alter table source_evidence_coverage_gaps add constraint source_evidence_coverage_gaps_bound_check check (
+			(start_rune is not null and end_rune is not null and coordinate_json is null)
+			or (start_rune is null and end_rune is null and jsonb_typeof(coordinate_json)='object')
+		);
+	end if;
+end $$;
 
 create table if not exists source_evidence_units (
 	id text primary key,

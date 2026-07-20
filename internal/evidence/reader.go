@@ -39,10 +39,12 @@ type CoverageView struct {
 }
 
 type GapView struct {
-	Ordinal   int    `json:"ordinal"`
-	StartRune int    `json:"start_rune"`
-	EndRune   int    `json:"end_rune"`
-	Reason    string `json:"reason"`
+	Ordinal    int                         `json:"ordinal"`
+	StartRune  *int                        `json:"start_rune,omitempty"`
+	EndRune    *int                        `json:"end_rune,omitempty"`
+	Reason     string                      `json:"reason"`
+	Impact     string                      `json:"impact"`
+	Coordinate *normalize.SourceCoordinate `json:"coordinate,omitempty"`
 }
 
 type UnitView struct {
@@ -105,7 +107,7 @@ func (r *Reader) SourceView(ctx context.Context, sourceID string) (SourceView, e
 	}
 	view.Revision.Coverage.Gaps = make([]GapView, 0)
 	rows, err := r.db.Query(ctx, `
-		select ordinal, start_rune, end_rune, reason
+		select ordinal, start_rune, end_rune, reason, impact, coordinate_json
 		from source_evidence_coverage_gaps where revision_id=$1 order by ordinal
 	`, view.Revision.ID)
 	if err != nil {
@@ -113,9 +115,18 @@ func (r *Reader) SourceView(ctx context.Context, sourceID string) (SourceView, e
 	}
 	for rows.Next() {
 		var gap GapView
-		if err := rows.Scan(&gap.Ordinal, &gap.StartRune, &gap.EndRune, &gap.Reason); err != nil {
+		var coordinateJSON []byte
+		if err := rows.Scan(&gap.Ordinal, &gap.StartRune, &gap.EndRune, &gap.Reason, &gap.Impact, &coordinateJSON); err != nil {
 			rows.Close()
 			return SourceView{}, err
+		}
+		if len(coordinateJSON) > 0 {
+			var coordinate normalize.SourceCoordinate
+			if err := json.Unmarshal(coordinateJSON, &coordinate); err != nil {
+				rows.Close()
+				return SourceView{}, err
+			}
+			gap.Coordinate = &coordinate
 		}
 		view.Revision.Coverage.Gaps = append(view.Revision.Coverage.Gaps, gap)
 	}

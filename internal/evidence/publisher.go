@@ -147,10 +147,21 @@ func (p *Publisher) Publish(ctx context.Context, command PublishCommand) (Revisi
 		return Revision{}, false, err
 	}
 	for ordinal, gap := range command.Artifact.Coverage.Gaps {
+		var startRune, endRune, coordinateJSON any
+		if gap.StartRune > 0 || gap.EndRune > 0 {
+			startRune, endRune = gap.StartRune, gap.EndRune
+		}
+		if gap.Coordinate != nil {
+			coordinateJSON, err = json.Marshal(gap.Coordinate)
+			if err != nil {
+				return Revision{}, false, err
+			}
+		}
 		if _, err := tx.Exec(ctx, `
-			insert into source_evidence_coverage_gaps(revision_id, ordinal, start_rune, end_rune, reason)
-			values ($1, $2, $3, $4, $5)
-		`, created.ID, ordinal, gap.StartRune, gap.EndRune, gap.Reason); err != nil {
+			insert into source_evidence_coverage_gaps(
+				revision_id, ordinal, start_rune, end_rune, reason, impact, coordinate_json
+			) values ($1, $2, $3, $4, $5, $6, $7)
+		`, created.ID, ordinal, startRune, endRune, gap.Reason, gap.Impact, coordinateJSON); err != nil {
 			return Revision{}, false, err
 		}
 	}

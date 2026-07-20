@@ -36,6 +36,10 @@ type Projection interface {
 	Verify(context.Context, ProjectionCommand) error
 }
 
+type Extractor interface {
+	Extract(source.Source, []byte, string) (normalize.Artifact, error)
+}
+
 type queue interface {
 	Advance(context.Context, string, string, source.State, source.State) error
 	CompleteEvidence(context.Context, string, string, string) error
@@ -56,11 +60,16 @@ type Processor struct {
 	publisher  publisher
 	objects    objectReader
 	projection Projection
+	extractor  Extractor
 	config     Config
 }
 
 func NewProcessor(pool *pgxpool.Pool, queue queue, publisher publisher, objects objectReader, projection Projection, config Config) *Processor {
-	return &Processor{pool: pool, queue: queue, publisher: publisher, objects: objects, projection: projection, config: config}
+	return NewProcessorWithExtractor(pool, queue, publisher, objects, projection, nativeExtractor{}, config)
+}
+
+func NewProcessorWithExtractor(pool *pgxpool.Pool, queue queue, publisher publisher, objects objectReader, projection Projection, extractor Extractor, config Config) *Processor {
+	return &Processor{pool: pool, queue: queue, publisher: publisher, objects: objects, projection: projection, extractor: extractor, config: config}
 }
 
 func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) error {
@@ -99,8 +108,8 @@ func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) er
 		item.State = source.StateNormalizing
 	}
 
-	artifact, err := p.normalize(item, payload)
-	if err != nil {
+	artifact, err := p.extractor.Extract(item, payload, p.config.ExtractionConfigID)
+	if err != nil || normalize.Validate(artifact) != nil {
 		return p.fail(ctx, lease, "extraction_invalid")
 	}
 	if artifact.Coverage.TotalRunes > p.config.MaxNormalizedRunes {
@@ -148,6 +157,7 @@ func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) er
 
 func (p *Processor) validate(lease sourcejobs.Lease) error {
 	if p == nil || p.pool == nil || p.queue == nil || p.publisher == nil || p.objects == nil || p.projection == nil ||
+		p.extractor == nil ||
 		strings.TrimSpace(p.config.ExtractionConfigID) == "" || p.config.MaxSourceBytes <= 0 || p.config.MaxNormalizedRunes <= 0 ||
 		strings.TrimSpace(lease.ID) == "" || strings.TrimSpace(lease.SourceID) == "" || strings.TrimSpace(lease.NotebookID) == "" || strings.TrimSpace(lease.LeaseToken) == "" {
 		return errors.New("invalid Source Processor")
@@ -187,9 +197,11 @@ func (p *Processor) loadSource(ctx context.Context, lease sourcejobs.Lease) (sou
 	return item, nil
 }
 
-func (p *Processor) normalize(item source.Source, payload []byte) (normalize.Artifact, error) {
+type nativeExtractor struct{}
+
+func (nativeExtractor) Extract(item source.Source, payload []byte, extractionConfigID string) (normalize.Artifact, error) {
 	input := normalize.Input{
-		SourceID: item.ID, ExtractionConfigID: p.config.ExtractionConfigID,
+		SourceID: item.ID, ExtractionConfigID: extractionConfigID,
 		Format: string(item.Format), Payload: payload,
 	}
 	switch item.Format {
