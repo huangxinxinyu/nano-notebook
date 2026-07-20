@@ -21,7 +21,7 @@ func TestCommandExecutorRunsOneBoundedStrictProductCase(t *testing.T) {
 		t.Fatal(err)
 	}
 	evalCase := rageval.Case{ID: "case-command", Critical: true, Families: []rageval.SourceFamily{rageval.FamilyTXT}, Language: rageval.LanguageEnglish, Question: "Question?", ExpectedEvidenceSets: [][]string{{"unit-a"}}, RequiredFacts: []string{"fact"}, Fixtures: []rageval.Fixture{{ID: "fixture-a", Family: rageval.FamilyTXT, URI: "fixture://sprint6/txt-en-v1", SHA256: "7a779b4f810b901de48889890fc53a025c365b02bd5ccfee3d58d4926f48e81d"}}}
-	config := rageval.PinnedConfig{ExtractionConfigID: "extract-v1", EvidenceSchemaVersion: 1, ComposerModel: "compose", VerifierModel: "verify", PromptVersion: "prompt-v1", AgentConfigID: "agent-v1"}
+	config := rageval.PinnedConfig{ExtractionConfigID: "extract-v1", EvidenceSchemaVersion: 1, ComposerModel: "compose", VerifierModel: "verify", VerifierPromptVersion: "verify-prompt-v1", PromptVersion: "prompt-v1", AgentConfigID: "agent-v1"}
 	observation, err := executor.ExecuteCase(context.Background(), evalCase, config)
 	if err != nil {
 		t.Fatal(err)

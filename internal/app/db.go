@@ -547,6 +547,7 @@ create table if not exists agent_runs (
 	status text not null check (status in ('queued', 'running', 'completed', 'failed', 'cancelled')),
 	model text not null,
 	prompt_version text not null,
+	agent_config_id text not null default 'nano-interactive-v1' check (char_length(agent_config_id) between 1 and 255),
 	time_zone text not null default 'UTC',
 	deadline_at timestamptz not null default (now() + interval '10 minutes'),
 	action_decision_limit integer not null default 4,
@@ -561,6 +562,10 @@ create table if not exists agent_runs (
 	finished_at timestamptz,
 	updated_at timestamptz not null default now()
 );
+
+alter table agent_runs add column if not exists agent_config_id text not null default 'nano-interactive-v1';
+alter table agent_runs drop constraint if exists agent_runs_agent_config_id_check;
+alter table agent_runs add constraint agent_runs_agent_config_id_check check (char_length(agent_config_id) between 1 and 255);
 
 alter table agent_runs add column if not exists selected_source_count integer not null default 0
 	check (selected_source_count between 0 and 50);
@@ -1192,6 +1197,7 @@ grant select on
 	agent_draft_citations,
 	chat_citations
 to nano_worker;
+grant insert on agent_run_evidence_set to nano_worker;
 grant select, insert, update, delete on
 	agent_run_grounding_plans,
 	agent_claim_support_records,
@@ -1478,8 +1484,9 @@ create policy chat_chats_private on chat_chats
 
 drop policy if exists chat_chats_worker on chat_chats;
 create policy chat_chats_worker on chat_chats
-	for select to nano_worker
-	using (true);
+	for all to nano_worker
+	using (true)
+	with check (true);
 
 drop policy if exists chat_messages_private on chat_messages;
 create policy chat_messages_private on chat_messages
@@ -1537,7 +1544,7 @@ create policy agent_run_evidence_set_app on agent_run_evidence_set
 
 drop policy if exists agent_run_evidence_set_worker on agent_run_evidence_set;
 create policy agent_run_evidence_set_worker on agent_run_evidence_set
-	for select to nano_worker using (true);
+	for all to nano_worker using (true) with check (true);
 
 drop policy if exists agent_run_grounding_plans_worker on agent_run_grounding_plans;
 create policy agent_run_grounding_plans_worker on agent_run_grounding_plans

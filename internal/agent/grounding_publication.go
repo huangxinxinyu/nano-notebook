@@ -35,7 +35,7 @@ func validateGroundingPublication(ctx context.Context, tx pgx.Tx, runID string, 
 			join source_evidence_revisions r on r.id=e.evidence_revision_id and r.source_id=e.source_id and r.status='active'
 			join retrieval_source_index_builds b on b.revision_id=e.evidence_revision_id and b.source_id=e.source_id
 				and b.notebook_id=e.notebook_id and b.index_version_id=e.index_version_id and b.status='verified'
-			join retrieval_index_versions v on v.id=e.index_version_id and v.status in ('active','retired')
+			join retrieval_index_versions v on v.id=e.index_version_id and v.status in ('candidate','active','retired')
 			where e.run_id=$1 and e.notebook_id=$2
 		`, runID, notebookID).Scan(&validPins); err != nil {
 			return "", err

@@ -12,6 +12,7 @@ type Execution struct {
 	InputMessageID         string
 	Model                  string
 	PromptVersion          string
+	AgentConfigID          string
 	TimeZone               string
 	DeadlineAt             time.Time
 	ActionDecisionLimit    int

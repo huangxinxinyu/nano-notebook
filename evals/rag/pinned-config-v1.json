@@ -18,6 +18,7 @@
   },
   "composer_model": "qwen-plus",
   "verifier_model": "qwen-plus",
-  "prompt_version": "grounded-v1",
+  "verifier_prompt_version": "claim-support-v1",
+  "prompt_version": "agent-grounded-v1",
   "agent_config_id": "nano-research-v1"
 }

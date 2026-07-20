@@ -544,17 +544,20 @@ func NewStore(db DBTX) *Store {
 }
 
 func (s *Store) CreateQueued(ctx context.Context, runID, userID, chatID, inputMessageID, model, promptVersion, timeZone string, config RunConfig) error {
+	if config.ID == "" {
+		config.ID = "nano-interactive-v1"
+	}
 	_, err := s.db.Exec(ctx, `
 		insert into agent_runs(
-			id, user_id, chat_id, input_message_id, status, model, prompt_version,
+			id, user_id, chat_id, input_message_id, status, model, prompt_version, agent_config_id,
 			time_zone, deadline_at, action_decision_limit, final_decision_limit,
 			action_limit, action_batch_limit, action_result_byte_limit, action_results_byte_limit
 		)
 		values(
-			$1, $2, $3, $4, 'queued', $5, $6,
-			$7, now() + ($8 * interval '1 millisecond'), $9, $10, $11, $12, $13, $14
+			$1, $2, $3, $4, 'queued', $5, $6, $7,
+			$8, now() + ($9 * interval '1 millisecond'), $10, $11, $12, $13, $14, $15
 		)`,
-		runID, userID, chatID, inputMessageID, model, promptVersion,
+		runID, userID, chatID, inputMessageID, model, promptVersion, config.ID,
 		timeZone, config.Deadline.Milliseconds(), config.ActionDecisionLimit, config.FinalDecisionLimit,
 		config.ActionLimit, config.ActionBatchLimit, config.ActionResultByteLimit, config.ActionResultsByteLimit,
 	)
@@ -565,6 +568,20 @@ func (s *Store) CreateQueued(ctx context.Context, runID, userID, chatID, inputMe
 // active Evidence Revision and verified active Retrieval Index Version. It
 // must run in the same transaction as CreateQueued.
 func (s *Store) PinEvidenceSet(ctx context.Context, runID, userID string, sourceIDs []string) error {
+	return s.pinEvidenceSet(ctx, runID, userID, sourceIDs, "")
+}
+
+// PinEvidenceSetVersion is the offline-Eval admission path. It may pin one
+// explicitly identified candidate version, but is intentionally not exposed
+// by the user-facing HTTP API.
+func (s *Store) PinEvidenceSetVersion(ctx context.Context, runID, userID, versionID string, sourceIDs []string) error {
+	if versionID == "" {
+		return ErrEvidenceSetInvalid
+	}
+	return s.pinEvidenceSet(ctx, runID, userID, sourceIDs, versionID)
+}
+
+func (s *Store) pinEvidenceSet(ctx context.Context, runID, userID string, sourceIDs []string, versionID string) error {
 	if s == nil || s.db == nil || runID == "" || userID == "" || len(sourceIDs) > 50 {
 		return ErrEvidenceSetInvalid
 	}
@@ -588,15 +605,27 @@ func (s *Store) PinEvidenceSet(ctx context.Context, runID, userID string, source
 	}
 	for ordinal, sourceID := range sourceIDs {
 		var revisionID, indexVersionID string
-		err := s.db.QueryRow(ctx, `
+		query := `
 			select r.id, b.index_version_id
 			from source_sources s
 			join source_evidence_revisions r on r.source_id=s.id and r.status='active'
 			join retrieval_source_index_builds b on b.revision_id=r.id and b.source_id=s.id
 				and b.notebook_id=s.notebook_id and b.status='verified'
 			join retrieval_index_versions v on v.id=b.index_version_id and v.status='active'
-			where s.id=$1 and s.notebook_id=$2 and s.state='ready'
-		`, sourceID, notebookID).Scan(&revisionID, &indexVersionID)
+			where s.id=$1 and s.notebook_id=$2 and s.state='ready'`
+		args := []any{sourceID, notebookID}
+		if versionID != "" {
+			query = `
+				select r.id, b.index_version_id
+				from source_sources s
+				join source_evidence_revisions r on r.source_id=s.id and r.status='active'
+				join retrieval_source_index_builds b on b.revision_id=r.id and b.source_id=s.id
+					and b.notebook_id=s.notebook_id and b.status='verified'
+				join retrieval_index_versions v on v.id=b.index_version_id and v.id=$3 and v.status='candidate'
+				where s.id=$1 and s.notebook_id=$2 and s.state='ready'`
+			args = append(args, versionID)
+		}
+		err := s.db.QueryRow(ctx, query, args...).Scan(&revisionID, &indexVersionID)
 		if err != nil {
 			return ErrEvidenceSetInvalid
 		}

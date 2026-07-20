@@ -282,6 +282,7 @@ func TestMessageAdmissionPinsConfiguredRunBudgets(t *testing.T) {
 	api.server = app.NewServer(app.Config{
 		CookieSecure: false,
 		AgentRun: agent.RunConfig{
+			ID:                     "nano-research-test-v1",
 			ActionDecisionLimit:    2,
 			FinalDecisionLimit:     1,
 			ActionLimit:            5,
@@ -321,17 +322,18 @@ func TestMessageAdmissionPinsConfiguredRunBudgets(t *testing.T) {
 	}
 	decodeBody(t, response, &body)
 	var deadlineAt time.Time
+	var configID string
 	var decisions, finals, actions, batch, resultBytes, resultsBytes int
 	if err := api.db.Pool().QueryRow(context.Background(), `
-		select deadline_at, action_decision_limit, final_decision_limit, action_limit,
+		select agent_config_id, deadline_at, action_decision_limit, final_decision_limit, action_limit,
 			action_batch_limit, action_result_byte_limit, action_results_byte_limit
 		from agent_runs where id = $1`, body.RunID).Scan(
-		&deadlineAt, &decisions, &finals, &actions, &batch, &resultBytes, &resultsBytes,
+		&configID, &deadlineAt, &decisions, &finals, &actions, &batch, &resultBytes, &resultsBytes,
 	); err != nil {
 		t.Fatal(err)
 	}
-	if decisions != 2 || finals != 1 || actions != 5 || batch != 2 || resultBytes != 8*1024 || resultsBytes != 24*1024 {
-		t.Fatalf("pinned config=%d+%d/%d/%d/%d/%d", decisions, finals, actions, batch, resultBytes, resultsBytes)
+	if configID != "nano-research-test-v1" || decisions != 2 || finals != 1 || actions != 5 || batch != 2 || resultBytes != 8*1024 || resultsBytes != 24*1024 {
+		t.Fatalf("pinned config=%q %d+%d/%d/%d/%d/%d", configID, decisions, finals, actions, batch, resultBytes, resultsBytes)
 	}
 	if deadlineAt.Before(admittedAfter.Add(2*time.Minute+50*time.Second)) || deadlineAt.After(admittedAfter.Add(3*time.Minute+10*time.Second)) {
 		t.Fatalf("deadline_at=%s, want approximately three minutes after admission", deadlineAt)

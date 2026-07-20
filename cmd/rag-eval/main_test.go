@@ -51,6 +51,12 @@ func TestRunEvaluatesFrozenSuiteFromProductObservations(t *testing.T) {
 	if report.Status != "passed" || report.FixtureSuiteSHA256 != "bf7f7e3e558ef5bb1bddc516375d0a13b93edf910902bce90881f1d9e8c65b4d" {
 		t.Fatalf("report = %+v", report)
 	}
+	if err := run([]string{
+		"-suite", suitePath, "-config", configPath, "-observations", observationPath,
+		"-database-url", "postgres://unused", "-eval-run-id", "eval_spoofed", "-index-version-id", "riv_spoofed",
+	}, &bytes.Buffer{}); err == nil || err.Error() != "only a live or bounded product Executor can authorize Retrieval Index promotion" {
+		t.Fatalf("precomputed promotion error = %v", err)
+	}
 }
 
 func decodeTestJSON(t *testing.T, path string, target any) {

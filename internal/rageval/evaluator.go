@@ -169,6 +169,7 @@ type PinnedConfig struct {
 	Index                 retrieval.IndexConfig `json:"index"`
 	ComposerModel         string                `json:"composer_model"`
 	VerifierModel         string                `json:"verifier_model"`
+	VerifierPromptVersion string                `json:"verifier_prompt_version"`
 	PromptVersion         string                `json:"prompt_version"`
 	AgentConfigID         string                `json:"agent_config_id"`
 }
@@ -177,7 +178,7 @@ func (c PinnedConfig) Validate() error {
 	if strings.TrimSpace(c.ExtractionConfigID) == "" || c.EvidenceSchemaVersion < 1 || strings.TrimSpace(c.Index.AnalyzerID) == "" ||
 		c.Index.Chunk.MaxRunes <= 0 || c.Index.DenseCandidates <= 0 || c.Index.SparseCandidates <= 0 || c.Index.RRFK <= 0 || c.Index.RerankCandidates <= 0 ||
 		strings.TrimSpace(c.Index.EmbeddingModel) == "" || c.Index.EmbeddingDimensions <= 0 || strings.TrimSpace(c.Index.RerankerID) == "" ||
-		strings.TrimSpace(c.ComposerModel) == "" || strings.TrimSpace(c.VerifierModel) == "" || strings.TrimSpace(c.PromptVersion) == "" || strings.TrimSpace(c.AgentConfigID) == "" {
+		strings.TrimSpace(c.ComposerModel) == "" || strings.TrimSpace(c.VerifierModel) == "" || strings.TrimSpace(c.VerifierPromptVersion) == "" || strings.TrimSpace(c.PromptVersion) == "" || strings.TrimSpace(c.AgentConfigID) == "" {
 		return ErrConfigInvalid
 	}
 	return nil

@@ -5,7 +5,9 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
 )
 
@@ -93,6 +95,33 @@ func TestRetrievalIndexPromotionRequiresPassingOfflineEval(t *testing.T) {
 			revision_id,index_version_id,source_id,notebook_id,expected_points,projection_sha256,status,verified_at
 		) values('evr_candidate_gate',$1,'src_candidate_gate',$2,1,$3,'verified',now())
 	`, second.ID, notebookID, strings.Repeat("e", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `insert into chat_chats(id,notebook_id,creator_user_id,title) values('chat_candidate_eval',$1,$2,'Eval')`, notebookID, ownerID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `insert into chat_messages(id,chat_id,role,content) values('msg_candidate_eval','chat_candidate_eval','user','Evaluate candidate')`); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := api.db.Pool().Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(context.Background())
+	if _, err := tx.Exec(context.Background(), `set local role nano_worker`); err != nil {
+		t.Fatal(err)
+	}
+	agentStore := agent.NewStore(tx)
+	if err := agentStore.CreateQueued(context.Background(), "run_candidate_eval", ownerID, "chat_candidate_eval", "msg_candidate_eval", "composer", agent.GroundedPromptVersion, "UTC", agent.RunConfig{ID: "eval-agent-v1", ActionDecisionLimit: 2, FinalDecisionLimit: 1, ActionLimit: 2, ActionBatchLimit: 1, ActionResultByteLimit: 4096, ActionResultsByteLimit: 8192, Deadline: time.Minute}); err != nil {
+		t.Fatal(err)
+	}
+	if err := agentStore.PinEvidenceSet(context.Background(), "run_candidate_eval", ownerID, []string{"src_candidate_gate"}); !errors.Is(err, agent.ErrEvidenceSetInvalid) {
+		t.Fatalf("ordinary candidate pin=%v, want invalid", err)
+	}
+	if err := agentStore.PinEvidenceSetVersion(context.Background(), "run_candidate_eval", ownerID, second.ID, []string{"src_candidate_gate"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Promote(context.Background(), second.ID, "eval_second"); err != nil {

@@ -1127,6 +1127,9 @@ func normalizeBrowserTimeZone(value string) string {
 }
 
 func normalizedRunConfig(value agent.RunConfig) agent.RunConfig {
+	if value.ID == "" {
+		value.ID = "nano-interactive-v1"
+	}
 	if value.ActionDecisionLimit <= 0 {
 		value.ActionDecisionLimit = 4
 	}
