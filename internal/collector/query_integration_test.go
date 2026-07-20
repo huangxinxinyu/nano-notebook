@@ -118,14 +118,14 @@ func TestCollectorTraceDetailHTTPEncodesEmptyCollectionsAsArrays(t *testing.T) {
 func seedQuerySummary(t *testing.T, ctx context.Context, pool *pgxpool.Pool, traceID, runID, chatID, agentName, modelName, status string, active bool, started int64) {
 	t.Helper()
 	if _, err := pool.Exec(ctx, `
-		insert into obs_traces(trace_id, run_id, chat_id, notebook_id, root_span_id, agent_name, schema_version, semantic_convention_version, committed_sequence, projected_sequence)
-		values ($1,$2,$3,'notebook-query',$4,$5,1,1,1,1)
+		insert into obs_traces(trace_id, workload_kind, workload_id, run_id, chat_id, notebook_id, root_span_id, agent_name, schema_version, semantic_convention_version, committed_sequence, projected_sequence)
+		values ($1,'agent_run',$2,$2,$3,'notebook-query',$4,$5,1,1,1,1)
 	`, traceID, runID, chatID, "root-"+traceID, agentName); err != nil {
 		t.Fatalf("seed Trace: %v", err)
 	}
 	if _, err := pool.Exec(ctx, `
-		insert into obs_trace_summaries(trace_id, run_id, chat_id, notebook_id, root_span_id, agent_name, started_at_unix_nano, last_observed_unix_nano, status, active, models, projected_sequence)
-		values ($1,$2,$3,'notebook-query',$4,$5,$6,$6,$7,$8,array[$9],1)
+		insert into obs_trace_summaries(trace_id, workload_kind, workload_id, run_id, chat_id, notebook_id, root_span_id, agent_name, started_at_unix_nano, last_observed_unix_nano, status, active, models, projected_sequence)
+		values ($1,'agent_run',$2,$2,$3,'notebook-query',$4,$5,$6,$6,$7,$8,array[$9],1)
 	`, traceID, runID, chatID, "root-"+traceID, agentName, started, status, active, modelName); err != nil {
 		t.Fatalf("seed Summary: %v", err)
 	}

@@ -18,8 +18,10 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 const collectorMigrationsSQL = `
 create table if not exists obs_traces (
 	trace_id text primary key check (char_length(trace_id) between 1 and 128),
-	run_id text not null check (char_length(run_id) between 1 and 128),
-	chat_id text not null check (char_length(chat_id) between 1 and 128),
+	workload_kind text not null check (workload_kind in ('agent_run', 'source_processing')),
+	workload_id text not null check (char_length(workload_id) between 1 and 160),
+	run_id text not null default '' check (char_length(run_id) between 0 and 128),
+	chat_id text not null default '' check (char_length(chat_id) between 0 and 128),
 	notebook_id text not null check (char_length(notebook_id) between 1 and 128),
 	root_span_id text not null check (char_length(root_span_id) between 1 and 128),
 	agent_name text not null check (char_length(agent_name) between 1 and 160),
@@ -32,9 +34,27 @@ create table if not exists obs_traces (
 	updated_at timestamptz not null default now()
 );
 
+alter table obs_traces add column if not exists workload_kind text;
+alter table obs_traces add column if not exists workload_id text;
+update obs_traces set workload_kind='agent_run' where workload_kind is null;
+update obs_traces set workload_id=run_id where workload_id is null;
+alter table obs_traces alter column workload_kind set not null;
+alter table obs_traces alter column workload_id set not null;
+alter table obs_traces alter column run_id set default '';
+alter table obs_traces alter column chat_id set default '';
+alter table obs_traces drop constraint if exists obs_traces_run_id_check;
+alter table obs_traces drop constraint if exists obs_traces_chat_id_check;
+alter table obs_traces drop constraint if exists obs_traces_workload_kind_check;
+alter table obs_traces drop constraint if exists obs_traces_workload_id_check;
+alter table obs_traces add constraint obs_traces_run_id_check check (char_length(run_id) between 0 and 128);
+alter table obs_traces add constraint obs_traces_chat_id_check check (char_length(chat_id) between 0 and 128);
+alter table obs_traces add constraint obs_traces_workload_kind_check check (workload_kind in ('agent_run', 'source_processing'));
+alter table obs_traces add constraint obs_traces_workload_id_check check (char_length(workload_id) between 1 and 160);
+
 create index if not exists obs_traces_run_idx on obs_traces(run_id);
 create index if not exists obs_traces_chat_idx on obs_traces(chat_id);
 create index if not exists obs_traces_notebook_idx on obs_traces(notebook_id);
+create index if not exists obs_traces_workload_idx on obs_traces(workload_kind, workload_id);
 
 create table if not exists obs_trace_tombstones (
 	trace_id text primary key check (char_length(trace_id) between 1 and 128),
@@ -136,8 +156,10 @@ create index if not exists obs_projection_queue_ready_idx
 
 create table if not exists obs_trace_summaries (
 	trace_id text primary key references obs_traces(trace_id) on delete cascade,
-	run_id text not null,
-	chat_id text not null,
+	workload_kind text not null check (workload_kind in ('agent_run', 'source_processing')),
+	workload_id text not null check (char_length(workload_id) between 1 and 160),
+	run_id text not null default '',
+	chat_id text not null default '',
 	notebook_id text not null,
 	root_span_id text not null,
 	agent_name text not null,
@@ -160,12 +182,26 @@ create table if not exists obs_trace_summaries (
 	updated_at timestamptz not null default now()
 );
 
+alter table obs_trace_summaries add column if not exists workload_kind text;
+alter table obs_trace_summaries add column if not exists workload_id text;
+update obs_trace_summaries s set workload_kind=t.workload_kind, workload_id=t.workload_id
+	from obs_traces t where s.trace_id=t.trace_id and (s.workload_kind is null or s.workload_id is null);
+alter table obs_trace_summaries alter column workload_kind set not null;
+alter table obs_trace_summaries alter column workload_id set not null;
+alter table obs_trace_summaries alter column run_id set default '';
+alter table obs_trace_summaries alter column chat_id set default '';
+alter table obs_trace_summaries drop constraint if exists obs_trace_summaries_workload_kind_check;
+alter table obs_trace_summaries drop constraint if exists obs_trace_summaries_workload_id_check;
+alter table obs_trace_summaries add constraint obs_trace_summaries_workload_kind_check check (workload_kind in ('agent_run', 'source_processing'));
+alter table obs_trace_summaries add constraint obs_trace_summaries_workload_id_check check (char_length(workload_id) between 1 and 160);
+
 create index if not exists obs_trace_summaries_cursor_idx
 	on obs_trace_summaries(started_at_unix_nano desc, trace_id desc);
 create index if not exists obs_trace_summaries_run_idx on obs_trace_summaries(run_id);
 create index if not exists obs_trace_summaries_chat_idx on obs_trace_summaries(chat_id);
 create index if not exists obs_trace_summaries_notebook_idx on obs_trace_summaries(notebook_id);
 create index if not exists obs_trace_summaries_agent_idx on obs_trace_summaries(agent_name);
+create index if not exists obs_trace_summaries_workload_idx on obs_trace_summaries(workload_kind, workload_id);
 create index if not exists obs_trace_summaries_status_idx on obs_trace_summaries(status, active);
 create index if not exists obs_trace_summaries_models_idx on obs_trace_summaries using gin(models);
 

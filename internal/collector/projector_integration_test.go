@@ -65,6 +65,43 @@ func TestProjectorPersistsDeterministicViewsAndAdvancesWatermark(t *testing.T) {
 	}
 }
 
+func TestProjectorPersistsAndQueriesSourceProcessingWorkloadIdentity(t *testing.T) {
+	ctx := context.Background()
+	pool := openObservabilityTestPool(t, ctx)
+	t.Cleanup(pool.Close)
+	resetObservabilityTestSchema(t, ctx, pool)
+	traceID := agentobs.TraceID("trace-source-job")
+	rootID := agentobs.SpanID("root-source-job")
+	started := collectorRecord(traceID, rootID, "source/job-source/attempt-1/root/start", agentobs.RecordSpanStarted, "source.processing")
+	ended := collectorRecord(traceID, rootID, "source/job-source/attempt-1/root/end", agentobs.RecordSpanEnded, "source.processing")
+	ended.OccurredAt = started.OccurredAt.Add(time.Second)
+	ended.Status = agentobs.StatusOK
+	descriptor := collector.TraceDescriptor{
+		TraceID: traceID, WorkloadKind: collector.WorkloadSourceProcessing, WorkloadID: "job-source/attempt-1",
+		NotebookID: "notebook-source", RootSpanID: rootID, AgentName: "nano-source-processor",
+		SchemaVersion: 1, SemanticConventionVersion: 1,
+	}
+	if _, err := collector.NewPostgresStore(pool).CommitTraceChunk(ctx, collector.TraceChunk{
+		Trace: descriptor, FirstSequence: 1,
+		Records: []collector.SequencedRecord{collectorEnvelope(t, 1, started), collectorEnvelope(t, 2, ended)},
+	}); err != nil {
+		t.Fatalf("CommitTraceChunk: %v", err)
+	}
+	projector, _ := collector.NewProjector(pool, collector.ProjectorConfig{RetryDelay: time.Millisecond})
+	if projected, err := projector.RunOnce(ctx); err != nil || !projected {
+		t.Fatalf("RunOnce projected=%t error=%v", projected, err)
+	}
+	queries, _ := collector.NewTraceQueryStore(pool, nil)
+	result, err := queries.List(ctx, collector.TraceListQuery{IdentityExact: "job-source/attempt-1", PageSize: 10})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(result.Items) != 1 || result.Items[0].Summary.WorkloadKind != collector.WorkloadSourceProcessing ||
+		result.Items[0].Summary.WorkloadID != "job-source/attempt-1" || result.Items[0].Summary.RunID != "" || result.Items[0].Summary.ChatID != "" {
+		t.Fatalf("Source-processing query = %#v", result)
+	}
+}
+
 func TestProjectorPersistsIncompleteDirectTraceAndConvergesAfterLateRoot(t *testing.T) {
 	ctx := context.Background()
 	pool := openObservabilityTestPool(t, ctx)

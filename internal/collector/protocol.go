@@ -15,6 +15,13 @@ const (
 
 type SequenceAuthority string
 
+type WorkloadKind string
+
+const (
+	WorkloadAgentRun         WorkloadKind = "agent_run"
+	WorkloadSourceProcessing WorkloadKind = "source_processing"
+)
+
 const (
 	SequenceAuthorityProducer  SequenceAuthority = "producer"
 	SequenceAuthorityCollector SequenceAuthority = "collector"
@@ -56,6 +63,8 @@ type Batch struct {
 
 type TraceDescriptor struct {
 	TraceID                   agentobs.TraceID `json:"trace_id"`
+	WorkloadKind              WorkloadKind     `json:"workload_kind,omitempty"`
+	WorkloadID                string           `json:"workload_id,omitempty"`
 	RunID                     string           `json:"run_id"`
 	ChatID                    string           `json:"chat_id"`
 	NotebookID                string           `json:"notebook_id"`

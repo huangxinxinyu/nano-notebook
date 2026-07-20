@@ -19,6 +19,8 @@ type TraceProjection struct {
 
 type TraceSummary struct {
 	TraceID              agentobs.TraceID `json:"trace_id"`
+	WorkloadKind         WorkloadKind     `json:"workload_kind"`
+	WorkloadID           string           `json:"workload_id"`
 	RunID                string           `json:"run_id"`
 	ChatID               string           `json:"chat_id"`
 	NotebookID           string           `json:"notebook_id"`
@@ -104,14 +106,17 @@ type LinkProjection struct {
 }
 
 func BuildTraceProjection(stored StoredTrace) (TraceProjection, error) {
-	if err := validateTraceDescriptor(stored.Trace); err != nil {
+	trace, err := CanonicalTraceDescriptor(stored.Trace)
+	if err != nil {
 		return TraceProjection{}, err
 	}
+	stored.Trace = trace
 	if stored.CommittedThrough < 1 || len(stored.Records) != stored.CommittedThrough {
 		return TraceProjection{}, errors.New("Collector projection requires a complete committed prefix")
 	}
 	projection := TraceProjection{Summary: TraceSummary{
-		TraceID: stored.Trace.TraceID, RunID: stored.Trace.RunID, ChatID: stored.Trace.ChatID,
+		TraceID: stored.Trace.TraceID, WorkloadKind: stored.Trace.WorkloadKind, WorkloadID: stored.Trace.WorkloadID,
+		RunID: stored.Trace.RunID, ChatID: stored.Trace.ChatID,
 		NotebookID: stored.Trace.NotebookID, RootSpanID: stored.Trace.RootSpanID,
 		AgentName: stored.Trace.AgentName, Active: true, Models: []string{},
 	}}

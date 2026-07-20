@@ -104,11 +104,11 @@ func (s *TraceQueryStore) List(ctx context.Context, query TraceListQuery) (Trace
 	}
 	if query.IdentityExact != "" {
 		parameter := bind(query.IdentityExact)
-		clauses = append(clauses, "(s.trace_id = "+parameter+" or s.run_id = "+parameter+" or s.chat_id = "+parameter+")")
+		clauses = append(clauses, "(s.trace_id = "+parameter+" or s.workload_id = "+parameter+" or s.run_id = "+parameter+" or s.chat_id = "+parameter+")")
 	}
 	if query.IdentityPrefix != "" {
 		parameter := bind(escapeLikePrefix(query.IdentityPrefix) + "%")
-		clauses = append(clauses, "(s.trace_id like "+parameter+" escape '\\' or s.run_id like "+parameter+" escape '\\' or s.chat_id like "+parameter+" escape '\\')")
+		clauses = append(clauses, "(s.trace_id like "+parameter+" escape '\\' or s.workload_id like "+parameter+" escape '\\' or s.run_id like "+parameter+" escape '\\' or s.chat_id like "+parameter+" escape '\\')")
 	}
 	if query.AgentName != "" {
 		clauses = append(clauses, "s.agent_name = "+bind(query.AgentName))
@@ -133,7 +133,7 @@ func (s *TraceQueryStore) List(ctx context.Context, query TraceListQuery) (Trace
 	}
 	args = append(args, query.PageSize+1)
 	rows, err := s.pool.Query(ctx, `
-		select s.trace_id, s.run_id, s.chat_id, s.notebook_id, s.root_span_id, s.agent_name,
+		select s.trace_id, s.workload_kind, s.workload_id, s.run_id, s.chat_id, s.notebook_id, s.root_span_id, s.agent_name,
 			s.started_at_unix_nano, s.last_observed_unix_nano, s.ended_at_unix_nano,
 			s.duration_nanoseconds, s.status, s.active, s.models, s.input_tokens,
 			s.output_tokens, s.total_tokens, s.cost_known, s.cost_amount,
@@ -153,7 +153,7 @@ func (s *TraceQueryStore) List(ctx context.Context, query TraceListQuery) (Trace
 		var status string
 		var costAmount *float64
 		summary := &item.Summary
-		if err := rows.Scan(&summary.TraceID, &summary.RunID, &summary.ChatID, &summary.NotebookID,
+		if err := rows.Scan(&summary.TraceID, &summary.WorkloadKind, &summary.WorkloadID, &summary.RunID, &summary.ChatID, &summary.NotebookID,
 			&summary.RootSpanID, &summary.AgentName, &summary.StartedAtUnixNano,
 			&summary.LastObservedUnixNano, &summary.EndedAtUnixNano, &summary.DurationNanoseconds,
 			&status, &summary.Active, &summary.Models, &summary.InputTokens, &summary.OutputTokens,

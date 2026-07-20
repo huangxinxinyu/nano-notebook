@@ -1137,6 +1137,36 @@ test("explores a Trace with synchronized Tree, Timeline, and explicit Replay loa
   expect(within(linkedTree).getByRole("treeitem", { name: /agent.action/ })).toHaveAttribute("aria-selected", "true");
 });
 
+test("labels Source-processing Traces by workload instead of pretending they are Runs", async () => {
+  window.history.pushState(null, "", "/admin/traces");
+  fetchHandler = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/session")) return json({
+      user: { id: "usr_operator", email: "operator@example.com" },
+      platform_capabilities: ["platform.trace.read"]
+    });
+    if (url.startsWith("/api/admin/traces")) return json({ schema_version: 1, data: {
+      items: [{
+        summary: {
+          trace_id: "trace-source", workload_kind: "source_processing", workload_id: "job-source/attempt-2",
+          run_id: "", chat_id: "", notebook_id: "notebook-source", root_span_id: "root-source",
+          agent_name: "nano-source-processor", started_at_unix_nano: 1700000000000000000,
+          last_observed_unix_nano: 1700000001000000000, ended_at_unix_nano: 1700000001000000000,
+          duration_nanoseconds: 1000000000, status: "ok", active: false, models: [], input_tokens: null,
+          output_tokens: null, total_tokens: null, cost: { known: false, amount: null, currency: "", source: "" }, attempt_count: 0
+        },
+        committed_sequence: 2, projected_sequence: 2, projection_lagged: false
+      }]
+    }});
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  expect(await screen.findByText("job-source/attempt-2")).toBeInTheDocument();
+  expect(screen.getByText("Source processing")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Open Trace job-source/attempt-2" })).toBeInTheDocument();
+});
+
 test("renders a real Trace Detail when empty repeated fields arrive as null", async () => {
   window.history.pushState(null, "", "/admin/traces/trace-null-collections");
   fetchHandler = async (input) => {

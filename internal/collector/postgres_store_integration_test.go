@@ -69,7 +69,10 @@ func TestPostgresStorePersistsCommittedTraceAcrossConnections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadTrace after reopen: %v", err)
 	}
-	if stored.Trace != batch.Chunks[0].Trace {
+	expectedTrace := batch.Chunks[0].Trace
+	expectedTrace.WorkloadKind = collector.WorkloadAgentRun
+	expectedTrace.WorkloadID = expectedTrace.RunID
+	if stored.Trace != expectedTrace {
 		t.Fatalf("stored descriptor = %#v, want %#v", stored.Trace, batch.Chunks[0].Trace)
 	}
 	if stored.CommittedThrough != 2 || stored.ProjectedThrough != 0 || stored.Tombstoned {

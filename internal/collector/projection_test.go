@@ -55,6 +55,51 @@ func TestBuildTraceProjectionKeepsUnfinishedAndUnknownValuesExplicit(t *testing.
 	}
 }
 
+func TestBuildTraceProjectionCanonicalizesLegacyAgentWorkloadIdentity(t *testing.T) {
+	stored := projectionStoredTrace(t, true, true)
+	projection, err := collector.BuildTraceProjection(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projection.Summary.WorkloadKind != collector.WorkloadAgentRun || projection.Summary.WorkloadID != stored.Trace.RunID {
+		t.Fatalf("legacy workload identity = %#v", projection.Summary)
+	}
+}
+
+func TestBuildTraceProjectionAcceptsSourceProcessingWithoutRunOrChatIdentity(t *testing.T) {
+	traceID := agentobs.TraceID("trace-source-processing")
+	rootID := agentobs.SpanID("root-source-processing")
+	root := collectorRecord(traceID, rootID, "source/job-1/attempt-2/root/start", agentobs.RecordSpanStarted, "source.processing")
+	terminal := collectorRecord(traceID, rootID, "source/job-1/attempt-2/root/end", agentobs.RecordSpanEnded, "source.processing")
+	terminal.OccurredAt = root.OccurredAt.Add(time.Second)
+	terminal.Status = agentobs.StatusOK
+	projection, err := collector.BuildTraceProjection(collector.StoredTrace{
+		Trace: collector.TraceDescriptor{
+			TraceID: traceID, WorkloadKind: collector.WorkloadSourceProcessing, WorkloadID: "job-1/attempt-2",
+			NotebookID: "notebook-source", RootSpanID: rootID, AgentName: "nano-source-processor",
+			SchemaVersion: 1, SemanticConventionVersion: 1,
+		},
+		CommittedThrough: 2,
+		Records:          []collector.SequencedRecord{collectorEnvelope(t, 1, root), collectorEnvelope(t, 2, terminal)},
+	})
+	if err != nil {
+		t.Fatalf("BuildTraceProjection: %v", err)
+	}
+	if projection.Summary.WorkloadKind != collector.WorkloadSourceProcessing || projection.Summary.WorkloadID != "job-1/attempt-2" ||
+		projection.Summary.RunID != "" || projection.Summary.ChatID != "" || projection.Summary.Status != agentobs.StatusOK {
+		t.Fatalf("source-processing Summary = %#v", projection.Summary)
+	}
+}
+
+func TestBuildTraceProjectionRejectsSourceProcessingThatPretendsToBeAgentRun(t *testing.T) {
+	stored := projectionStoredTrace(t, true, true)
+	stored.Trace.WorkloadKind = collector.WorkloadSourceProcessing
+	stored.Trace.WorkloadID = "job-invalid"
+	if _, err := collector.BuildTraceProjection(stored); err == nil {
+		t.Fatal("expected mixed Source-processing and Agent-run identity to be rejected")
+	}
+}
+
 func TestBuildTraceProjectionConvergesWhenRootArrivesAfterChild(t *testing.T) {
 	traceID := agentobs.TraceID("trace-late-root")
 	rootID := agentobs.SpanID("root-late")

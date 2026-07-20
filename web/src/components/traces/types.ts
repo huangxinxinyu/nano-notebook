@@ -2,6 +2,8 @@ export type Cost = { known: boolean; amount: number | null; currency: string; so
 
 export type TraceSummary = {
   trace_id: string;
+  workload_kind?: "agent_run" | "source_processing";
+  workload_id?: string;
   run_id: string;
   chat_id: string;
   notebook_id: string;

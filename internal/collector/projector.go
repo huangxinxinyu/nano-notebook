@@ -212,13 +212,13 @@ func replaceProjection(ctx context.Context, tx pgx.Tx, projection TraceProjectio
 	summary := projection.Summary
 	if _, err := tx.Exec(ctx, `
 		insert into obs_trace_summaries(
-			trace_id, run_id, chat_id, notebook_id, root_span_id, agent_name,
+			trace_id, workload_kind, workload_id, run_id, chat_id, notebook_id, root_span_id, agent_name,
 			started_at_unix_nano, last_observed_unix_nano, ended_at_unix_nano,
 			duration_nanoseconds, status, active, models, input_tokens, output_tokens,
 			total_tokens, cost_known, cost_amount, cost_currency, cost_source,
 			attempt_count, projected_sequence
-		) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
-	`, summary.TraceID, summary.RunID, summary.ChatID, summary.NotebookID, summary.RootSpanID,
+		) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+	`, summary.TraceID, summary.WorkloadKind, summary.WorkloadID, summary.RunID, summary.ChatID, summary.NotebookID, summary.RootSpanID,
 		summary.AgentName, summary.StartedAtUnixNano, summary.LastObservedUnixNano,
 		summary.EndedAtUnixNano, summary.DurationNanoseconds, string(summary.Status), summary.Active,
 		summary.Models, summary.InputTokens, summary.OutputTokens, summary.TotalTokens,
@@ -298,7 +298,7 @@ func loadProjectedTrace(ctx context.Context, query postgresQuerier, traceID agen
 		lockClause = " for share of t"
 	}
 	if err := query.QueryRow(ctx, `
-		select s.trace_id, s.run_id, s.chat_id, s.notebook_id, s.root_span_id, s.agent_name,
+		select s.trace_id, s.workload_kind, s.workload_id, s.run_id, s.chat_id, s.notebook_id, s.root_span_id, s.agent_name,
 			s.started_at_unix_nano, s.last_observed_unix_nano, s.ended_at_unix_nano,
 			s.duration_nanoseconds, s.status, s.active, s.models, s.input_tokens,
 			s.output_tokens, s.total_tokens, s.cost_known, s.cost_amount,
@@ -306,7 +306,7 @@ func loadProjectedTrace(ctx context.Context, query postgresQuerier, traceID agen
 			t.committed_sequence, t.projected_sequence
 		from obs_trace_summaries s join obs_traces t using (trace_id)
 		where s.trace_id = $1 and t.tombstoned_at is null
-	`+lockClause, traceID).Scan(&summary.TraceID, &summary.RunID, &summary.ChatID, &summary.NotebookID,
+	`+lockClause, traceID).Scan(&summary.TraceID, &summary.WorkloadKind, &summary.WorkloadID, &summary.RunID, &summary.ChatID, &summary.NotebookID,
 		&summary.RootSpanID, &summary.AgentName, &summary.StartedAtUnixNano,
 		&summary.LastObservedUnixNano, &summary.EndedAtUnixNano, &summary.DurationNanoseconds,
 		&status, &summary.Active, &summary.Models, &summary.InputTokens, &summary.OutputTokens,

@@ -42,6 +42,11 @@ func (s *MemoryStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk) (i
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	trace, err := CanonicalTraceDescriptor(chunk.Trace)
+	if err != nil {
+		return 0, &ChunkError{Code: CodeInvalidChunk, Err: err}
+	}
+	chunk.Trace = trace
 	if _, tombstoned := s.tombstones[chunk.Trace.TraceID]; tombstoned {
 		return 0, &ChunkError{Code: CodeTombstoned, Err: errors.New("Collector Trace is tombstoned")}
 	}
@@ -401,16 +406,39 @@ func (s *MemoryStore) Records(traceID agentobs.TraceID) []SequencedRecord {
 }
 
 func validateTraceDescriptor(trace TraceDescriptor) error {
-	if !validDescriptorText(string(trace.TraceID), 128) ||
-		!validDescriptorText(trace.RunID, 128) ||
-		!validDescriptorText(trace.ChatID, 128) ||
-		!validDescriptorText(trace.NotebookID, 128) ||
-		!validDescriptorText(string(trace.RootSpanID), 128) ||
-		!validDescriptorText(trace.AgentName, 160) ||
-		trace.SchemaVersion < 1 || trace.SemanticConventionVersion < 1 {
-		return errors.New("Collector Trace descriptor is incomplete")
+	_, err := CanonicalTraceDescriptor(trace)
+	return err
+}
+
+// CanonicalTraceDescriptor validates a Trace identity and fills the legacy
+// Agent-run workload fields used before workload-aware descriptors existed.
+func CanonicalTraceDescriptor(trace TraceDescriptor) (TraceDescriptor, error) {
+	if trace.WorkloadKind == "" {
+		trace.WorkloadKind = WorkloadAgentRun
 	}
-	return nil
+	if trace.WorkloadID == "" && trace.WorkloadKind == WorkloadAgentRun {
+		trace.WorkloadID = trace.RunID
+	}
+	if !validDescriptorText(string(trace.TraceID), 128) ||
+		!validDescriptorText(string(trace.WorkloadKind), 64) ||
+		!validDescriptorText(trace.WorkloadID, 160) ||
+		!validDescriptorText(trace.NotebookID, 128) || !validDescriptorText(string(trace.RootSpanID), 128) ||
+		!validDescriptorText(trace.AgentName, 160) || trace.SchemaVersion < 1 || trace.SemanticConventionVersion < 1 {
+		return TraceDescriptor{}, errors.New("Collector Trace descriptor is incomplete")
+	}
+	switch trace.WorkloadKind {
+	case WorkloadAgentRun:
+		if !validDescriptorText(trace.RunID, 128) || !validDescriptorText(trace.ChatID, 128) || trace.WorkloadID != trace.RunID {
+			return TraceDescriptor{}, errors.New("Collector Agent-run Trace identity is inconsistent")
+		}
+	case WorkloadSourceProcessing:
+		if trace.RunID != "" || trace.ChatID != "" {
+			return TraceDescriptor{}, errors.New("Collector Source-processing Trace cannot carry Agent-run identity")
+		}
+	default:
+		return TraceDescriptor{}, errors.New("Collector Trace workload kind is unsupported")
+	}
+	return trace, nil
 }
 
 func validDescriptorText(value string, maxRunes int) bool {

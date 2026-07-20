@@ -46,9 +46,11 @@ func (s *PostgresStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk) 
 	if s == nil || s.pool == nil {
 		return 0, errors.New("nil Collector PostgreSQL Store")
 	}
-	if err := validateTraceDescriptor(chunk.Trace); err != nil {
+	trace, err := CanonicalTraceDescriptor(chunk.Trace)
+	if err != nil {
 		return 0, &ChunkError{Code: CodeInvalidChunk, Err: err}
 	}
+	chunk.Trace = trace
 	var tombstoned bool
 	if err := s.pool.QueryRow(ctx, `select exists(select 1 from obs_trace_tombstones where trace_id = $1)`, chunk.Trace.TraceID).Scan(&tombstoned); err != nil {
 		return 0, err
@@ -73,12 +75,12 @@ func (s *PostgresStore) CommitTraceChunk(ctx context.Context, chunk TraceChunk) 
 
 	if _, err := tx.Exec(ctx, `
 		insert into obs_traces (
-			trace_id, run_id, chat_id, notebook_id, root_span_id, agent_name,
+			trace_id, workload_kind, workload_id, run_id, chat_id, notebook_id, root_span_id, agent_name,
 			schema_version, semantic_convention_version
-		) values ($1, $2, $3, $4, $5, $6, $7, $8)
+		) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		on conflict (trace_id) do nothing
-	`, chunk.Trace.TraceID, chunk.Trace.RunID, chunk.Trace.ChatID, chunk.Trace.NotebookID,
-		chunk.Trace.RootSpanID, chunk.Trace.AgentName, chunk.Trace.SchemaVersion,
+	`, chunk.Trace.TraceID, chunk.Trace.WorkloadKind, chunk.Trace.WorkloadID, chunk.Trace.RunID, chunk.Trace.ChatID,
+		chunk.Trace.NotebookID, chunk.Trace.RootSpanID, chunk.Trace.AgentName, chunk.Trace.SchemaVersion,
 		chunk.Trace.SemanticConventionVersion); err != nil {
 		return 0, err
 	}
@@ -392,14 +394,14 @@ func loadStoredTrace(ctx context.Context, query postgresQuerier, traceID agentob
 	var stored StoredTrace
 	var tombstonedAt *time.Time
 	err := query.QueryRow(ctx, `
-		select trace_id, run_id, chat_id, notebook_id, root_span_id, agent_name,
+		select trace_id, workload_kind, workload_id, run_id, chat_id, notebook_id, root_span_id, agent_name,
 			schema_version, semantic_convention_version, committed_sequence,
 			projected_sequence, tombstoned_at
 		from obs_traces
 		where trace_id = $1`+lockClause,
 		traceID,
 	).Scan(
-		&stored.Trace.TraceID, &stored.Trace.RunID, &stored.Trace.ChatID,
+		&stored.Trace.TraceID, &stored.Trace.WorkloadKind, &stored.Trace.WorkloadID, &stored.Trace.RunID, &stored.Trace.ChatID,
 		&stored.Trace.NotebookID, &stored.Trace.RootSpanID, &stored.Trace.AgentName,
 		&stored.Trace.SchemaVersion, &stored.Trace.SemanticConventionVersion,
 		&stored.CommittedThrough, &stored.ProjectedThrough, &tombstonedAt,
