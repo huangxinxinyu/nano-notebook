@@ -103,22 +103,218 @@ test("restores the private Chat and enables the composer", async () => {
   fetchHandler = authenticatedWorkspaceHandler();
 
   render(<App />);
-  const user = userEvent.setup();
 
   await screen.findByRole("heading", { name: "My Research Topic" });
   const sources = screen.getByRole("region", { name: "Sources" });
   expect(sources).toBeInTheDocument();
   const chat = screen.getByRole("region", { name: "Chat" });
   expect(chat).toHaveAttribute("data-chat-framework", "@assistant-ui/react");
-  expect(await within(chat).findByRole("textbox", { name: "Message Nano Notebook" })).toBeEnabled();
+  const composer = await within(chat).findByRole("textbox", { name: "Message Nano Notebook" });
+  await waitFor(() => expect(composer).toBeEnabled());
   expect(within(chat).getByText("Chat will start here")).toBeInTheDocument();
   expect(within(chat).getByText("Answers use model knowledge and are not based on Notebook Sources.")).toBeInTheDocument();
   expect(screen.getByRole("region", { name: "Studio" })).toBeInTheDocument();
 
-  await user.click(within(sources).getByRole("button", { name: "Add sources" }));
-  expect(await screen.findByText("This feature is coming soon.")).toBeInTheDocument();
+  expect(await within(sources).findByText("Saved sources will appear here")).toBeInTheDocument();
+  expect(within(sources).getByRole("button", { name: "Add sources" })).toBeInTheDocument();
+  expect(within(sources).queryByText("Fast Research")).not.toBeInTheDocument();
   expect(fetch).toHaveBeenCalledWith("/api/v1/notebooks/nb_test/chats", expect.anything());
   expect(fetch).toHaveBeenCalledWith("/api/v1/chats/chat_test", expect.anything());
+});
+
+test("selects only ready Sources and pins them when admitting a Message", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  let admittedBody: Record<string, unknown> | undefined;
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [
+      { id: "src_ready", notebook_id: "nb_test", title: "attention.pdf", format: "pdf", byte_size: 2048, state: "ready" },
+      { id: "src_processing", notebook_id: "nb_test", title: "meeting.mp3", format: "mp3", byte_size: 4096, state: "processing" }
+    ] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [], citations: [] });
+    if (url.endsWith("/api/v1/chats/chat_test/messages") && method === "POST") {
+      admittedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return json({ message_id: admittedBody.id, run_id: "run_selected", status: "queued" }, 202);
+    }
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  const sources = await screen.findByRole("region", { name: "Sources" });
+  const readySource = await within(sources).findByRole("checkbox", { name: "Use attention.pdf" });
+  await waitFor(() => expect(readySource).toBeChecked());
+  expect(within(sources).getByText("Processing")).toBeInTheDocument();
+  expect(within(sources).queryByRole("checkbox", { name: "Use meeting.mp3" })).not.toBeInTheDocument();
+
+  const chat = screen.getByRole("region", { name: "Chat" });
+  await user.type(await within(chat).findByRole("textbox", { name: "Message Nano Notebook" }), "Summarize attention.");
+  await user.click(within(chat).getByRole("button", { name: "Send message" }));
+
+  await waitFor(() => expect(admittedBody?.source_ids).toEqual(["src_ready"]));
+  expect(within(chat).getByText("Answers can use the selected Sources (1) and include citations.")).toBeInTheDocument();
+});
+
+test("adds a URL Source through the real admission flow", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  let admittedURL = "";
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources") && method === "GET") return json({ sources: [] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources/urls") && method === "POST") {
+      admittedURL = (JSON.parse(String(init?.body)) as { url: string }).url;
+      expect(new Headers(init?.headers).get("Idempotency-Key")).toMatch(/^[0-9a-f-]{36}$/);
+      expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("test-token");
+      return json({ source: { id: "src_url", notebook_id: "nb_test", title: "example.com", format: "html", byte_size: 100, state: "processing" } }, 201);
+    }
+    if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [], citations: [] });
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  const sources = await screen.findByRole("region", { name: "Sources" });
+  await user.click(within(sources).getByRole("button", { name: "Add sources" }));
+  const dialog = await screen.findByRole("dialog", { name: "Add sources" });
+  await user.type(within(dialog).getByLabelText("Web page or YouTube URL"), "https://example.com/research");
+  await user.click(within(dialog).getByRole("button", { name: "Add URL" }));
+
+  await waitFor(() => expect(admittedURL).toBe("https://example.com/research"));
+});
+
+test("uploads multiple files independently when one item fails", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  const intents: string[] = [];
+  const finalized: string[] = [];
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources") && method === "GET") return json({ sources: [] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources/upload-intents") && method === "POST") {
+      const title = (JSON.parse(String(init?.body)) as { title: string }).title;
+      intents.push(title);
+      const id = title === "paper.pdf" ? "upl_paper" : "upl_photo";
+      return json({ upload_intent: { id }, upload: { method: "POST", url: `https://objects.example/${id}`, fields: { key: id } } }, 201);
+    }
+    if (url === "https://objects.example/upl_paper") return new Response(null, { status: 204 });
+    if (url === "https://objects.example/upl_photo") return json({ error: "rejected" }, 400);
+    if (url.endsWith("/api/v1/source-upload-intents/upl_paper/finalize")) {
+      finalized.push("upl_paper");
+      return json({ source: { id: "src_paper" } }, 201);
+    }
+    if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [], citations: [] });
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  const sources = await screen.findByRole("region", { name: "Sources" });
+  await user.click(within(sources).getByRole("button", { name: "Add sources" }));
+  const dialog = await screen.findByRole("dialog", { name: "Add sources" });
+  const paperBytes = new TextEncoder().encode("%PDF-good");
+  const imageBytes = new Uint8Array([137, 80, 78, 71]);
+  const paper = new File([paperBytes], "paper.pdf", { type: "application/pdf" });
+  const photo = new File([imageBytes], "photo.png", { type: "image/png" });
+  Object.defineProperty(paper, "arrayBuffer", { value: async () => paperBytes.buffer });
+  Object.defineProperty(photo, "arrayBuffer", { value: async () => imageBytes.buffer });
+  await user.upload(within(dialog).getByLabelText("Choose files"), [paper, photo]);
+
+  await waitFor(() => expect(intents.sort()).toEqual(["paper.pdf", "photo.png"]));
+  await waitFor(() => expect(finalized).toEqual(["upl_paper"]));
+  expect(await within(dialog).findByText("photo.png · Failed")).toBeInTheDocument();
+});
+
+test("renames, retries, and confirms permanent Source removal", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  const actions: string[] = [];
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [
+      { id: "src_ready", notebook_id: "nb_test", title: "old-name.pdf", format: "pdf", byte_size: 2048, state: "ready" },
+      { id: "src_failed", notebook_id: "nb_test", title: "broken.docx", format: "docx", byte_size: 4096, state: "failed" }
+    ] });
+    if (url.endsWith("/api/v1/sources/src_ready") && method === "PATCH") {
+      actions.push(`rename:${(JSON.parse(String(init?.body)) as { title: string }).title}`);
+      return json({ source: { id: "src_ready", title: "new-name.pdf", state: "ready" } });
+    }
+    if (url.endsWith("/api/v1/sources/src_failed/retry") && method === "POST") {
+      actions.push("retry:src_failed");
+      return json({ source_id: "src_failed", state: "processing" }, 202);
+    }
+    if (url.endsWith("/api/v1/sources/src_ready") && method === "DELETE") {
+      actions.push("delete:src_ready");
+      return new Response(null, { status: 204 });
+    }
+    if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [], citations: [] });
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  const sources = await screen.findByRole("region", { name: "Sources" });
+  await within(sources).findByText("old-name.pdf");
+  await user.click(within(sources).getByRole("button", { name: "Retry broken.docx" }));
+  await user.click(within(sources).getByRole("button", { name: "Rename old-name.pdf" }));
+  const renameDialog = await screen.findByRole("dialog", { name: "Rename source" });
+  const title = within(renameDialog).getByLabelText("Source title");
+  await user.clear(title);
+  await user.type(title, "new-name.pdf");
+  await user.click(within(renameDialog).getByRole("button", { name: "Save" }));
+  await user.click(within(sources).getByRole("button", { name: "Delete old-name.pdf" }));
+  const removeDialog = await screen.findByRole("dialog", { name: "Delete source permanently?" });
+  expect(within(removeDialog).getByText("Its citations will remain visible but can no longer reveal the passage.")).toBeInTheDocument();
+  await user.click(within(removeDialog).getByRole("button", { name: "Delete permanently" }));
+
+  await waitFor(() => expect(actions).toEqual(["retry:src_failed", "rename:new-name.pdf", "delete:src_ready"]));
+});
+
+test("opens a published Citation without exposing retrieval internals", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({
+      chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" },
+      messages: [{ id: "msg_answer", role: "assistant", content: "KV caching avoids recomputing prior keys and values.", created_at: "2026-07-20T12:00:00Z" }],
+      runs: [],
+      citations: [{ id: "cit_1", message_id: "msg_answer", claim_ordinal: 0, citation_ordinal: 0, claim_text: "KV caching avoids recomputing prior keys and values.", source_id: "src_1", evidence_revision_id: "rev_1", unit_id: "unit_1", start_rune: 10, end_rune: 67 }]
+    });
+    if (url.endsWith("/api/v1/citations/cit_1")) return json({ citation: {
+      citation: { id: "cit_1", message_id: "msg_answer", claim_ordinal: 0, citation_ordinal: 0, claim_text: "KV caching avoids recomputing prior keys and values.", source_id: "src_1", evidence_revision_id: "rev_1", unit_id: "unit_1", start_rune: 10, end_rune: 67 },
+      source_title: "transformer-notes.pdf", source_format: "pdf", unit_kind: "paragraph",
+      preview: "The cache stores keys and values from all prior token positions.", coordinate: { page: 12 }
+    } });
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  const chat = await screen.findByRole("region", { name: "Chat" });
+  await user.click(await within(chat).findByRole("button", { name: "Citation 1 for KV caching avoids recomputing prior keys and values." }));
+
+  const dialog = await screen.findByRole("dialog", { name: "transformer-notes.pdf" });
+  expect(within(dialog).getByText("The cache stores keys and values from all prior token positions.")).toBeInTheDocument();
+  expect(within(dialog).getByText("Page 12")).toBeInTheDocument();
+  expect(within(dialog).queryByText(/rev_1|unit_1/)).not.toBeInTheDocument();
 });
 
 test("submits one durable Message and projects the final answer from Run SSE", async () => {
@@ -1040,8 +1236,9 @@ function authenticatedWorkspaceHandler() {
     const method = init?.method ?? "GET";
     if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
     if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [] });
     if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
-    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [] });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [], citations: [] });
     if (url.endsWith("/api/v1/auth/sign-out") && method === "POST") return new Response(null, { status: 204 });
     return json({ error: { code: "not_found" } }, 404);
   };

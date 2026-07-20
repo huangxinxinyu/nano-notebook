@@ -24,10 +24,24 @@ export type AgentRun = {
   error_code?: string | null;
 };
 
+export type Citation = {
+  id: string;
+  message_id: string;
+  claim_ordinal: number;
+  citation_ordinal: number;
+  claim_text: string;
+  source_id: string;
+  evidence_revision_id: string;
+  unit_id: string;
+  start_rune: number;
+  end_rune: number;
+};
+
 export type ChatSnapshot = {
   chat: Chat;
   messages: ChatMessage[];
   runs: AgentRun[];
+  citations: Citation[];
 };
 
 export type ChatController = {
@@ -39,10 +53,10 @@ export type ChatController = {
   retry: (runID: string) => Promise<boolean>;
 };
 
-export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatController {
+export function usePrivateChat(notebookID: string, copy: ChatPanelCopy, selectedSourceIDs: string[] = []): ChatController {
   const queryClient = useQueryClient();
   const [bootstrapKey] = useState(() => crypto.randomUUID());
-  const [command, setCommand] = useState<{ id: string; content: string; time_zone: string } | null>(null);
+  const [command, setCommand] = useState<{ id: string; content: string; time_zone: string; source_ids: string[] } | null>(null);
   const retryCommand = useRef<{ sourceRunID: string; key: string; timeZone: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const queryKey = useMemo(() => ["private-chat", notebookID] as const, [notebookID]);
@@ -63,7 +77,8 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
       }
       const snapshotResponse = await api(`/api/v1/chats/${selected.id}`);
       if (!snapshotResponse.ok) throw new Error(copy.unavailableLabel);
-      return (await snapshotResponse.json()) as ChatSnapshot;
+      const snapshot = (await snapshotResponse.json()) as ChatSnapshot;
+      return { ...snapshot, citations: snapshot.citations ?? [] };
     },
     retry: false
   });
@@ -75,7 +90,7 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
 
     const source = new EventSource(`/api/v1/agent-runs/${activeRunID}/events`);
     const onRun = (event: Event) => {
-      let projection: { run: AgentRun; message: ChatMessage | null };
+      let projection: { run: AgentRun; message: ChatMessage | null; citations?: Citation[] };
       try {
         projection = JSON.parse((event as MessageEvent<string>).data) as typeof projection;
       } catch {
@@ -86,7 +101,7 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
         const messages = projection.message
           ? upsertMessage(current.messages, projection.message)
           : current.messages;
-        return { ...current, messages, runs: upsertRun(current.runs, projection.run) };
+        return { ...current, messages, runs: upsertRun(current.runs, projection.run), citations: upsertCitations(current.citations, projection.citations ?? []) };
       });
       if (projection.run.status === "completed" || projection.run.status === "failed" || projection.run.status === "cancelled") source.close();
     };
@@ -104,7 +119,7 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
 
     const pending = command?.content === content
       ? command
-      : { id: crypto.randomUUID(), content, time_zone: browserTimeZone() };
+      : { id: crypto.randomUUID(), content, time_zone: browserTimeZone(), source_ids: [...selectedSourceIDs] };
     setCommand(pending);
     setError(null);
     const response = await api(`/api/v1/chats/${snapshot.chat.id}/messages`, {
@@ -214,6 +229,12 @@ function upsertRun(runs: AgentRun[], run: AgentRun) {
   const existing = runs.findIndex((item) => item.id === run.id || item.input_message_id === run.input_message_id);
   if (existing < 0) return [...runs, run];
   return runs.map((item, index) => index === existing ? run : item);
+}
+
+function upsertCitations(current: Citation[], additions: Citation[]) {
+  const result = new Map(current.map((citation) => [citation.id, citation]));
+  for (const citation of additions) result.set(citation.id, citation);
+  return [...result.values()].sort((left, right) => left.claim_ordinal - right.claim_ordinal || left.citation_ordinal - right.citation_ordinal);
 }
 
 async function safeAdmissionError(response: Response, copy: ChatPanelCopy) {

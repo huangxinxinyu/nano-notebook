@@ -2,18 +2,16 @@ import type { ComponentProps, ReactNode } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../ui/tabs";
 import { ChatPanelContent, type ChatPanelCopy } from "./chat-placeholder-panel";
 import { usePrivateChat } from "./private-chat";
-import { SourcePanelContent } from "./source-panel";
+import { SourcePanelContent, type SourcePanelCopy } from "./source-panel";
+import { useNotebookSources } from "./sources";
 import { StudioPanelContent } from "./studio-panel";
 
-type WorkspacePanelCopy = ChatPanelCopy & {
+type WorkspacePanelCopy = ChatPanelCopy & Omit<SourcePanelCopy, "title" | "addSourcesLabel" | "emptyTitle" | "emptyBody" | "collapseLabel" | "comingSoonMessage"> & {
   panelsLabel: string;
   sources: string;
   chat: string;
   studio: string;
   addSources: string;
-  searchWeb: string;
-  web: string;
-  fastResearch: string;
   sourcesEmptyTitle: string;
   sourcesEmptyBody: string;
   collapsePanel: string;
@@ -26,10 +24,11 @@ type WorkspacePanelCopy = ChatPanelCopy & {
 };
 
 export function NotebookWorkspace({ notebookID, copy }: { notebookID: string; copy: WorkspacePanelCopy }) {
-  const chatController = usePrivateChat(notebookID, copy);
+  const sourcesController = useNotebookSources(notebookID, copy.sourceUnavailableLabel);
+  const chatController = usePrivateChat(notebookID, copy, sourcesController.selectedSourceIDs);
   const panels = {
-    sources: <SourcePanelContent title={copy.sources} addSourcesLabel={copy.addSources} searchWebLabel={copy.searchWeb} webLabel={copy.web} fastResearchLabel={copy.fastResearch} emptyTitle={copy.sourcesEmptyTitle} emptyBody={copy.sourcesEmptyBody} collapseLabel={copy.collapsePanel} comingSoonMessage={copy.comingSoon} />,
-    chat: <ChatPanelContent copy={copy} controller={chatController} />,
+    sources: <SourcePanelContent notebookID={notebookID} controller={sourcesController} copy={{ ...copy, title: copy.sources, addSourcesLabel: copy.addSources, emptyTitle: copy.sourcesEmptyTitle, emptyBody: copy.sourcesEmptyBody, collapseLabel: copy.collapsePanel, comingSoonMessage: copy.comingSoon }} />,
+    chat: <ChatPanelContent copy={copy} controller={chatController} selectedSourceCount={sourcesController.selectedSourceIDs.length} />,
     studio: <StudioPanelContent title={copy.studio} actions={copy.studioActions} betaLabel={copy.beta} emptyTitle={copy.studioEmptyTitle} emptyBody={copy.studioEmptyBody} addNoteLabel={copy.addNote} collapseLabel={copy.collapsePanel} comingSoonMessage={copy.comingSoon} />
   };
 
