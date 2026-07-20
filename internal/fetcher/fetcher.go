@@ -6,17 +6,21 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var (
@@ -102,6 +106,13 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (Snapshot, error) {
 	if err != nil || validateURL(parsed) != nil {
 		return Snapshot{}, ErrUnsafeDestination
 	}
+	if videoID, ok := youtubeVideoID(parsed); ok {
+		return f.fetchYouTubeCaptions(ctx, parsed, videoID)
+	}
+	return f.fetchURL(ctx, parsed, supportedMediaType)
+}
+
+func (f *Fetcher) fetchURL(ctx context.Context, parsed *url.URL, allowedType func(string) bool) (Snapshot, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return Snapshot{}, err
@@ -118,7 +129,7 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (Snapshot, error) {
 		return Snapshot{}, fmt.Errorf("fetch response status %d", response.StatusCode)
 	}
 	mediaType, _, err := mime.ParseMediaType(response.Header.Get("Content-Type"))
-	if err != nil || !supportedMediaType(mediaType) {
+	if err != nil || !allowedType(mediaType) {
 		return Snapshot{}, ErrUnsupportedType
 	}
 	compressed, err := readBounded(response.Body, f.maxCompressedBytes)
@@ -149,6 +160,172 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (Snapshot, error) {
 		FinalURL: response.Request.URL.String(), MediaType: strings.ToLower(mediaType), Payload: expanded,
 		ContentSHA256: hex.EncodeToString(digest[:]),
 	}, nil
+}
+
+type youtubeCaptionSegment struct {
+	StartMS int64  `json:"start_ms"`
+	EndMS   int64  `json:"end_ms"`
+	Text    string `json:"text"`
+}
+
+func (f *Fetcher) fetchYouTubeCaptions(ctx context.Context, parsed *url.URL, videoID string) (Snapshot, error) {
+	watch, err := f.fetchURL(ctx, parsed, func(mediaType string) bool { return strings.EqualFold(mediaType, "text/html") })
+	if err != nil {
+		return Snapshot{}, err
+	}
+	watchFinal, err := url.Parse(watch.FinalURL)
+	finalVideoID, finalIsYouTube := youtubeVideoID(watchFinal)
+	if err != nil || !finalIsYouTube || finalVideoID != videoID {
+		return Snapshot{}, ErrUnsafeDestination
+	}
+	baseURL, language, err := youtubeCaptionTrack(watch.Payload)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("%w: %v", ErrUnsupportedType, err)
+	}
+	captionURL, err := url.Parse(baseURL)
+	if err != nil || validateURL(captionURL) != nil || !youtubeCaptionHost(captionURL.Hostname()) {
+		return Snapshot{}, ErrUnsafeDestination
+	}
+	query := captionURL.Query()
+	query.Set("fmt", "json3")
+	captionURL.RawQuery = query.Encode()
+	caption, err := f.fetchURL(ctx, captionURL, func(mediaType string) bool {
+		return strings.EqualFold(mediaType, "application/json") || strings.EqualFold(mediaType, "text/plain")
+	})
+	if err != nil {
+		return Snapshot{}, err
+	}
+	captionFinal, err := url.Parse(caption.FinalURL)
+	if err != nil || !youtubeMediaHost(captionFinal.Hostname()) {
+		return Snapshot{}, ErrUnsafeDestination
+	}
+	segments, err := parseYouTubeCaptionEvents(caption.Payload)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("%w: %v", ErrUnsupportedType, err)
+	}
+	payload, err := json.Marshal(struct {
+		SchemaVersion string                  `json:"schema_version"`
+		VideoID       string                  `json:"video_id"`
+		Language      string                  `json:"language"`
+		Segments      []youtubeCaptionSegment `json:"segments"`
+	}{"nano.youtube-captions.v1", videoID, language, segments})
+	if err != nil {
+		return Snapshot{}, err
+	}
+	digest := sha256.Sum256(payload)
+	return Snapshot{
+		FinalURL: watch.FinalURL, MediaType: "application/vnd.nano.youtube-captions+json", Payload: payload,
+		ContentSHA256: hex.EncodeToString(digest[:]),
+	}, nil
+}
+
+func youtubeVideoID(candidate *url.URL) (string, bool) {
+	if candidate == nil {
+		return "", false
+	}
+	host := strings.ToLower(candidate.Hostname())
+	var id string
+	switch host {
+	case "youtube.com", "www.youtube.com", "m.youtube.com":
+		if candidate.Path == "/watch" {
+			id = candidate.Query().Get("v")
+		} else if strings.HasPrefix(candidate.Path, "/shorts/") {
+			id = strings.TrimPrefix(candidate.Path, "/shorts/")
+		}
+	case "youtu.be", "www.youtu.be":
+		id = strings.TrimPrefix(candidate.Path, "/")
+	}
+	if len(id) != 11 || strings.Contains(id, "/") {
+		return "", false
+	}
+	for _, character := range id {
+		if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || character == '_' || character == '-') {
+			return "", false
+		}
+	}
+	return id, true
+}
+
+func youtubeCaptionTrack(payload []byte) (string, string, error) {
+	marker := []byte(`"captionTracks":`)
+	index := bytes.Index(payload, marker)
+	if index < 0 {
+		return "", "", errors.New("YouTube video has no usable captions")
+	}
+	var tracks []struct {
+		BaseURL      string `json:"baseUrl"`
+		LanguageCode string `json:"languageCode"`
+		Kind         string `json:"kind"`
+	}
+	if err := json.NewDecoder(bytes.NewReader(payload[index+len(marker):])).Decode(&tracks); err != nil || len(tracks) == 0 {
+		return "", "", errors.New("invalid YouTube caption tracks")
+	}
+	selected := tracks[0]
+	for _, track := range tracks {
+		if strings.TrimSpace(track.Kind) != "asr" {
+			selected = track
+			break
+		}
+	}
+	if strings.TrimSpace(selected.BaseURL) == "" || strings.TrimSpace(selected.LanguageCode) == "" ||
+		len(selected.LanguageCode) > 35 || !utf8.ValidString(selected.LanguageCode) {
+		return "", "", errors.New("invalid YouTube caption track")
+	}
+	return selected.BaseURL, selected.LanguageCode, nil
+}
+
+func parseYouTubeCaptionEvents(payload []byte) ([]youtubeCaptionSegment, error) {
+	var decoded struct {
+		Events []struct {
+			StartMS    int64 `json:"tStartMs"`
+			DurationMS int64 `json:"dDurationMs"`
+			Segments   []struct {
+				Text string `json:"utf8"`
+			} `json:"segs"`
+		} `json:"events"`
+	}
+	if !utf8.Valid(payload) || json.Unmarshal(payload, &decoded) != nil || len(decoded.Events) == 0 || len(decoded.Events) > 10_000 {
+		return nil, errors.New("invalid YouTube caption response")
+	}
+	segments := make([]youtubeCaptionSegment, 0, len(decoded.Events))
+	for _, event := range decoded.Events {
+		var text strings.Builder
+		for _, segment := range event.Segments {
+			text.WriteString(segment.Text)
+		}
+		value := strings.Join(strings.Fields(text.String()), " ")
+		if value == "" {
+			continue
+		}
+		if utf8.RuneCountInString(value) > 8_000 {
+			return nil, errors.New("YouTube caption event exceeds processing budget")
+		}
+		if event.StartMS < 0 || event.DurationMS <= 0 || event.StartMS > math.MaxInt64-event.DurationMS {
+			return nil, errors.New("invalid YouTube caption interval")
+		}
+		segments = append(segments, youtubeCaptionSegment{StartMS: event.StartMS, EndMS: event.StartMS + event.DurationMS, Text: value})
+	}
+	sort.SliceStable(segments, func(left, right int) bool {
+		if segments[left].StartMS != segments[right].StartMS {
+			return segments[left].StartMS < segments[right].StartMS
+		}
+		return segments[left].Text < segments[right].Text
+	})
+	if len(segments) == 0 {
+		return nil, errors.New("YouTube video has no usable caption events")
+	}
+	return segments, nil
+}
+
+func youtubeCaptionHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	return host == "youtube.com" || strings.HasSuffix(host, ".youtube.com")
+}
+
+func youtubeMediaHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	return youtubeCaptionHost(host) || host == "googlevideo.com" || strings.HasSuffix(host, ".googlevideo.com")
 }
 
 func (f *Fetcher) dialValidated(ctx context.Context, network, address string) (net.Conn, error) {
@@ -201,6 +378,7 @@ var supportedMediaTypes = []string{
 	"application/vnd.openxmlformats-officedocument.presentationml.presentation",
 	"audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp4", "audio/x-m4a",
 	"image/png", "image/jpeg", "image/webp",
+	"application/vnd.nano.youtube-captions+json",
 }
 
 func supportedMediaType(candidate string) bool {

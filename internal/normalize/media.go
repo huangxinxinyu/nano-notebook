@@ -107,17 +107,19 @@ func Transcript(input Input, segments []TranscriptSegment) (Artifact, error) {
 		return Artifact{}, errors.New("invalid transcript normalization input")
 	}
 	sourceBlocks := make([]officeBlock, 0, len(segments))
-	var previousEnd int64
+	var previousEnd, previousStart int64
 	for _, segment := range segments {
 		segment.Text = strings.TrimSpace(segment.Text)
 		if segment.Text == "" || !utf8.ValidString(segment.Text) || utf8.RuneCountInString(segment.Text) > 8_000 ||
-			segment.StartMS < previousEnd || segment.EndMS <= segment.StartMS {
+			segment.EndMS <= segment.StartMS || (input.Format == "youtube" && segment.StartMS < previousStart) ||
+			(input.Format != "youtube" && segment.StartMS < previousEnd) {
 			return Artifact{}, errors.New("invalid transcript Evidence interval")
 		}
 		sourceBlocks = append(sourceBlocks, officeBlock{kind: "paragraph", text: segment.Text, coordinate: SourceCoordinate{
 			Kind: "time_interval", StartMS: segment.StartMS, EndMS: segment.EndMS,
 		}})
 		previousEnd = segment.EndMS
+		previousStart = segment.StartMS
 	}
 	return finalizeOfficeArtifact(input, sourceBlocks)
 }

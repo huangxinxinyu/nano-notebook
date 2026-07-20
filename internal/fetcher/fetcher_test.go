@@ -154,6 +154,53 @@ func TestFetcherReturnsAnImmutableSupportedSnapshot(t *testing.T) {
 	}
 }
 
+func TestFetcherImportsPublicYouTubeCaptionsAsImmutableTimestampedSnapshot(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/watch":
+			w.Header().Set("Content-Type", "text/html")
+			_, _ = w.Write([]byte(`<script>var player={"captionTracks":[
+				{"baseUrl":"http://www.youtube.com/api/timedtext?track=manual","languageCode":"en","kind":""},
+				{"baseUrl":"http://www.youtube.com/api/timedtext?track=asr","languageCode":"en","kind":"asr"}
+			]};</script>`))
+		case "/api/timedtext":
+			if r.URL.Query().Get("track") != "manual" || r.URL.Query().Get("fmt") != "json3" {
+				t.Fatalf("caption query=%s", r.URL.RawQuery)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"events":[
+				{"tStartMs":0,"dDurationMs":1250,"segs":[{"utf8":"First caption."}]},
+				{"tStartMs":1500,"dDurationMs":1000,"segs":[{"utf8":"Second "},{"utf8":"caption."}]}
+			]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+	upstreamURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := fetcher.New(fetcher.Config{
+		Resolver: staticResolver{addresses: map[string][]netip.Addr{"www.youtube.com": {netip.MustParseAddr("93.184.216.34")}}},
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			var dialer net.Dialer
+			return dialer.DialContext(ctx, network, upstreamURL.Host)
+		},
+		MaxCompressedBytes: 1 << 20, MaxExpandedBytes: 1 << 20, Timeout: time.Second,
+	})
+	snapshot, err := client.Fetch(context.Background(), "http://www.youtube.com/watch?v=dQw4w9WgXcQ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.MediaType != "application/vnd.nano.youtube-captions+json" || snapshot.FinalURL != "http://www.youtube.com/watch?v=dQw4w9WgXcQ" ||
+		!strings.Contains(string(snapshot.Payload), `"video_id":"dQw4w9WgXcQ"`) ||
+		!strings.Contains(string(snapshot.Payload), `"start_ms":1500`) ||
+		strings.Contains(string(snapshot.Payload), "asr") {
+		t.Fatalf("YouTube snapshot=%+v payload=%s", snapshot, snapshot.Payload)
+	}
+}
+
 type staticResolver struct {
 	addresses map[string][]netip.Addr
 }

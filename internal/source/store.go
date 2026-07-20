@@ -108,6 +108,9 @@ func FormatForMediaType(mediaType string) (Format, bool) {
 	if mediaType == "text/html" {
 		return FormatHTML, true
 	}
+	if mediaType == "application/vnd.nano.youtube-captions+json" {
+		return FormatYouTube, true
+	}
 	for format, spec := range supportedFileFormats {
 		for _, candidate := range spec.mediaTypes {
 			if mediaType == candidate {

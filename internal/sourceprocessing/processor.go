@@ -272,6 +272,8 @@ func (e *NativeExtractor) Extract(ctx context.Context, item source.Source, paylo
 			segments = append(segments, normalize.TranscriptSegment{StartMS: segment.StartMS, EndMS: segment.EndMS, Text: segment.Text})
 		}
 		return normalize.Transcript(input, segments)
+	case source.FormatYouTube:
+		return normalize.YouTube(input)
 	default:
 		return normalize.Artifact{}, errors.New("Extractor Adapter is not configured for Source format")
 	}

@@ -28,3 +28,10 @@ func TestValidFileAdmissionRequiresConsistentExtensionFormatAndMediaType(t *test
 		}
 	}
 }
+
+func TestFormatForMediaTypeRecognizesImmutableYouTubeCaptionSnapshot(t *testing.T) {
+	format, ok := source.FormatForMediaType("application/vnd.nano.youtube-captions+json")
+	if !ok || format != source.FormatYouTube {
+		t.Fatalf("FormatForMediaType=%q ok=%v", format, ok)
+	}
+}

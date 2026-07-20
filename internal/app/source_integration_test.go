@@ -3,6 +3,8 @@ package app_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -497,6 +499,37 @@ func TestCreateURLSourceIsIdempotentButRepeatedURLCreatesANewSnapshot(t *testing
 	decodeBody(t, second, &secondBody)
 	if secondBody.Source.ID == firstBody.Source.ID || remote.calls != 2 || objects.Len() != 2 {
 		t.Fatalf("second Source=%+v first=%+v calls=%d objects=%d", secondBody.Source, firstBody.Source, remote.calls, objects.Len())
+	}
+}
+
+func TestCreateYouTubeURLSourcePersistsCaptionSnapshotFormat(t *testing.T) {
+	api := newTestAPI(t)
+	owner, csrf := api.registerWithCSRF(t, "source-youtube-api@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-youtube-api")
+	payload := []byte(`{"schema_version":"nano.youtube-captions.v1","video_id":"dQw4w9WgXcQ","language":"en","segments":[{"start_ms":0,"end_ms":1000,"text":"Caption."}]}`)
+	digest := sha256.Sum256(payload)
+	remote := &recordingSourceFetcher{snapshot: fetcher.Snapshot{
+		FinalURL: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", MediaType: "application/vnd.nano.youtube-captions+json",
+		Payload: payload, ContentSHA256: hex.EncodeToString(digest[:]),
+	}}
+	api.server = app.NewServer(app.Config{CookieSecure: false, SourceFetcher: remote, SourceSnapshots: objectstore.NewMemoryStore()}, api.db)
+	api.handler = api.server.Handler()
+	response := api.postJSONWithCookieAndCSRF(t,
+		"/api/v1/notebooks/"+notebookID+"/sources/urls",
+		map[string]any{"url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"}, owner, csrf, csrf.Value, "youtube-snapshot-1",
+	)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("YouTube URL Source status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Source struct {
+			Format string `json:"format"`
+			State  string `json:"state"`
+		} `json:"source"`
+	}
+	decodeBody(t, response, &body)
+	if body.Source.Format != "youtube" || body.Source.State != "processing" {
+		t.Fatalf("YouTube Source=%+v", body.Source)
 	}
 }
 
