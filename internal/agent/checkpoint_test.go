@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
@@ -152,5 +153,24 @@ func TestActionResultAndFinalDraftCheckpointsEncodeTypedPayloads(t *testing.T) {
 	}
 	if final.IdentityKey != "decision:3/final" || final.Kind != CheckpointFinalDraft || final.DecisionNo != 3 || final.ActionIndex != nil || final.ActionID != "" || string(final.Payload) != `{"text":"Final answer."}` || final.PayloadSHA256 == "" {
 		t.Fatalf("final checkpoint = %+v", final)
+	}
+}
+
+func TestFinalCheckpointPreservesTypedClaimEvidenceMapping(t *testing.T) {
+	draft := models.FinalDraft{Text: "The launch is 20 July.", Claims: []models.DraftClaim{{
+		Text: "The launch is 20 July.", Citations: []models.EvidenceAddress{{
+			SourceID: "src_a", EvidenceRevisionID: "evr_a", UnitID: "unit_a", StartRune: 0, EndRune: 27,
+		}},
+	}}}
+	pending, err := NewFinalDraftCheckpoint(1, draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix, err := LoadCheckpointPrefix(context.Background(), []Checkpoint{{SequenceNo: 1, PendingCheckpoint: pending}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prefix.Final == nil || !reflect.DeepEqual(*prefix.Final, draft) {
+		t.Fatalf("reloaded Final Draft=%+v want=%+v", prefix.Final, draft)
 	}
 }

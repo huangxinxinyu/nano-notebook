@@ -62,6 +62,24 @@ func TestControllerCheckpointsOrderedActionsThenFinalAndPublishesOnce(t *testing
 	}
 }
 
+func TestControllerPreparesGroundedFinalBeforeCheckpointAndPublication(t *testing.T) {
+	registry, err := NewActionRegistry(NewCalculateAction())
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := &controllerRuntimeStub{execution: defaultControllerExecution()}
+	base.execution.SelectedSourceCount = 1
+	runtime := &finalPreparationRuntimeStub{controllerRuntimeStub: base, prepared: models.FinalDraft{Text: "Verified answer."}}
+	model := &decisionModelStub{decisions: []models.ModelDecision{{Final: &models.FinalDraft{Text: "Unverified draft."}}}}
+	if err := NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.calls != 1 || len(runtime.checkpoints) != 1 || runtime.checkpoints[0].Kind != CheckpointFinalDraft ||
+		len(runtime.published) != 1 || runtime.published[0].Text != "Verified answer." {
+		t.Fatalf("preparation/checkpoints/publication=%d/%+v/%+v", runtime.calls, runtime.checkpoints, runtime.published)
+	}
+}
+
 func TestControllerResumesFirstIncompleteActionWithoutRepeatingAcceptedResult(t *testing.T) {
 	executionOrder := make([]string, 0, 1)
 	registry, err := NewActionRegistry(&recordingAction{name: "record", order: &executionOrder})
@@ -399,6 +417,17 @@ type controllerRuntimeStub struct {
 	failed          []string
 	authorityChecks int
 	appendErrors    []error
+}
+
+type finalPreparationRuntimeStub struct {
+	*controllerRuntimeStub
+	prepared models.FinalDraft
+	calls    int
+}
+
+func (r *finalPreparationRuntimeStub) PrepareFinal(_ context.Context, _ Attempt, _ Execution, _ CheckpointPrefix, _ models.FinalDraft) (models.FinalDraft, error) {
+	r.calls++
+	return r.prepared, nil
 }
 
 func (r *controllerRuntimeStub) Load(_ context.Context, _ Attempt) (Execution, error) {

@@ -46,7 +46,10 @@ type ModelRequest struct {
 	Model             string
 	Messages          []ModelMessage
 	ActionDefinitions []ActionDefinition
+	FinalDraftFormat  string
 }
+
+const FinalDraftFormatGroundedV1 = "grounded-v1"
 
 type ErrorKind string
 
@@ -280,7 +283,21 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 		}
 		decision := ModelDecision{}
 		if choice.Message.Content != nil && strings.TrimSpace(*choice.Message.Content) != "" {
-			decision.Final = &FinalDraft{Text: *choice.Message.Content}
+			if request.FinalDraftFormat == FinalDraftFormatGroundedV1 {
+				var draft FinalDraft
+				decoder := json.NewDecoder(strings.NewReader(*choice.Message.Content))
+				decoder.DisallowUnknownFields()
+				if err := decoder.Decode(&draft); err != nil {
+					return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid grounded Final Draft")}
+				}
+				var trailing any
+				if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+					return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("grounded Final Draft has trailing JSON")}
+				}
+				decision.Final = &draft
+			} else {
+				decision.Final = &FinalDraft{Text: *choice.Message.Content}
+			}
 		}
 		if len(choice.Message.ToolCalls) > 0 {
 			actions := make([]ActionProposal, 0, len(choice.Message.ToolCalls))

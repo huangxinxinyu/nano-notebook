@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/normalize"
+	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -20,6 +23,8 @@ var (
 	ErrRetryNotLatest      = errors.New("agent run input is not latest")
 	ErrIdempotencyMismatch = errors.New("idempotency mismatch")
 	ErrEvidenceSetInvalid  = errors.New("selected Source evidence is not ready and verified")
+	ErrCitationNotFound    = errors.New("Citation not found")
+	ErrCitationUnavailable = errors.New("Citation evidence unavailable")
 )
 
 type DBTX interface {
@@ -48,8 +53,31 @@ type AssistantMessageSnapshot struct {
 }
 
 type RunProjection struct {
-	Run     RunSnapshot               `json:"run"`
-	Message *AssistantMessageSnapshot `json:"message"`
+	Run       RunSnapshot               `json:"run"`
+	Message   *AssistantMessageSnapshot `json:"message"`
+	Citations []CitationSnapshot        `json:"citations"`
+}
+
+type CitationSnapshot struct {
+	ID                 string `json:"id"`
+	MessageID          string `json:"message_id"`
+	ClaimOrdinal       int    `json:"claim_ordinal"`
+	CitationOrdinal    int    `json:"citation_ordinal"`
+	ClaimText          string `json:"claim_text"`
+	SourceID           string `json:"source_id"`
+	EvidenceRevisionID string `json:"evidence_revision_id"`
+	UnitID             string `json:"unit_id"`
+	StartRune          int    `json:"start_rune"`
+	EndRune            int    `json:"end_rune"`
+}
+
+type CitationView struct {
+	Citation     CitationSnapshot            `json:"citation"`
+	SourceTitle  string                      `json:"source_title"`
+	SourceFormat source.Format               `json:"source_format"`
+	UnitKind     string                      `json:"unit_kind"`
+	Preview      string                      `json:"preview"`
+	Coordinate   *normalize.SourceCoordinate `json:"coordinate,omitempty"`
 }
 
 func (s *Store) ByInputMessage(ctx context.Context, messageID string) (RunRef, error) {
@@ -198,7 +226,104 @@ func (s *Store) ProjectionForUser(ctx context.Context, userID, runID string) (Ru
 		return RunProjection{}, err
 	}
 	projection.Message = &message
+	projection.Citations, err = s.CitationsForRun(ctx, userID, runID)
+	if err != nil {
+		return RunProjection{}, err
+	}
 	return projection, nil
+}
+
+func (s *Store) CitationsForRun(ctx context.Context, userID, runID string) ([]CitationSnapshot, error) {
+	return s.listCitations(ctx, `
+		select c.citation_id,c.message_id,c.claim_ordinal,c.citation_ordinal,c.claim_text,
+			c.source_id,c.evidence_revision_id,c.unit_id,c.start_rune,c.end_rune
+		from chat_citations c join agent_runs r on r.id=c.run_id
+		where c.run_id=$1 and r.user_id=$2
+		order by c.claim_ordinal,c.citation_ordinal
+	`, runID, userID)
+}
+
+func (s *Store) CitationsForChat(ctx context.Context, userID, chatID string) ([]CitationSnapshot, error) {
+	return s.listCitations(ctx, `
+		select c.citation_id,c.message_id,c.claim_ordinal,c.citation_ordinal,c.claim_text,
+			c.source_id,c.evidence_revision_id,c.unit_id,c.start_rune,c.end_rune
+		from chat_citations c join agent_runs r on r.id=c.run_id
+		where r.chat_id=$1 and r.user_id=$2
+		order by r.created_at,c.claim_ordinal,c.citation_ordinal
+	`, chatID, userID)
+}
+
+func (s *Store) listCitations(ctx context.Context, query string, args ...any) ([]CitationSnapshot, error) {
+	rows, err := s.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]CitationSnapshot, 0)
+	for rows.Next() {
+		var citation CitationSnapshot
+		if err := rows.Scan(
+			&citation.ID, &citation.MessageID, &citation.ClaimOrdinal, &citation.CitationOrdinal, &citation.ClaimText,
+			&citation.SourceID, &citation.EvidenceRevisionID, &citation.UnitID, &citation.StartRune, &citation.EndRune,
+		); err != nil {
+			return nil, err
+		}
+		result = append(result, citation)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) CitationViewForUser(ctx context.Context, userID, citationID string) (CitationView, error) {
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(citationID) == "" {
+		return CitationView{}, ErrCitationNotFound
+	}
+	var view CitationView
+	err := s.db.QueryRow(ctx, `
+		select c.citation_id,c.message_id,c.claim_ordinal,c.citation_ordinal,c.claim_text,
+			c.source_id,c.evidence_revision_id,c.unit_id,c.start_rune,c.end_rune
+		from chat_citations c join agent_runs r on r.id=c.run_id
+		where c.citation_id=$1 and r.user_id=$2
+	`, citationID, userID).Scan(
+		&view.Citation.ID, &view.Citation.MessageID, &view.Citation.ClaimOrdinal, &view.Citation.CitationOrdinal,
+		&view.Citation.ClaimText, &view.Citation.SourceID, &view.Citation.EvidenceRevisionID, &view.Citation.UnitID,
+		&view.Citation.StartRune, &view.Citation.EndRune,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return CitationView{}, ErrCitationNotFound
+	}
+	if err != nil {
+		return CitationView{}, err
+	}
+	var unitText string
+	var coordinateJSON []byte
+	err = s.db.QueryRow(ctx, `
+		select s.title,s.format,u.kind,u.text_content,u.coordinate_json
+		from source_sources s
+		join source_evidence_revisions r on r.id=$2 and r.source_id=s.id and r.status='active'
+		join source_evidence_units u on u.id=$3 and u.revision_id=r.id and u.source_id=s.id
+		where s.id=$1 and s.state='ready'
+	`, view.Citation.SourceID, view.Citation.EvidenceRevisionID, view.Citation.UnitID).Scan(
+		&view.SourceTitle, &view.SourceFormat, &view.UnitKind, &unitText, &coordinateJSON,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return CitationView{}, ErrCitationUnavailable
+	}
+	if err != nil {
+		return CitationView{}, err
+	}
+	runes := []rune(unitText)
+	if view.Citation.StartRune < 0 || view.Citation.EndRune > len(runes) || view.Citation.EndRune <= view.Citation.StartRune {
+		return CitationView{}, ErrCitationUnavailable
+	}
+	view.Preview = string(runes[view.Citation.StartRune:view.Citation.EndRune])
+	if len(coordinateJSON) > 0 {
+		var coordinate normalize.SourceCoordinate
+		if json.Unmarshal(coordinateJSON, &coordinate) != nil {
+			return CitationView{}, ErrCitationUnavailable
+		}
+		view.Coordinate = &coordinate
+	}
+	return view, nil
 }
 
 func (s *Store) LatestForChat(ctx context.Context, userID, chatID string) ([]RunSnapshot, error) {
@@ -350,7 +475,14 @@ func (s *Store) RetryQueued(ctx context.Context, userID, sourceRunID, key, reque
 	} else if active {
 		return RunSnapshot{}, false, ErrActiveRun
 	}
+	sourceIDs, err := s.sourceIDsForRun(ctx, sourceRunID)
+	if err != nil {
+		return RunSnapshot{}, false, err
+	}
 	if err := s.CreateQueued(ctx, runID, userID, chatID, inputMessageID, model, promptVersion, timeZone, config); err != nil {
+		return RunSnapshot{}, false, err
+	}
+	if err := s.PinEvidenceSet(ctx, runID, userID, sourceIDs); err != nil {
 		return RunSnapshot{}, false, err
 	}
 	if _, err := s.db.Exec(ctx, `
@@ -384,6 +516,23 @@ func (s *Store) RetryQueued(ctx context.Context, userID, sourceRunID, key, reque
 		return RunSnapshot{}, false, err
 	}
 	return run, false, nil
+}
+
+func (s *Store) sourceIDsForRun(ctx context.Context, runID string) ([]string, error) {
+	rows, err := s.db.Query(ctx, `select source_id from agent_run_evidence_set where run_id=$1 order by ordinal`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]string, 0)
+	for rows.Next() {
+		var sourceID string
+		if err := rows.Scan(&sourceID); err != nil {
+			return nil, err
+		}
+		result = append(result, sourceID)
+	}
+	return result, rows.Err()
 }
 
 type Store struct {

@@ -41,6 +41,10 @@ type ReplayTraceRuntime interface {
 	ReplayStager() ReplayStager
 }
 
+type FinalPreparationRuntime interface {
+	PrepareFinal(context.Context, Attempt, Execution, CheckpointPrefix, models.FinalDraft) (models.FinalDraft, error)
+}
+
 type Controller struct {
 	runtime  ControllerRuntime
 	model    DecisionModel
@@ -131,7 +135,14 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		}
 		decisionNo := prefix.AcceptedDecisions + 1
 		if decision.Final != nil {
-			checkpoint, err := NewFinalDraftCheckpoint(decisionNo, *decision.Final)
+			prepared := *decision.Final
+			if runtime, ok := c.runtime.(FinalPreparationRuntime); ok {
+				prepared, err = runtime.PrepareFinal(ctx, attempt, execution, prefix, prepared)
+				if err != nil {
+					return c.fail(ctx, attempt, "grounding_failed", err)
+				}
+			}
+			checkpoint, err := NewFinalDraftCheckpoint(decisionNo, prepared)
 			if err != nil {
 				code := string(models.ErrorInvalidResponse)
 				if !actionCapable {

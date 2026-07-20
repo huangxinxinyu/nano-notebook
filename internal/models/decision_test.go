@@ -74,3 +74,23 @@ func TestModelDecisionRejectsEmptyVariantPayload(t *testing.T) {
 		})
 	}
 }
+
+func TestGroundedFinalDraftValidatesClaimAndEvidenceShape(t *testing.T) {
+	draft := FinalDraft{Text: "The launch is 20 July.", Claims: []DraftClaim{{
+		Text: "The launch is 20 July.", Citations: []EvidenceAddress{{
+			SourceID: "src_a", EvidenceRevisionID: "evr_a", UnitID: "unit_a", StartRune: 0, EndRune: 27,
+		}},
+	}}}
+	if err := draft.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range []FinalDraft{
+		{Text: "Answer", Claims: []DraftClaim{{Text: "Missing from answer", Citations: draft.Claims[0].Citations}}},
+		{Text: "Answer", Claims: []DraftClaim{{Text: "Answer"}}},
+		{Text: "Answer", Claims: []DraftClaim{{Text: "Answer", Citations: []EvidenceAddress{{SourceID: "src", EvidenceRevisionID: "evr", UnitID: "unit", StartRune: 2, EndRune: 2}}}}},
+	} {
+		if err := invalid.Validate(); err == nil {
+			t.Fatalf("accepted invalid grounded draft=%+v", invalid)
+		}
+	}
+}

@@ -14,7 +14,7 @@ import (
 
 const BareSystemPrompt = `You are Nano Notebook's research assistant. Answer the user's question directly and in the user's language. This capability currently uses general model knowledge and has no Sources or web research. Never invent citations, claim to have read Notebook Sources, or claim to have searched the web. Do not block a useful answer because Sources are absent. When relevant material would materially improve accuracy, depth, recency, verification, or citation quality, briefly suggest what Sources the user could add. Do not repeat that suggestion mechanically. Do not expose hidden chain-of-thought; provide a concise explanation or reasoning summary when useful.`
 
-const GroundedSystemPrompt = `You are Nano Notebook's source-grounded research assistant. The Run has a fixed server-controlled set of selected Sources. Use search_evidence iteratively with focused queries before answering factual claims about those Sources. Treat Action evidence addresses and excerpts as the only Source evidence; never invent a Source, Evidence Unit, range, quotation, or web search. Do not blend unsupported model knowledge into claims presented as Source-supported. If complete retrieval finds no relevant evidence, still answer the user's question from general knowledge and begin by clearly saying the answer is not based on the selected Sources; do not cite those Sources. If retrieval is degraded, do not claim zero support. Do not expose hidden chain-of-thought; provide only the useful answer and concise disclosed limitations.`
+const GroundedSystemPrompt = `You are Nano Notebook's source-grounded research assistant. The Run has a fixed server-controlled set of selected Sources. Use search_evidence iteratively with focused queries before answering factual claims about those Sources. Treat Action evidence addresses and excerpts as the only Source evidence; never invent a Source, Evidence Unit, range, quotation, or web search. Do not blend unsupported model knowledge into claims presented as Source-supported. A final response must be only JSON matching {"text":string,"claims":[{"text":string,"citations":[{"source_id":string,"evidence_revision_id":string,"unit_id":string,"start_rune":integer,"end_rune":integer}]}]}. Each material factual or synthesized statement must appear verbatim once in text as a claim and have supporting addresses returned by search_evidence. If complete retrieval finds no relevant evidence, return an empty claims array; Nano will make a fresh Source-free fallback call. If retrieval is degraded, do not claim zero support. Do not expose hidden chain-of-thought; provide only the useful answer and concise disclosed limitations.`
 
 var ErrLeaseLost = errors.New("agent attempt lease lost")
 
@@ -26,6 +26,7 @@ type PostgresRuntime struct {
 	telemetry    agentobs.Exporter
 	traceSink    TraceSink
 	replayStager ReplayStager
+	grounder     *GroundingService
 }
 
 type RuntimeOption func(*PostgresRuntime)
@@ -74,11 +75,27 @@ func WithReplayStager(stager ReplayStager) RuntimeOption {
 	}
 }
 
+func WithGroundingService(grounder *GroundingService) RuntimeOption {
+	return func(runtime *PostgresRuntime) {
+		runtime.grounder = grounder
+	}
+}
+
 func (r *PostgresRuntime) ReplayStager() ReplayStager {
 	if r == nil {
 		return nil
 	}
 	return r.replayStager
+}
+
+func (r *PostgresRuntime) PrepareFinal(ctx context.Context, attempt Attempt, execution Execution, prefix CheckpointPrefix, draft models.FinalDraft) (models.FinalDraft, error) {
+	if r != nil && r.grounder != nil {
+		return r.grounder.Prepare(ctx, attempt, prefix, draft)
+	}
+	if execution.SelectedSourceCount > 0 {
+		return models.FinalDraft{}, ErrGroundingIncomplete
+	}
+	return draft, nil
 }
 
 func NewPostgresRuntime(pool *pgxpool.Pool, systemPrompt string, newMessageID func() string, options ...RuntimeOption) *PostgresRuntime {
@@ -265,9 +282,15 @@ func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, mess
 		if err != nil {
 			return err
 		}
-		if prefix.Final == nil || prefix.Final.Text != expectedFinal.Text {
+		prefixHash, prefixErr := finalDraftSHA256(valueOrEmptyFinal(prefix.Final))
+		expectedHash, expectedErr := finalDraftSHA256(*expectedFinal)
+		if prefix.Final == nil || prefixErr != nil || expectedErr != nil || prefixHash != expectedHash {
 			return invalidCheckpoint("publication Final Draft does not match accepted prefix")
 		}
+	}
+	groundingOutcome, err := validateGroundingPublication(ctx, tx, attempt.RunID, expectedFinal)
+	if err != nil {
+		return err
 	}
 	recorder, err := NewRunTraceRecorder(traceCtx, tx, attempt.RunID)
 	if err != nil {
@@ -294,6 +317,22 @@ func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, mess
 		insert into chat_messages(id, chat_id, role, content)
 		values($1, $2, 'assistant', $3)`, messageID, chatID, text); err != nil {
 		return err
+	}
+	if groundingOutcome == "supported" {
+		if _, err := tx.Exec(ctx, `
+			insert into chat_citations(
+				message_id,citation_id,run_id,claim_ordinal,citation_ordinal,claim_text,
+				notebook_id,source_id,evidence_revision_id,unit_id,start_rune,end_rune
+			)
+			select $1,c.citation_id,c.run_id,c.claim_ordinal,c.citation_ordinal,s.claim_text,
+				c.notebook_id,c.source_id,c.evidence_revision_id,c.unit_id,c.start_rune,c.end_rune
+			from agent_draft_citations c
+			join agent_claim_support_records s on s.run_id=c.run_id and s.claim_ordinal=c.claim_ordinal
+			where c.run_id=$2
+			order by c.claim_ordinal,c.citation_ordinal
+		`, messageID, attempt.RunID); err != nil {
+			return err
+		}
 	}
 	runTag, err := tx.Exec(ctx, `
 		update agent_runs
@@ -342,6 +381,13 @@ func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, mess
 	}
 	publishCommittedTrace(traceCtx, traceScope)
 	return nil
+}
+
+func valueOrEmptyFinal(draft *models.FinalDraft) models.FinalDraft {
+	if draft == nil {
+		return models.FinalDraft{}
+	}
+	return *draft
 }
 
 type publicationState int

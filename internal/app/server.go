@@ -106,11 +106,48 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/notebooks", s.notebooks)
 	s.mux.HandleFunc("/api/v1/notebooks/", s.notebookByID)
 	s.mux.HandleFunc("/api/v1/sources/", s.sourceByID)
+	s.mux.HandleFunc("/api/v1/citations/", s.citationByID)
 	s.mux.HandleFunc("/api/v1/source-upload-intents/", s.sourceUploadIntentByID)
 	s.mux.HandleFunc("/api/v1/chats/", s.chatByID)
 	s.mux.HandleFunc("/api/v1/agent-runs/", s.agentRunByID)
 	s.mux.HandleFunc("/api/admin/traces", s.adminTraceList)
 	s.mux.HandleFunc("/api/admin/traces/", s.adminTraceByID)
+}
+
+func (s *Server) citationByID(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, r, http.StatusUnauthorized, "unauthorized", "error.session_expired")
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
+		return
+	}
+	citationID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/citations/"), "/")
+	if citationID == "" || strings.Contains(citationID, "/") {
+		writeError(w, r, http.StatusNotFound, "not_found", "error.citation_not_found")
+		return
+	}
+	var view agent.CitationView
+	err := s.db.WithRequestPrincipal(r.Context(), user.ID, func(tx pgx.Tx) error {
+		var err error
+		view, err = agent.NewStore(tx).CitationViewForUser(r.Context(), user.ID, citationID)
+		return err
+	})
+	if errors.Is(err, agent.ErrCitationNotFound) {
+		writeError(w, r, http.StatusNotFound, "not_found", "error.citation_not_found")
+		return
+	}
+	if errors.Is(err, agent.ErrCitationUnavailable) {
+		writeError(w, r, http.StatusGone, "citation_unavailable", "error.citation_unavailable")
+		return
+	}
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"citation": view})
 }
 
 func (s *Server) NotifyRun(runID string) {
@@ -713,6 +750,7 @@ func (s *Server) chatSnapshot(w http.ResponseWriter, r *http.Request, userID, ch
 	var chatResult chat.Chat
 	var messages []chat.Message
 	var runs []agent.RunSnapshot
+	var citations []agent.CitationSnapshot
 	err := s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
 		chatStore := chat.NewStore(tx)
 		var err error
@@ -725,6 +763,10 @@ func (s *Server) chatSnapshot(w http.ResponseWriter, r *http.Request, userID, ch
 			return err
 		}
 		runs, err = agent.NewStore(tx).LatestForChat(r.Context(), userID, chatID)
+		if err != nil {
+			return err
+		}
+		citations, err = agent.NewStore(tx).CitationsForChat(r.Context(), userID, chatID)
 		return err
 	})
 	if errors.Is(err, chat.ErrNotFound) {
@@ -735,7 +777,7 @@ func (s *Server) chatSnapshot(w http.ResponseWriter, r *http.Request, userID, ch
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"chat": chatResult, "messages": messages, "runs": runs})
+	writeJSON(w, http.StatusOK, map[string]any{"chat": chatResult, "messages": messages, "runs": runs, "citations": citations})
 }
 
 func (s *Server) agentRunByID(w http.ResponseWriter, r *http.Request) {
@@ -842,6 +884,10 @@ func (s *Server) retryRun(w http.ResponseWriter, r *http.Request, userID, source
 	}
 	if errors.Is(err, agent.ErrIdempotencyMismatch) {
 		writeError(w, r, http.StatusConflict, "idempotency_mismatch", "error.idempotency_mismatch")
+		return
+	}
+	if errors.Is(err, agent.ErrEvidenceSetInvalid) {
+		writeError(w, r, http.StatusConflict, "evidence_set_invalid", "error.evidence_set_invalid")
 		return
 	}
 	if err != nil {

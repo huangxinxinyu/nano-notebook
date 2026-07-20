@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
@@ -110,11 +111,12 @@ func LoadCheckpointPrefix(ctx context.Context, checkpoints []Checkpoint) (Checkp
 			if err := json.Unmarshal(checkpoint.Payload, &payload); err != nil {
 				return CheckpointPrefix{}, invalidCheckpoint("invalid Final Draft payload")
 			}
-			expected, err := NewFinalDraftCheckpoint(checkpoint.DecisionNo, models.FinalDraft{Text: payload.Text})
+			draft := models.FinalDraft{Text: payload.Text, Claims: payload.Claims}
+			expected, err := NewFinalDraftCheckpoint(checkpoint.DecisionNo, draft)
 			if err != nil || !checkpointMatches(checkpoint, expected) {
 				return CheckpointPrefix{}, invalidCheckpoint("Final Draft identity or payload mismatch")
 			}
-			prefix.Final = &models.FinalDraft{Text: payload.Text}
+			prefix.Final = &draft
 			prefix.AcceptedDecisions++
 			nextDecision++
 			finalAccepted = true
@@ -142,13 +144,25 @@ func hasIncompleteProposal(prefix CheckpointPrefix) bool {
 }
 
 func checkpointMatches(checkpoint Checkpoint, expected PendingCheckpoint) bool {
-	if checkpoint.IdentityKey != expected.IdentityKey || checkpoint.Kind != expected.Kind || checkpoint.DecisionNo != expected.DecisionNo || checkpoint.ActionID != expected.ActionID || checkpoint.PayloadVersion != expected.PayloadVersion || checkpoint.PayloadSHA256 != expected.PayloadSHA256 || !bytes.Equal(checkpoint.Payload, expected.Payload) {
+	if checkpoint.IdentityKey != expected.IdentityKey || checkpoint.Kind != expected.Kind || checkpoint.DecisionNo != expected.DecisionNo || checkpoint.ActionID != expected.ActionID || checkpoint.PayloadVersion != expected.PayloadVersion || checkpoint.PayloadSHA256 != expected.PayloadSHA256 || !sameJSON(checkpoint.Payload, expected.Payload) {
 		return false
 	}
 	if checkpoint.ActionIndex == nil || expected.ActionIndex == nil {
 		return checkpoint.ActionIndex == nil && expected.ActionIndex == nil
 	}
 	return *checkpoint.ActionIndex == *expected.ActionIndex
+}
+
+func sameJSON(left, right []byte) bool {
+	if bytes.Equal(left, right) {
+		return true
+	}
+	var leftValue, rightValue any
+	leftDecoder := json.NewDecoder(bytes.NewReader(left))
+	leftDecoder.UseNumber()
+	rightDecoder := json.NewDecoder(bytes.NewReader(right))
+	rightDecoder.UseNumber()
+	return leftDecoder.Decode(&leftValue) == nil && rightDecoder.Decode(&rightValue) == nil && reflect.DeepEqual(leftValue, rightValue)
 }
 
 func invalidCheckpoint(format string, args ...any) error {

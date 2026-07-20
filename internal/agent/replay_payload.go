@@ -135,7 +135,8 @@ type modelDecisionReplay struct {
 }
 
 type replayFinalDraft struct {
-	Text string `json:"text"`
+	Text   string              `json:"text"`
+	Claims []models.DraftClaim `json:"claims,omitempty"`
 }
 
 type replayActionProposal struct {
@@ -152,7 +153,15 @@ func EncodeModelDecisionReplay(decision models.ModelDecision) (replay.PlainPaylo
 	document := modelDecisionReplay{replayPayloadHeader: replayHeader(replay.ClassModelDecision)}
 	if decision.Final != nil {
 		budget.addString(decision.Final.Text)
-		document.Final = &replayFinalDraft{Text: decision.Final.Text}
+		for _, claim := range decision.Final.Claims {
+			budget.addString(claim.Text)
+			for _, citation := range claim.Citations {
+				budget.addString(citation.SourceID)
+				budget.addString(citation.EvidenceRevisionID)
+				budget.addString(citation.UnitID)
+			}
+		}
+		document.Final = &replayFinalDraft{Text: decision.Final.Text, Claims: decision.Final.Claims}
 	} else {
 		document.Actions = make([]replayActionProposal, 0, len(decision.Proposal.Actions))
 		for index, action := range decision.Proposal.Actions {

@@ -58,6 +58,9 @@ func (r *PostgresRuntime) BuildDecisionRequest(
 		}
 	}
 	request.ActionDefinitions = cloneActionDefinitions(definitions)
+	if execution.PromptVersion == GroundedPromptVersion {
+		request.FinalDraftFormat = models.FinalDraftFormatGroundedV1
+	}
 	return request, nil
 }
 

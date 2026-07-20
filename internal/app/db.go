@@ -561,6 +561,75 @@ create table if not exists agent_run_evidence_set (
 create index if not exists agent_run_evidence_set_scope_idx
 	on agent_run_evidence_set(notebook_id, source_id, evidence_revision_id, index_version_id);
 
+create table if not exists agent_run_grounding_plans (
+	run_id text primary key references agent_runs(id) on delete cascade,
+	draft_sha256 text not null check (draft_sha256 ~ '^[0-9a-f]{64}$'),
+	outcome text not null check (outcome in ('source_less','supported','insufficient_evidence','zero_support')),
+	research_complete boolean not null,
+	retrieval_degraded boolean not null,
+	verifier_model text not null,
+	verifier_prompt_version text not null,
+	created_at timestamptz not null default now(),
+	constraint agent_run_grounding_plans_shape_check check (
+		(outcome='source_less' and research_complete=false and retrieval_degraded=false and verifier_model='' and verifier_prompt_version='')
+		or (outcome='supported' and verifier_model<>'' and verifier_prompt_version<>'')
+		or (outcome='insufficient_evidence' and verifier_model<>'' and verifier_prompt_version<>'')
+		or (outcome='zero_support' and research_complete=true and retrieval_degraded=false and verifier_model='' and verifier_prompt_version='')
+	)
+);
+
+alter table agent_run_grounding_plans drop constraint if exists agent_run_grounding_plans_outcome_check;
+alter table agent_run_grounding_plans add constraint agent_run_grounding_plans_outcome_check
+	check (outcome in ('source_less','supported','insufficient_evidence','zero_support'));
+alter table agent_run_grounding_plans drop constraint if exists agent_run_grounding_plans_shape_check;
+alter table agent_run_grounding_plans add constraint agent_run_grounding_plans_shape_check check (
+	(outcome='source_less' and research_complete=false and retrieval_degraded=false and verifier_model='' and verifier_prompt_version='')
+	or (outcome='supported' and verifier_model<>'' and verifier_prompt_version<>'')
+	or (outcome='insufficient_evidence' and verifier_model<>'' and verifier_prompt_version<>'')
+	or (outcome='zero_support' and research_complete=true and retrieval_degraded=false and verifier_model='' and verifier_prompt_version='')
+);
+
+create table if not exists agent_claim_support_records (
+	run_id text not null references agent_run_grounding_plans(run_id) on delete cascade,
+	claim_ordinal integer not null check (claim_ordinal between 0 and 63),
+	claim_text text not null check (char_length(claim_text) between 1 and 4000),
+	verdict text not null check (verdict='supported'),
+	primary key (run_id, claim_ordinal)
+);
+
+create table if not exists agent_draft_citations (
+	run_id text not null,
+	claim_ordinal integer not null,
+	citation_ordinal integer not null check (citation_ordinal between 0 and 7),
+	citation_id text not null unique check (char_length(citation_id) between 1 and 80),
+	notebook_id text not null,
+	source_id text not null,
+	evidence_revision_id text not null,
+	unit_id text not null,
+	start_rune integer not null check (start_rune >= 0),
+	end_rune integer not null check (end_rune > start_rune),
+	primary key (run_id, claim_ordinal, citation_ordinal),
+	foreign key (run_id, claim_ordinal) references agent_claim_support_records(run_id, claim_ordinal) on delete cascade
+);
+
+create table if not exists chat_citations (
+	message_id text not null references chat_messages(id) on delete cascade,
+	citation_id text not null,
+	run_id text not null references agent_runs(id) on delete cascade,
+	claim_ordinal integer not null,
+	citation_ordinal integer not null,
+	claim_text text not null,
+	notebook_id text not null,
+	source_id text not null,
+	evidence_revision_id text not null,
+	unit_id text not null,
+	start_rune integer not null,
+	end_rune integer not null,
+	created_at timestamptz not null default now(),
+	primary key (message_id, citation_id),
+	unique (run_id, claim_ordinal, citation_ordinal)
+);
+
 create unique index if not exists agent_runs_one_active_per_user_idx
 	on agent_runs(user_id)
 	where status in ('queued', 'running');
@@ -1040,6 +1109,10 @@ alter table chat_chats enable row level security;
 alter table chat_messages enable row level security;
 alter table agent_runs enable row level security;
 alter table agent_run_evidence_set enable row level security;
+alter table agent_run_grounding_plans enable row level security;
+alter table agent_claim_support_records enable row level security;
+alter table agent_draft_citations enable row level security;
+alter table chat_citations enable row level security;
 alter table agent_run_checkpoints enable row level security;
 alter table agent_traces enable row level security;
 alter table agent_trace_records enable row level security;
@@ -1074,6 +1147,7 @@ grant select, insert, update, delete on
 	chat_messages,
 	agent_runs,
 	agent_run_evidence_set,
+	chat_citations,
 	agent_jobs
 to nano_app;
 grant select on retrieval_source_index_builds to nano_app;
@@ -1088,7 +1162,17 @@ grant select on
 	chat_chats,
 	chat_messages,
 	agent_runs,
-	agent_run_evidence_set
+	agent_run_evidence_set,
+	agent_run_grounding_plans,
+	agent_claim_support_records,
+	agent_draft_citations,
+	chat_citations
+to nano_worker;
+grant select, insert, update, delete on
+	agent_run_grounding_plans,
+	agent_claim_support_records,
+	agent_draft_citations,
+	chat_citations
 to nano_worker;
 grant select, update on source_sources to nano_worker;
 grant select, update on source_upload_intents to nano_worker;
@@ -1425,6 +1509,28 @@ create policy agent_run_evidence_set_app on agent_run_evidence_set
 drop policy if exists agent_run_evidence_set_worker on agent_run_evidence_set;
 create policy agent_run_evidence_set_worker on agent_run_evidence_set
 	for select to nano_worker using (true);
+
+drop policy if exists agent_run_grounding_plans_worker on agent_run_grounding_plans;
+create policy agent_run_grounding_plans_worker on agent_run_grounding_plans
+	for all to nano_worker using (true) with check (true);
+drop policy if exists agent_claim_support_records_worker on agent_claim_support_records;
+create policy agent_claim_support_records_worker on agent_claim_support_records
+	for all to nano_worker using (true) with check (true);
+drop policy if exists agent_draft_citations_worker on agent_draft_citations;
+create policy agent_draft_citations_worker on agent_draft_citations
+	for all to nano_worker using (true) with check (true);
+drop policy if exists chat_citations_worker on chat_citations;
+create policy chat_citations_worker on chat_citations
+	for all to nano_worker using (true) with check (true);
+drop policy if exists chat_citations_app_read on chat_citations;
+create policy chat_citations_app_read on chat_citations
+	for select to nano_app using (
+		exists (
+			select 1 from chat_messages m join chat_chats c on c.id=m.chat_id
+			where m.id=chat_citations.message_id
+			  and c.creator_user_id=nullif(current_setting('app.principal_id', true), '')
+		)
+	);
 
 drop policy if exists agent_run_checkpoints_worker_read on agent_run_checkpoints;
 create policy agent_run_checkpoints_worker_read on agent_run_checkpoints

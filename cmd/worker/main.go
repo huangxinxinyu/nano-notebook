@@ -65,6 +65,8 @@ type workerConfig struct {
 	SourceVisionModel         string
 	SourceTranscriptionModel  string
 	SourceVisionPromptVersion string
+	AgentVerifierModel        string
+	AgentVerifierPrompt       string
 	SourceProcessingMaxBytes  int64
 	SourceProcessingMaxRunes  int
 	ReplayKeyID               string
@@ -194,8 +196,12 @@ func main() {
 		slog.Error("Agent Trace purge Sender invalid", "error", err)
 		os.Exit(1)
 	}
+	grounder := agent.NewGroundingService(db.Pool(), modelClient, modelClient, agent.GroundingConfig{
+		VerifierModel: config.AgentVerifierModel, VerifierPromptVersion: config.AgentVerifierPrompt,
+	})
 	runtime := agent.NewPostgresRuntime(db.Pool(), agent.BareSystemPrompt, nil,
-		agent.WithTraceSink(traceExporter), agent.WithBestEffortTraceExporter(traceBridge), agent.WithReplayStager(replayStager))
+		agent.WithTraceSink(traceExporter), agent.WithBestEffortTraceExporter(traceBridge),
+		agent.WithReplayStager(replayStager), agent.WithGroundingService(grounder))
 	evidenceSearch := agent.NewEvidenceSearchService(db.Pool(), qdrant, modelClient)
 	registry, err := agent.NewActionRegistry(
 		agent.NewCalculateAction(), agent.NewCurrentTimeAction(nil), agent.NewSearchEvidenceAction(evidenceSearch),
@@ -444,6 +450,8 @@ func loadWorkerConfig() (workerConfig, error) {
 		SourceVisionModel:         env("NANO_SOURCE_VISION_MODEL", "gemini/gemini-2.5-flash"),
 		SourceTranscriptionModel:  env("NANO_SOURCE_TRANSCRIPTION_MODEL", "openai/whisper-1"),
 		SourceVisionPromptVersion: env("NANO_SOURCE_VISION_PROMPT_VERSION", "vision-normalize-v1"),
+		AgentVerifierModel:        env("NANO_AGENT_VERIFIER_MODEL", "aliyun/qwen-flash"),
+		AgentVerifierPrompt:       env("NANO_AGENT_VERIFIER_PROMPT_VERSION", "claim-support-v1"),
 		SourceProcessingMaxBytes:  int64(sourceProcessingMaxBytes), SourceProcessingMaxRunes: sourceProcessingMaxRunes,
 		ReplayKeyID: env("NANO_REPLAY_KEY_ID", "nano-local-replay-key-v1"), ReplayKEK: replayKEK,
 	}
@@ -462,6 +470,7 @@ func loadWorkerConfig() (workerConfig, error) {
 		config.SourceProcessingPoll <= 0 || strings.TrimSpace(config.SourceExtractionConfigID) == "" ||
 		strings.TrimSpace(config.SourceVisionModel) == "" || strings.TrimSpace(config.SourceTranscriptionModel) == "" ||
 		strings.TrimSpace(config.SourceVisionPromptVersion) == "" ||
+		strings.TrimSpace(config.AgentVerifierModel) == "" || strings.TrimSpace(config.AgentVerifierPrompt) == "" ||
 		config.SourceProcessingMaxBytes <= 0 || config.SourceProcessingMaxBytes > 100*1024*1024 || config.SourceProcessingMaxRunes <= 0 ||
 		strings.TrimSpace(config.ReplayKeyID) == "" || len(config.ReplayKEK) != 32 {
 		return workerConfig{}, errors.New("worker configuration is incomplete or inconsistent")

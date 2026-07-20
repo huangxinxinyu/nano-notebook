@@ -62,6 +62,24 @@ func TestBifrostClientReturnsANonStreamingFinalDecision(t *testing.T) {
 	}
 }
 
+func TestBifrostParsesGroundedFinalDraftAsTypedClaims(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"text\":\"The launch is 20 July.\",\"claims\":[{\"text\":\"The launch is 20 July.\",\"citations\":[{\"source_id\":\"src_a\",\"evidence_revision_id\":\"evr_a\",\"unit_id\":\"unit_a\",\"start_rune\":0,\"end_rune\":27}]}]}"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+	outcome, err := NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
+		Model: "composer", FinalDraftFormat: FinalDraftFormatGroundedV1,
+		Messages: []ModelMessage{{Role: RoleSystem, Content: "Return grounded JSON."}, {Role: RoleUser, Content: "When?"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Final == nil || len(outcome.Final.Claims) != 1 || outcome.Final.Claims[0].Citations[0].UnitID != "unit_a" {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+}
+
 func TestBifrostClientEncodesDefinitionsAndDecodesOrderedActionProposals(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
