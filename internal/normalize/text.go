@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"unicode/utf8"
 )
@@ -31,13 +32,23 @@ type Artifact struct {
 }
 
 type Block struct {
-	ID           string `json:"id"`
-	Ordinal      int    `json:"ordinal"`
-	Kind         string `json:"kind"`
-	Text         string `json:"text"`
-	StartRune    int    `json:"start_rune"`
-	EndRune      int    `json:"end_rune"`
-	HeadingLevel int    `json:"heading_level,omitempty"`
+	ID           string            `json:"id"`
+	Ordinal      int               `json:"ordinal"`
+	Kind         string            `json:"kind"`
+	Text         string            `json:"text"`
+	StartRune    int               `json:"start_rune"`
+	EndRune      int               `json:"end_rune"`
+	HeadingLevel int               `json:"heading_level,omitempty"`
+	Coordinate   *SourceCoordinate `json:"coordinate,omitempty"`
+}
+
+type SourceCoordinate struct {
+	Kind   string  `json:"kind"`
+	Page   int     `json:"page,omitempty"`
+	X      float64 `json:"x,omitempty"`
+	Y      float64 `json:"y,omitempty"`
+	Width  float64 `json:"width,omitempty"`
+	Height float64 `json:"height,omitempty"`
 }
 
 type Coverage struct {
@@ -100,7 +111,7 @@ func canonicalArtifact(artifact Artifact) ([]byte, error) {
 
 func Validate(artifact Artifact) error {
 	if artifact.SchemaVersion != "nano.normalized-source.v1" || strings.TrimSpace(artifact.SourceID) == "" ||
-		strings.TrimSpace(artifact.ExtractionConfigID) == "" || (artifact.Format != "txt" && artifact.Format != "markdown") ||
+		strings.TrimSpace(artifact.ExtractionConfigID) == "" || (artifact.Format != "txt" && artifact.Format != "markdown" && artifact.Format != "pdf") ||
 		!utf8.ValidString(artifact.Text) || len(artifact.Blocks) == 0 {
 		return errors.New("invalid normalized artifact identity or primary content")
 	}
@@ -117,7 +128,7 @@ func Validate(artifact Artifact) error {
 			!utf8.ValidString(block.Text) || block.Text != string(textRunes[block.StartRune:block.EndRune]) ||
 			!validBlockKind(block.Kind) ||
 			(block.Kind == "heading" && (block.HeadingLevel < 1 || block.HeadingLevel > 6)) ||
-			(block.Kind != "heading" && block.HeadingLevel != 0) {
+			(block.Kind != "heading" && block.HeadingLevel != 0) || !validCoordinate(artifact.Format, block.Coordinate) {
 			return errors.New("invalid normalized artifact block")
 		}
 		previousEnd = block.EndRune
@@ -139,6 +150,15 @@ func Validate(artifact Artifact) error {
 		return errors.New("normalized artifact checksum mismatch")
 	}
 	return nil
+}
+
+func validCoordinate(format string, coordinate *SourceCoordinate) bool {
+	if format != "pdf" {
+		return coordinate == nil
+	}
+	return coordinate != nil && coordinate.Kind == "pdf_region" && coordinate.Page > 0 && coordinate.Width > 0 && coordinate.Height > 0 &&
+		!math.IsNaN(coordinate.X) && !math.IsInf(coordinate.X, 0) && !math.IsNaN(coordinate.Y) && !math.IsInf(coordinate.Y, 0) &&
+		!math.IsNaN(coordinate.Width) && !math.IsInf(coordinate.Width, 0) && !math.IsNaN(coordinate.Height) && !math.IsInf(coordinate.Height, 0)
 }
 
 func validBlockKind(kind string) bool {
