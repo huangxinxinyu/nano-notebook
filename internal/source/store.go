@@ -154,8 +154,26 @@ type Source struct {
 	ContentSHA256     string    `json:"content_sha256"`
 	OriginalObjectKey string    `json:"-"`
 	State             State     `json:"state"`
+	FailureCode       string    `json:"-"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+func SafeFailureReason(internalCode string) string {
+	switch strings.TrimSpace(internalCode) {
+	case "processing_budget_exceeded":
+		return "limits_exceeded"
+	case "source_object_missing", "source_integrity_mismatch":
+		return "source_unavailable"
+	case "extraction_invalid":
+		return "content_unreadable"
+	case "projection_invalid":
+		return "indexing_failed"
+	case "retry_exhausted":
+		return "processing_interrupted"
+	default:
+		return "processing_failed"
+	}
 }
 
 type CreateUploadedCommand struct {
@@ -611,11 +629,13 @@ func (s *Store) sourceByID(ctx context.Context, id string) (Source, error) {
 	var item Source
 	err := s.db.QueryRow(ctx, `
 		select id, notebook_id, title, format, media_type, byte_size,
-			content_sha256, original_object_key, state, created_at, updated_at
+			content_sha256, original_object_key, state,
+			coalesce((select j.last_error_code from source_processing_jobs j where j.source_id=source_sources.id order by j.created_at desc, j.id desc limit 1),''),
+			created_at, updated_at
 		from source_sources where id = $1`, id,
 	).Scan(
 		&item.ID, &item.NotebookID, &item.Title, &item.Format, &item.MediaType,
-		&item.ByteSize, &item.ContentSHA256, &item.OriginalObjectKey, &item.State,
+		&item.ByteSize, &item.ContentSHA256, &item.OriginalObjectKey, &item.State, &item.FailureCode,
 		&item.CreatedAt, &item.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -784,11 +804,14 @@ func (s *Store) ListForNotebook(ctx context.Context, notebookID string) ([]Sourc
 		return nil, err
 	}
 	rows, err := s.db.Query(ctx, `
-		select id, notebook_id, title, format, media_type, byte_size,
-			content_sha256, original_object_key, state, created_at, updated_at
-		from source_sources
-		where notebook_id = $1
-		order by created_at, id`, notebookID)
+		select s.id, s.notebook_id, s.title, s.format, s.media_type, s.byte_size,
+			s.content_sha256, s.original_object_key, s.state, coalesce(j.last_error_code,''), s.created_at, s.updated_at
+		from source_sources s
+		left join lateral (
+			select last_error_code from source_processing_jobs where source_id=s.id order by created_at desc, id desc limit 1
+		) j on true
+		where s.notebook_id = $1
+		order by s.created_at, s.id`, notebookID)
 	if err != nil {
 		return nil, err
 	}
@@ -798,7 +821,7 @@ func (s *Store) ListForNotebook(ctx context.Context, notebookID string) ([]Sourc
 		var item Source
 		if err := rows.Scan(
 			&item.ID, &item.NotebookID, &item.Title, &item.Format, &item.MediaType,
-			&item.ByteSize, &item.ContentSHA256, &item.OriginalObjectKey, &item.State,
+			&item.ByteSize, &item.ContentSHA256, &item.OriginalObjectKey, &item.State, &item.FailureCode,
 			&item.CreatedAt, &item.UpdatedAt,
 		); err != nil {
 			return nil, err

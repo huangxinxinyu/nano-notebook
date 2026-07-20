@@ -412,9 +412,13 @@ func TestSourceOwnerAPIListsRenamesRetriesAndRemoves(t *testing.T) {
 	}
 	if _, err := api.db.Pool().Exec(context.Background(), `
 		update source_sources set state='failed' where id='src_owner_api';
-		update source_processing_jobs set status='failed', last_error_code='invalid_text' where id='srcjob_owner_api'
+		update source_processing_jobs set status='failed', last_error_code='extraction_invalid' where id='srcjob_owner_api'
 	`); err != nil {
 		t.Fatal(err)
+	}
+	failed := api.getWithCookie(t, "/api/v1/notebooks/"+notebookID+"/sources", owner)
+	if failed.Code != http.StatusOK || !strings.Contains(failed.Body.String(), `"failure_reason":"content_unreadable"`) || strings.Contains(failed.Body.String(), "extraction_invalid") {
+		t.Fatalf("failed Source list status=%d body=%s", failed.Code, failed.Body.String())
 	}
 	retried := sourceAPIRequest(t, api, http.MethodPost, "/api/v1/sources/src_owner_api/retry", map[string]any{}, owner, csrf)
 	if retried.Code != http.StatusAccepted {

@@ -245,7 +245,7 @@ test("renames, retries, and confirms permanent Source removal", async () => {
     if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
     if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [
       { id: "src_ready", notebook_id: "nb_test", title: "old-name.pdf", format: "pdf", byte_size: 2048, state: "ready" },
-      { id: "src_failed", notebook_id: "nb_test", title: "broken.docx", format: "docx", byte_size: 4096, state: "failed" }
+      { id: "src_failed", notebook_id: "nb_test", title: "broken.docx", format: "docx", byte_size: 4096, state: "failed", failure_reason: "content_unreadable" }
     ] });
     if (url.endsWith("/api/v1/sources/src_ready") && method === "PATCH") {
       actions.push(`rename:${(JSON.parse(String(init?.body)) as { title: string }).title}`);
@@ -268,6 +268,7 @@ test("renames, retries, and confirms permanent Source removal", async () => {
   const user = userEvent.setup();
   const sources = await screen.findByRole("region", { name: "Sources" });
   await within(sources).findByText("old-name.pdf");
+  expect(within(sources).getByText("The file content could not be read.")).toBeInTheDocument();
   await user.click(within(sources).getByRole("button", { name: "Retry broken.docx" }));
   await user.click(within(sources).getByRole("button", { name: "Rename old-name.pdf" }));
   const renameDialog = await screen.findByRole("dialog", { name: "Rename source" });

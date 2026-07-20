@@ -1495,6 +1495,14 @@ h2 {
 .source-state--ready { color: #28704d; }
 .source-state--failed { color: var(--destructive); }
 
+.source-failure-reason {
+  grid-column: 2 / -1;
+  margin: -4px 0 3px;
+  color: var(--destructive);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .source-list-item .nn-button {
   width: 28px;
   min-width: 28px;

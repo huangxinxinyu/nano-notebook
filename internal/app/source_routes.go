@@ -17,14 +17,15 @@ import (
 )
 
 type memberSource struct {
-	ID         string        `json:"id"`
-	NotebookID string        `json:"notebook_id"`
-	Title      string        `json:"title"`
-	Format     source.Format `json:"format"`
-	ByteSize   int64         `json:"byte_size"`
-	State      string        `json:"state"`
-	CreatedAt  time.Time     `json:"created_at"`
-	UpdatedAt  time.Time     `json:"updated_at"`
+	ID            string        `json:"id"`
+	NotebookID    string        `json:"notebook_id"`
+	Title         string        `json:"title"`
+	Format        source.Format `json:"format"`
+	ByteSize      int64         `json:"byte_size"`
+	State         string        `json:"state"`
+	FailureReason string        `json:"failure_reason,omitempty"`
+	CreatedAt     time.Time     `json:"created_at"`
+	UpdatedAt     time.Time     `json:"updated_at"`
 }
 
 func sourceForMember(item source.Source) memberSource {
@@ -34,10 +35,14 @@ func sourceForMember(item source.Source) memberSource {
 	} else if item.State == source.StateFailed {
 		state = "failed"
 	}
-	return memberSource{
+	result := memberSource{
 		ID: item.ID, NotebookID: item.NotebookID, Title: item.Title, Format: item.Format,
 		ByteSize: item.ByteSize, State: state, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
 	}
+	if state == "failed" {
+		result.FailureReason = source.SafeFailureReason(item.FailureCode)
+	}
+	return result
 }
 
 func (s *Server) notebookSources(w http.ResponseWriter, r *http.Request, userID, notebookID string) {

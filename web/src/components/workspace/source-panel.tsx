@@ -61,6 +61,7 @@ export type SourcePanelCopy = {
   removeConfirmLabel: string;
   cancelLabel: string;
   coverageWarningLabel: string;
+  failureReasonLabels: Record<NonNullable<MemberSource["failure_reason"]>, string>;
 };
 
 export function SourcePanelContent({ copy, notebookID, controller }: {
@@ -182,6 +183,7 @@ export function SourcePanelContent({ copy, notebookID, controller }: {
               {source.state === "failed" ? <IconButton icon="refresh" label={`${copy.retryLabel} ${source.title}`} onClick={() => void sourceAction(source.id, "retry")} /> : null}
               <IconButton icon="edit" label={`${copy.renameLabel} ${source.title}`} onClick={() => { setEditingSource(source); setEditTitle(source.title); }} />
               <IconButton icon="delete" label={`${copy.deleteLabel} ${source.title}`} onClick={() => setRemovingSource(source)} />
+              {source.state === "failed" && source.failure_reason ? <p className="source-failure-reason">{copy.failureReasonLabels[source.failure_reason]}</p> : null}
             </article>
           ))}
         </div>
