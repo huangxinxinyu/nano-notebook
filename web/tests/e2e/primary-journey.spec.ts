@@ -31,7 +31,7 @@ test("registers, creates, finds, opens, signs out, and signs back in", async ({ 
   await expectWorkspaceSourcesVisible(page, testInfo, {
     tablist: "Notebook panels",
     sources: "Sources",
-    sourceBody: "Sources are not available in Sprint 1."
+    sourceBody: "Add files, a web page, or a YouTube URL."
   });
   await expect(async () => {
     const overflows = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth);
@@ -118,7 +118,7 @@ test("Simplified Chinese journey exposes localized product states and a11y names
   await expectWorkspaceSourcesVisible(page, testInfo, {
     tablist: "笔记本面板",
     sources: "资料",
-    sourceBody: "Sprint 1 尚不支持资料导入"
+    sourceBody: "添加文件、网页或 YouTube 链接"
   });
 
   await page.goto("/notebooks/nb_missing");
@@ -144,7 +144,7 @@ test("desktop workspace shows sources, chat, and Studio as simultaneous panels",
   await expect(sourcesPanel).toBeVisible();
   await expect(chatPanel).toBeVisible();
   await expect(studioPanel).toBeVisible();
-  await expect(sourcesPanel).toContainText("Sources are not available in Sprint 1.");
+  await expect(sourcesPanel).toContainText("Add files, a web page, or a YouTube URL.");
   await expect(chatPanel).toContainText("Ask from model knowledge now.");
   await expect(chatPanel).toContainText("Answers use model knowledge and are not based on Notebook Sources.");
   await expect(chatPanel.getByRole("textbox", { name: "Message Nano Notebook" })).toBeEnabled();
@@ -177,7 +177,7 @@ test("compact workspace keeps one-panel tab navigation without horizontal overfl
   await expect(page.getByRole("tab", { name: "Studio" })).toBeVisible();
 
   const compactWorkspace = page.locator(".workspace-compact-tabs");
-  const sourcesPanel = compactWorkspace.locator('[role="tabpanel"]').filter({ hasText: "Sources are not available in Sprint 1." });
+  const sourcesPanel = compactWorkspace.locator('[role="tabpanel"]').filter({ hasText: "Add files, a web page, or a YouTube URL." });
   const chatPanel = compactWorkspace.locator('[role="tabpanel"]').filter({ hasText: "Ask from model knowledge now." });
   const studioPanel = compactWorkspace.locator('[role="tabpanel"]').filter({ hasText: "Studio output will be saved here" });
   await expect(sourcesPanel).toBeVisible();
