@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
 	"github.com/huangxinxinyu/nano-notebook/internal/fetcher"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/jackc/pgx/v5"
@@ -251,6 +252,25 @@ func (s *Server) sourceByID(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(remainder, "/")
 	if parts[0] == "" || len(parts) > 2 || (len(parts) == 2 && parts[1] != "retry") {
 		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
+		return
+	}
+	if r.Method == http.MethodGet && len(parts) == 1 {
+		var view evidence.SourceView
+		err := s.db.WithRequestPrincipal(r.Context(), user.ID, func(tx pgx.Tx) error {
+			var readErr error
+			view, readErr = evidence.NewReader(tx).SourceView(r.Context(), parts[0])
+			return readErr
+		})
+		switch {
+		case err == nil:
+			writeJSON(w, http.StatusOK, map[string]any{"source": view})
+		case errors.Is(err, evidence.ErrSourceNotFound):
+			writeError(w, r, http.StatusNotFound, "not_found", "error.source_not_found")
+		case errors.Is(err, evidence.ErrSourceNotReady):
+			writeError(w, r, http.StatusConflict, "source_not_ready", "error.source_not_ready")
+		default:
+			writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		}
 		return
 	}
 	if !validCSRF(r) {
