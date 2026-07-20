@@ -156,6 +156,21 @@ func (s *VersionStore) Promote(ctx context.Context, versionID, evalRunID string)
 	if !passed {
 		return IndexVersion{}, ErrEvalGate
 	}
+	var buildsComplete bool
+	if err := tx.QueryRow(ctx, `
+		select not exists (
+			select 1
+			from source_evidence_revisions r
+			join source_sources s on s.id=r.source_id and s.state='ready'
+			left join retrieval_source_index_builds b on b.revision_id=r.id and b.index_version_id=$1 and b.status='verified'
+			where r.status='active' and b.revision_id is null
+		)
+	`, versionID).Scan(&buildsComplete); err != nil {
+		return IndexVersion{}, err
+	}
+	if !buildsComplete {
+		return IndexVersion{}, ErrEvalGate
+	}
 	if version.Status == VersionActive && version.PromotedByEvalRunID == evalRunID {
 		if err := tx.Commit(ctx); err != nil {
 			return IndexVersion{}, err

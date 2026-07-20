@@ -199,27 +199,9 @@ func (p *Projection) loadUnits(ctx context.Context, command sourceprocessing.Pro
 }
 
 func (p *Projection) embed(ctx context.Context, version retrieval.IndexVersion, texts []string) ([][]float32, error) {
-	vectors := make([][]float32, 0, len(texts))
-	for start := 0; start < len(texts); start += 64 {
-		end := start + 64
-		if end > len(texts) {
-			end = len(texts)
-		}
-		outcome, err := p.embedder.Embed(ctx, models.EmbeddingRequest{
-			Model: version.Config.EmbeddingModel, Inputs: texts[start:end], Dimensions: version.Config.EmbeddingDimensions,
-		})
-		if err != nil {
-			return nil, err
-		}
-		if len(outcome.Vectors) != end-start {
-			return nil, sourceprocessing.ErrProjectionInvalid
-		}
-		for _, vector := range outcome.Vectors {
-			if len(vector) != version.Config.EmbeddingDimensions {
-				return nil, sourceprocessing.ErrProjectionInvalid
-			}
-			vectors = append(vectors, vector)
-		}
+	vectors, err := embedTexts(ctx, p.embedder, version, texts)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", sourceprocessing.ErrProjectionInvalid, err)
 	}
 	return vectors, nil
 }

@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
@@ -48,6 +49,29 @@ func TestRetrievalIndexPromotionRequiresPassingOfflineEval(t *testing.T) {
 	if err != nil || active.Status != retrieval.VersionActive || active.PromotedByEvalRunID != "eval_passed" {
 		t.Fatalf("Promote = %+v, err=%v", active, err)
 	}
+	owner := api.register(t, "candidate-build-gate@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "candidate-build-gate")
+	ownerID := sourceTestUserID(t, api, "candidate-build-gate@example.com")
+	seedSourceProcessingJob(t, api, ownerID, notebookID, "src_candidate_gate", "srcjob_candidate_gate", "9")
+	if _, err := api.db.Pool().Exec(context.Background(), `update source_sources set state='ready' where id='src_candidate_gate'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into source_evidence_revisions(
+			id,source_id,notebook_id,revision_no,extraction_config_id,artifact_schema_version,artifact_object_key,artifact_sha256,status,activated_at
+		) values('evr_candidate_gate','src_candidate_gate',$1,1,'extract-v1','nano.normalized-source.v1','candidate/gate.json',$2,'active',now())
+	`, notebookID, strings.Repeat("d", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `insert into source_evidence_coverage(revision_id,status,total_runes) values('evr_candidate_gate','complete',8)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into source_evidence_units(id,revision_id,source_id,notebook_id,ordinal,kind,text_content,start_rune,end_rune)
+		values('unit_candidate_gate','evr_candidate_gate','src_candidate_gate',$1,0,'paragraph','Evidence',0,8)
+	`, notebookID); err != nil {
+		t.Fatal(err)
+	}
 
 	secondConfig := config
 	secondConfig.Chunk.MaxRunes = 960
@@ -59,6 +83,16 @@ func TestRetrievalIndexPromotionRequiresPassingOfflineEval(t *testing.T) {
 		ID: "eval_second", IndexVersionID: second.ID, FixtureSuiteSHA256: sixtyFour("c"),
 		Status: retrieval.EvalPassed, MetricsJSON: []byte(`{"citation_precision":1.0}`),
 	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Promote(context.Background(), second.ID, "eval_second"); !errors.Is(err, retrieval.ErrEvalGate) {
+		t.Fatalf("promotion without complete candidate builds=%v, want Eval gate", err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into retrieval_source_index_builds(
+			revision_id,index_version_id,source_id,notebook_id,expected_points,projection_sha256,status,verified_at
+		) values('evr_candidate_gate',$1,'src_candidate_gate',$2,1,$3,'verified',now())
+	`, second.ID, notebookID, strings.Repeat("e", 64)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.Promote(context.Background(), second.ID, "eval_second"); err != nil {

@@ -110,6 +110,81 @@ func TestSourceProjectionBuildsAndVerifiesRealQdrantBeforeReady(t *testing.T) {
 	}
 }
 
+func TestCandidateReindexBuildsEveryActiveEvidenceRevisionBeforePromotion(t *testing.T) {
+	qdrantURL := os.Getenv("NANO_TEST_QDRANT_URL")
+	if qdrantURL == "" {
+		t.Skip("NANO_TEST_QDRANT_URL is required")
+	}
+	api := newTestAPI(t)
+	config := retrieval.IndexConfig{
+		Chunk: retrieval.ChunkConfig{MaxRunes: 32, OverlapRunes: 4, PreserveHeadingContext: true}, AnalyzerID: "nano-mixed-v1",
+		BM25K1: 1.2, BM25B: 0.75, BM25AverageDocumentLength: 24, EmbeddingModel: "test/embed", EmbeddingDimensions: 3,
+		DenseCandidates: 20, SparseCandidates: 20, RRFK: 60, RerankerID: "test/rerank", RerankCandidates: 10, DegradationPolicyID: "hybrid-required-v1",
+	}
+	versions := retrieval.NewVersionStore(api.db.Pool())
+	active, err := versions.CreateCandidate(context.Background(), "riv_reindex_active", config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := versions.RecordEval(context.Background(), retrieval.EvalRun{ID: "eval_reindex_active", IndexVersionID: active.ID, FixtureSuiteSHA256: sixtyFour("a"), Status: retrieval.EvalPassed, MetricsJSON: []byte(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := versions.Promote(context.Background(), active.ID, "eval_reindex_active"); err != nil {
+		t.Fatal(err)
+	}
+	owner := api.register(t, "candidate-reindex@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "candidate-reindex")
+	ownerID := sourceTestUserID(t, api, "candidate-reindex@example.com")
+	seedSourceProcessingJob(t, api, ownerID, notebookID, "src_reindex", "srcjob_reindex", "6")
+	if _, err := api.db.Pool().Exec(context.Background(), `update source_sources set state='ready' where id='src_reindex'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into source_evidence_revisions(id,source_id,notebook_id,revision_no,extraction_config_id,artifact_schema_version,artifact_object_key,artifact_sha256,status,activated_at)
+		values('evr_reindex','src_reindex',$1,1,'extract-v1','nano.normalized-source.v1','reindex/normalized.json',$2,'active',now())
+	`, notebookID, sixtyFour("b")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `insert into source_evidence_coverage(revision_id,status,total_runes) values('evr_reindex','complete',18)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into source_evidence_units(id,revision_id,source_id,notebook_id,ordinal,kind,text_content,start_rune,end_rune)
+		values('unit_reindex','evr_reindex','src_reindex',$1,0,'paragraph','Candidate evidence',0,18)
+	`, notebookID); err != nil {
+		t.Fatal(err)
+	}
+	qdrant, err := qdrantstore.New(qdrantstore.Config{BaseURL: qdrantURL, Collection: "nano_test_" + uuid.NewString(), DenseDimensions: 3, RequestTimeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = qdrant.DeleteCollection(context.Background()) })
+	if err := qdrant.EnsureCollection(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	candidateConfig := config
+	candidateConfig.Chunk.MaxRunes = 40
+	candidate, err := versions.CreateCandidate(context.Background(), "riv_reindex_candidate", candidateConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, err := sourceprojection.NewReindexer(api.db.Pool(), qdrant, deterministicEmbedder{}).ReindexVersion(context.Background(), candidate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Revisions != 1 || summary.Points != 1 {
+		t.Fatalf("summary=%+v", summary)
+	}
+	var status string
+	if err := api.db.Pool().QueryRow(context.Background(), `select status from retrieval_source_index_builds where revision_id='evr_reindex' and index_version_id=$1`, candidate.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	count, err := qdrant.Count(context.Background(), qdrantstore.Scope{NotebookID: notebookID, IndexVersionID: candidate.ID, Evidence: []qdrantstore.EvidenceRef{{SourceID: "src_reindex", RevisionID: "evr_reindex"}}})
+	if err != nil || status != "verified" || count != 1 {
+		t.Fatalf("status=%q count=%d err=%v", status, count, err)
+	}
+}
+
 type deterministicEmbedder struct{}
 
 func (deterministicEmbedder) Embed(_ context.Context, request models.EmbeddingRequest) (models.EmbeddingOutcome, error) {
