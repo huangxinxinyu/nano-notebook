@@ -2,8 +2,10 @@ package source
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -685,12 +687,70 @@ func (s *Store) Remove(ctx context.Context, id, purgeID string) (PurgeIntent, er
 	if err := s.db.QueryRow(ctx, `select nullif(current_setting('app.principal_id', true), '')`).Scan(&principalID); err != nil {
 		return PurgeIntent{}, err
 	}
+	objectKeys := []string{current.OriginalObjectKey}
+	rows, err := s.db.Query(ctx, `
+		select artifact_object_key from source_evidence_revisions where source_id=$1 order by revision_no
+	`, current.ID)
+	if err != nil {
+		return PurgeIntent{}, err
+	}
+	for rows.Next() {
+		var objectKey string
+		if err := rows.Scan(&objectKey); err != nil {
+			rows.Close()
+			return PurgeIntent{}, err
+		}
+		objectKeys = append(objectKeys, objectKey)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return PurgeIntent{}, err
+	}
+	rows.Close()
+	type projectionScope struct {
+		NotebookID     string `json:"notebook_id"`
+		SourceID       string `json:"source_id"`
+		RevisionID     string `json:"revision_id"`
+		IndexVersionID string `json:"index_version_id"`
+	}
+	projectionScopes := make([]projectionScope, 0)
+	rows, err = s.db.Query(ctx, `
+		select b.notebook_id,b.source_id,b.revision_id,b.index_version_id
+		from retrieval_source_index_builds b where b.source_id=$1
+		order by b.index_version_id,b.revision_id
+	`, current.ID)
+	if err != nil {
+		return PurgeIntent{}, err
+	}
+	for rows.Next() {
+		var scope projectionScope
+		if err := rows.Scan(&scope.NotebookID, &scope.SourceID, &scope.RevisionID, &scope.IndexVersionID); err != nil {
+			rows.Close()
+			return PurgeIntent{}, err
+		}
+		projectionScopes = append(projectionScopes, scope)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return PurgeIntent{}, err
+	}
+	rows.Close()
+	sort.Strings(objectKeys)
+	objectManifest, err := json.Marshal(objectKeys)
+	if err != nil {
+		return PurgeIntent{}, err
+	}
+	projectionManifest, err := json.Marshal(projectionScopes)
+	if err != nil {
+		return PurgeIntent{}, err
+	}
 	var purge PurgeIntent
 	err = s.db.QueryRow(ctx, `
-		insert into source_purge_jobs(id, source_id, notebook_id, created_by_user_id, original_object_key, state)
-		values ($1, $2, $3, $4, $5, 'pending')
+		insert into source_purge_jobs(
+			id, source_id, notebook_id, created_by_user_id, original_object_key, object_keys, projection_scopes, state
+		) values ($1, $2, $3, $4, $5, $6, $7, 'pending')
 		returning id, source_id, notebook_id, original_object_key, state, created_at
-	`, purgeID, current.ID, current.NotebookID, principalID, current.OriginalObjectKey).Scan(
+	`, purgeID, current.ID, current.NotebookID, principalID, current.OriginalObjectKey, objectManifest, projectionManifest).Scan(
 		&purge.ID, &purge.SourceID, &purge.NotebookID, &purge.OriginalObjectKey, &purge.State, &purge.CreatedAt,
 	)
 	if err != nil {

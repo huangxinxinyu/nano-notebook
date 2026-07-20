@@ -308,6 +308,8 @@ create table if not exists source_purge_jobs (
 	notebook_id text not null,
 	created_by_user_id text not null,
 	original_object_key text not null check (char_length(original_object_key) between 1 and 1024),
+	object_keys jsonb not null default '[]'::jsonb check (jsonb_typeof(object_keys)='array'),
+	projection_scopes jsonb not null default '[]'::jsonb check (jsonb_typeof(projection_scopes)='array'),
 	state text not null check (state in ('pending', 'running', 'succeeded', 'failed')),
 	attempt_no integer not null default 0 check (attempt_no between 0 and 10),
 	lease_token uuid,
@@ -321,6 +323,10 @@ create table if not exists source_purge_jobs (
 		or (state in ('succeeded', 'failed') and lease_token is null and lease_expires_at is null)
 	)
 );
+
+alter table source_purge_jobs add column if not exists object_keys jsonb not null default '[]'::jsonb;
+alter table source_purge_jobs add column if not exists projection_scopes jsonb not null default '[]'::jsonb;
+update source_purge_jobs set object_keys=jsonb_build_array(original_object_key) where object_keys='[]'::jsonb;
 
 alter table source_purge_jobs drop constraint if exists source_purge_jobs_notebook_id_fkey;
 alter table source_purge_jobs drop constraint if exists source_purge_jobs_created_by_user_id_fkey;
@@ -1047,6 +1053,7 @@ grant select, insert, update, delete on
 	agent_runs,
 	agent_jobs
 to nano_app;
+grant select on retrieval_source_index_builds to nano_app;
 revoke update, delete on platform_capability_grants, platform_replay_access_audit from nano_app;
 revoke insert on platform_capability_grants from nano_app;
 revoke select on platform_replay_access_audit from nano_app;
@@ -1296,6 +1303,12 @@ drop policy if exists retrieval_eval_runs_worker on retrieval_eval_runs;
 create policy retrieval_eval_runs_worker on retrieval_eval_runs for all to nano_worker using (true) with check (true);
 drop policy if exists retrieval_source_index_builds_worker on retrieval_source_index_builds;
 create policy retrieval_source_index_builds_worker on retrieval_source_index_builds for all to nano_worker using (true) with check (true);
+drop policy if exists retrieval_source_index_builds_app on retrieval_source_index_builds;
+create policy retrieval_source_index_builds_app on retrieval_source_index_builds
+	for select to nano_app using (
+		nano_has_notebook_capability(notebook_id, 'source.read')
+		or nano_has_notebook_capability(notebook_id, 'source.maintain')
+	);
 
 drop policy if exists platform_idempotency_owner on platform_idempotency_keys;
 create policy platform_idempotency_owner on platform_idempotency_keys

@@ -2,11 +2,13 @@ package sourcepurge
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
+	"github.com/huangxinxinyu/nano-notebook/internal/qdrantstore"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -15,21 +17,38 @@ type objectDeleter interface {
 	Delete(context.Context, string) error
 }
 
+type projectionPurger interface {
+	DeleteScope(context.Context, qdrantstore.Scope) error
+}
+
 type Processor struct {
 	pool          *pgxpool.Pool
 	objects       objectDeleter
+	projections   projectionPurger
 	leaseDuration time.Duration
 }
 
 type lease struct {
-	id        string
-	objectKey string
-	token     string
-	attemptNo int
+	id               string
+	objectKeys       []string
+	projectionScopes []projectionScope
+	token            string
+	attemptNo        int
+}
+
+type projectionScope struct {
+	NotebookID     string `json:"notebook_id"`
+	SourceID       string `json:"source_id"`
+	RevisionID     string `json:"revision_id"`
+	IndexVersionID string `json:"index_version_id"`
 }
 
 func NewProcessor(pool *pgxpool.Pool, objects objectDeleter, leaseDuration time.Duration) *Processor {
 	return &Processor{pool: pool, objects: objects, leaseDuration: leaseDuration}
+}
+
+func NewProcessorWithProjectionPurger(pool *pgxpool.Pool, objects objectDeleter, projections projectionPurger, leaseDuration time.Duration) *Processor {
+	return &Processor{pool: pool, objects: objects, projections: projections, leaseDuration: leaseDuration}
 }
 
 func (p *Processor) RunOnce(ctx context.Context) (bool, error) {
@@ -43,10 +62,25 @@ func (p *Processor) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil || !ok {
 		return false, err
 	}
-	err = p.objects.Delete(ctx, claimed.objectKey)
-	if err != nil && !errors.Is(err, objectstore.ErrNotFound) {
+	for _, objectKey := range claimed.objectKeys {
+		err = p.objects.Delete(ctx, objectKey)
+		if err != nil && !errors.Is(err, objectstore.ErrNotFound) {
+			_ = p.releaseFailure(ctx, claimed)
+			return true, err
+		}
+	}
+	if len(claimed.projectionScopes) > 0 && p.projections == nil {
 		_ = p.releaseFailure(ctx, claimed)
-		return true, err
+		return true, errors.New("Source projection purge is not configured")
+	}
+	for _, scope := range claimed.projectionScopes {
+		if err := p.projections.DeleteScope(ctx, qdrantstore.Scope{
+			NotebookID: scope.NotebookID, IndexVersionID: scope.IndexVersionID,
+			Evidence: []qdrantstore.EvidenceRef{{SourceID: scope.SourceID, RevisionID: scope.RevisionID}},
+		}); err != nil {
+			_ = p.releaseFailure(ctx, claimed)
+			return true, err
+		}
 	}
 	if err := p.complete(ctx, claimed); err != nil {
 		return true, err
@@ -82,8 +116,8 @@ func (p *Processor) materializeExpiredUpload(ctx context.Context) (bool, error) 
 	}
 	if _, err := tx.Exec(ctx, `
 		insert into source_purge_jobs(
-			id, source_id, notebook_id, created_by_user_id, original_object_key, state
-		) values ($1, $2, $3, $4, $5, 'pending')
+			id, source_id, notebook_id, created_by_user_id, original_object_key, object_keys, projection_scopes, state
+		) values ($1, $2, $3, $4, $5, jsonb_build_array($5::text), '[]'::jsonb, 'pending')
 	`, "srcpurge_"+uuid.NewString(), sourceID, notebookID, userID, objectKey); err != nil {
 		return false, err
 	}
@@ -127,7 +161,10 @@ func (p *Processor) claim(ctx context.Context) (lease, bool, error) {
 	if _, err := tx.Exec(ctx, `set local role nano_worker`); err != nil {
 		return lease{}, false, err
 	}
-	now := time.Now().UTC()
+	var now time.Time
+	if err := tx.QueryRow(ctx, `select clock_timestamp()`).Scan(&now); err != nil {
+		return lease{}, false, err
+	}
 	if _, err := tx.Exec(ctx, `
 		update source_purge_jobs
 		set state=case when attempt_no >= 10 then 'failed' else 'pending' end,
@@ -156,15 +193,19 @@ func (p *Processor) claim(ctx context.Context) (lease, bool, error) {
 	}
 	token := uuid.NewString()
 	var claimed lease
+	var objectManifest, projectionManifest []byte
 	err = tx.QueryRow(ctx, `
 		update source_purge_jobs
 		set state='running', attempt_no=attempt_no+1, lease_token=$2::uuid,
 			lease_expires_at=$3, updated_at=$1
 		where id=$4
-		returning id, original_object_key, lease_token::text, attempt_no
-	`, now, token, now.Add(p.leaseDuration), id).Scan(&claimed.id, &claimed.objectKey, &claimed.token, &claimed.attemptNo)
+		returning id, object_keys, projection_scopes, lease_token::text, attempt_no
+	`, now, token, now.Add(p.leaseDuration), id).Scan(&claimed.id, &objectManifest, &projectionManifest, &claimed.token, &claimed.attemptNo)
 	if err != nil {
 		return lease{}, false, err
+	}
+	if json.Unmarshal(objectManifest, &claimed.objectKeys) != nil || json.Unmarshal(projectionManifest, &claimed.projectionScopes) != nil || len(claimed.objectKeys) == 0 {
+		return lease{}, false, errors.New("invalid Source purge manifest")
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return lease{}, false, err

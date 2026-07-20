@@ -215,7 +215,7 @@ func main() {
 	purgeDone := make(chan error, 1)
 	go func() { purgeDone <- purgeSender.Run(ctx, config.PurgePollInterval) }()
 	sourcePurgeDone := make(chan error, 1)
-	sourcePurgeProcessor := sourcepurge.NewProcessor(db.Pool(), sourceObjects, config.SourcePurgeLease)
+	sourcePurgeProcessor := sourcepurge.NewProcessorWithProjectionPurger(db.Pool(), sourceObjects, qdrant, config.SourcePurgeLease)
 	go func() { sourcePurgeDone <- sourcePurgeProcessor.Run(ctx, config.SourcePurgePoll) }()
 	sourceQueue := sourcejobs.NewQueue(db.Pool(), config.SourceProcessingLease)
 	sourceProcessor := sourceprocessing.NewProcessorWithExtractor(
