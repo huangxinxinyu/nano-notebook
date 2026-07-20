@@ -24,6 +24,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/telemetry"
 	"github.com/huangxinxinyu/nano-notebook/internal/replay"
+	"github.com/huangxinxinyu/nano-notebook/internal/sourcepurge"
 	agentworker "github.com/huangxinxinyu/nano-notebook/internal/worker"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
@@ -45,6 +46,9 @@ type workerConfig struct {
 	PurgeBaseBackoff      time.Duration
 	PurgeMaxBackoff       time.Duration
 	ReplayStagingS3       objectstore.S3Config
+	SourceS3              objectstore.S3Config
+	SourcePurgeLease      time.Duration
+	SourcePurgePoll       time.Duration
 	ReplayKeyID           string
 	ReplayKEK             []byte
 }
@@ -94,6 +98,15 @@ func main() {
 	}
 	if err := stagingObjects.CheckReady(ctx); err != nil {
 		slog.Error("Replay staging object Store unavailable", "error", err)
+		os.Exit(1)
+	}
+	sourceObjects, err := objectstore.NewS3Store(config.SourceS3)
+	if err != nil {
+		slog.Error("Source object Store invalid", "error", err)
+		os.Exit(1)
+	}
+	if err := sourceObjects.CheckReady(ctx); err != nil {
+		slog.Error("Source object Store unavailable", "error", err)
 		os.Exit(1)
 	}
 	keyProvider, err := replay.NewDevelopmentKeyProvider(config.ReplayKeyID, config.ReplayKEK)
@@ -170,6 +183,9 @@ func main() {
 	}()
 	purgeDone := make(chan error, 1)
 	go func() { purgeDone <- purgeSender.Run(ctx, config.PurgePollInterval) }()
+	sourcePurgeDone := make(chan error, 1)
+	sourcePurgeProcessor := sourcepurge.NewProcessor(db.Pool(), sourceObjects, config.SourcePurgeLease)
+	go func() { sourcePurgeDone <- sourcePurgeProcessor.Run(ctx, config.SourcePurgePoll) }()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", func(w http.ResponseWriter, r *http.Request) {
@@ -219,6 +235,16 @@ func main() {
 		}
 	case <-shutdownCtx.Done():
 		slog.Error("Agent Trace purge Sender did not stop before shutdown", "error", shutdownCtx.Err())
+		os.Exit(1)
+	}
+	select {
+	case err := <-sourcePurgeDone:
+		if err != nil {
+			slog.Error("Source purge Processor shutdown failed", "error", err)
+			os.Exit(1)
+		}
+	case <-shutdownCtx.Done():
+		slog.Error("Source purge Processor did not stop before shutdown", "error", shutdownCtx.Err())
 		os.Exit(1)
 	}
 	if err := purgeSender.ForceFlush(shutdownCtx); err != nil {
@@ -281,6 +307,18 @@ func loadWorkerConfig() (workerConfig, error) {
 	if err != nil {
 		return workerConfig{}, err
 	}
+	sourceUseTLS, err := workerEnvBool("NANO_SOURCE_S3_USE_TLS", false)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	sourcePurgeLease, err := workerEnvDuration("NANO_SOURCE_PURGE_LEASE_DURATION", 30*time.Second)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	sourcePurgePoll, err := workerEnvDuration("NANO_SOURCE_PURGE_POLL_INTERVAL", time.Second)
+	if err != nil {
+		return workerConfig{}, err
+	}
 	replayKEK, err := base64.StdEncoding.DecodeString(env("NANO_REPLAY_KEK_BASE64", "bmFuby1sb2NhbC1kZXYta2VrLTAwMDAwMDAwMDAwMDA="))
 	if err != nil {
 		return workerConfig{}, fmt.Errorf("parse NANO_REPLAY_KEK_BASE64: %w", err)
@@ -303,6 +341,14 @@ func loadWorkerConfig() (workerConfig, error) {
 			Bucket:          env("NANO_REPLAY_STAGING_S3_BUCKET", "nano-agent-replay-staging"),
 			Region:          env("NANO_REPLAY_STAGING_S3_REGION", "us-east-1"), UseTLS: replayUseTLS,
 		},
+		SourceS3: objectstore.S3Config{
+			Endpoint:        env("NANO_SOURCE_S3_ENDPOINT", "127.0.0.1:59000"),
+			AccessKeyID:     env("NANO_SOURCE_S3_ACCESS_KEY_ID", "nano"),
+			SecretAccessKey: env("NANO_SOURCE_S3_SECRET_ACCESS_KEY", "nano-password"),
+			Bucket:          env("NANO_SOURCE_S3_BUCKET", "nano-sources"),
+			Region:          env("NANO_SOURCE_S3_REGION", "us-east-1"), UseTLS: sourceUseTLS,
+		},
+		SourcePurgeLease: sourcePurgeLease, SourcePurgePoll: sourcePurgePoll,
 		ReplayKeyID: env("NANO_REPLAY_KEY_ID", "nano-local-replay-key-v1"), ReplayKEK: replayKEK,
 	}
 	if strings.TrimSpace(config.DatabaseURL) == "" || strings.TrimSpace(config.Addr) == "" ||
@@ -312,7 +358,10 @@ func loadWorkerConfig() (workerConfig, error) {
 		config.PurgeMaxCommands < 1 || config.PurgeLeaseDuration <= 0 || config.PurgePollInterval <= 0 ||
 		config.PurgeBaseBackoff <= 0 || config.PurgeMaxBackoff < config.PurgeBaseBackoff || strings.TrimSpace(config.ReplayStagingS3.Endpoint) == "" ||
 		strings.TrimSpace(config.ReplayStagingS3.AccessKeyID) == "" || strings.TrimSpace(config.ReplayStagingS3.SecretAccessKey) == "" ||
-		strings.TrimSpace(config.ReplayStagingS3.Bucket) == "" || strings.TrimSpace(config.ReplayKeyID) == "" || len(config.ReplayKEK) != 32 {
+		strings.TrimSpace(config.ReplayStagingS3.Bucket) == "" || strings.TrimSpace(config.SourceS3.Endpoint) == "" ||
+		strings.TrimSpace(config.SourceS3.AccessKeyID) == "" || strings.TrimSpace(config.SourceS3.SecretAccessKey) == "" ||
+		strings.TrimSpace(config.SourceS3.Bucket) == "" || config.SourcePurgeLease <= 0 || config.SourcePurgePoll <= 0 ||
+		strings.TrimSpace(config.ReplayKeyID) == "" || len(config.ReplayKEK) != 32 {
 		return workerConfig{}, errors.New("worker configuration is incomplete or inconsistent")
 	}
 	return config, nil

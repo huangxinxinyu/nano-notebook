@@ -26,6 +26,12 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 	t.Setenv("NANO_REPLAY_STAGING_S3_BUCKET", "worker-staging")
 	t.Setenv("NANO_REPLAY_STAGING_S3_REGION", "cn-test-1")
 	t.Setenv("NANO_REPLAY_STAGING_S3_USE_TLS", "true")
+	t.Setenv("NANO_SOURCE_S3_ENDPOINT", "sources.internal:9000")
+	t.Setenv("NANO_SOURCE_S3_ACCESS_KEY_ID", "worker-source-key")
+	t.Setenv("NANO_SOURCE_S3_SECRET_ACCESS_KEY", "worker-source-secret")
+	t.Setenv("NANO_SOURCE_S3_BUCKET", "source-custody")
+	t.Setenv("NANO_SOURCE_S3_REGION", "cn-test-2")
+	t.Setenv("NANO_SOURCE_S3_USE_TLS", "true")
 	t.Setenv("NANO_REPLAY_KEY_ID", "replay-key-7")
 	t.Setenv("NANO_REPLAY_KEK_BASE64", "bmFuby1sb2NhbC1kZXYta2VrLTAwMDAwMDAwMDAwMDA=")
 
@@ -49,6 +55,11 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 		config.ReplayStagingS3.SecretAccessKey != "worker-staging-secret" || config.ReplayStagingS3.Bucket != "worker-staging" ||
 		config.ReplayStagingS3.Region != "cn-test-1" || !config.ReplayStagingS3.UseTLS || config.ReplayKeyID != "replay-key-7" || len(config.ReplayKEK) != 32 {
 		t.Fatalf("Replay staging config = %#v", config)
+	}
+	if config.SourceS3.Endpoint != "sources.internal:9000" || config.SourceS3.AccessKeyID != "worker-source-key" ||
+		config.SourceS3.SecretAccessKey != "worker-source-secret" || config.SourceS3.Bucket != "source-custody" ||
+		config.SourceS3.Region != "cn-test-2" || !config.SourceS3.UseTLS {
+		t.Fatalf("Source config = %#v", config)
 	}
 }
 
