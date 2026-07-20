@@ -317,6 +317,38 @@ test("opens an immutable image Source with its Evidence region highlighted", asy
   expect(dialog.querySelector(".source-image-highlight")).toHaveStyle({ left: "10%", top: "20%", width: "30%", height: "40%" });
 });
 
+test("opens immutable rendered PDF pages without exposing the original file", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [
+      { id: "src_pdf", notebook_id: "nb_test", title: "paper.pdf", format: "pdf", byte_size: 2048, state: "ready" }
+    ] });
+    if (url.endsWith("/api/v1/sources/src_pdf") && method === "GET") return json({ source: {
+      id: "src_pdf", title: "paper.pdf", format: "pdf",
+      revision: { viewer: { kind: "pages", page_count: 2 }, coverage: { status: "complete", gaps: [] }, units: [
+        { id: "unit_pdf", kind: "paragraph", text: "Page evidence", coordinate: { kind: "pdf_region", page: 1 } }
+      ] }
+    } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [], citations: [] });
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  const sources = await screen.findByRole("region", { name: "Sources" });
+  await user.click(await within(sources).findByRole("button", { name: "paper.pdf" }));
+  const dialog = await screen.findByRole("dialog", { name: "paper.pdf" });
+  expect(within(dialog).getByRole("img", { name: "paper.pdf, page 1" })).toHaveAttribute("src", "/api/v1/sources/src_pdf/viewer-asset?ordinal=1");
+  await user.click(within(dialog).getByRole("button", { name: "Next page" }));
+  expect(within(dialog).getByRole("img", { name: "paper.pdf, page 2" })).toHaveAttribute("src", "/api/v1/sources/src_pdf/viewer-asset?ordinal=2");
+  expect(within(dialog).queryByText(/original_object_key|download/i)).not.toBeInTheDocument();
+});
+
 test("opens a published Citation without exposing retrieval internals", async () => {
   window.history.pushState(null, "", "/notebooks/nb_test");
   fetchHandler = async (input, init) => {

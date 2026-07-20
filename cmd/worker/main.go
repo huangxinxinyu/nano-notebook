@@ -19,6 +19,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/otelbridge"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentoutbox"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
+	"github.com/huangxinxinyu/nano-notebook/internal/documentrender"
 	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
@@ -37,43 +38,51 @@ import (
 )
 
 type workerConfig struct {
-	DatabaseURL                 string
-	Addr                        string
-	CollectorEndpoint           string
-	CollectorServiceToken       string
-	ProducerID                  string
-	BatchMaxRecords             int
-	BatchMaxEncodedBytes        int
-	BatchMaxDelay               time.Duration
-	HTTPTimeout                 time.Duration
-	PurgeMaxCommands            int
-	PurgeLeaseDuration          time.Duration
-	PurgePollInterval           time.Duration
-	PurgeBaseBackoff            time.Duration
-	PurgeMaxBackoff             time.Duration
-	ReplayStagingS3             objectstore.S3Config
-	SourceS3                    objectstore.S3Config
-	SourcePurgeLease            time.Duration
-	SourcePurgePoll             time.Duration
-	QdrantURL                   string
-	QdrantAPIKey                string
-	QdrantCollection            string
-	QdrantDenseDimensions       int
-	SourceProcessingLease       time.Duration
-	SourceProcessingHeartbeat   time.Duration
-	SourceProcessingPoll        time.Duration
-	SourceExtractionConfigID    string
-	SourceVisionModel           string
-	SourceTranscriptionModel    string
-	SourceVisionPromptVersion   string
-	AgentVerifierModel          string
-	AgentVerifierPrompt         string
-	SourceProcessingMaxBytes    int64
-	SourceProcessingMaxRunes    int
-	AgentInteractiveConcurrency int
-	SourceProcessingConcurrency int
-	ReplayKeyID                 string
-	ReplayKEK                   []byte
+	DatabaseURL                    string
+	Addr                           string
+	CollectorEndpoint              string
+	CollectorServiceToken          string
+	ProducerID                     string
+	BatchMaxRecords                int
+	BatchMaxEncodedBytes           int
+	BatchMaxDelay                  time.Duration
+	HTTPTimeout                    time.Duration
+	PurgeMaxCommands               int
+	PurgeLeaseDuration             time.Duration
+	PurgePollInterval              time.Duration
+	PurgeBaseBackoff               time.Duration
+	PurgeMaxBackoff                time.Duration
+	ReplayStagingS3                objectstore.S3Config
+	SourceS3                       objectstore.S3Config
+	SourcePurgeLease               time.Duration
+	SourcePurgePoll                time.Duration
+	QdrantURL                      string
+	QdrantAPIKey                   string
+	QdrantCollection               string
+	QdrantDenseDimensions          int
+	SourceProcessingLease          time.Duration
+	SourceProcessingHeartbeat      time.Duration
+	SourceProcessingPoll           time.Duration
+	SourceExtractionConfigID       string
+	SourceVisionModel              string
+	SourceTranscriptionModel       string
+	SourceVisionPromptVersion      string
+	DocumentRendererURL            string
+	DocumentRendererServiceToken   string
+	DocumentRenderConfigID         string
+	DocumentRenderTimeout          time.Duration
+	DocumentRenderMaxPages         int
+	DocumentRenderDPI              int
+	DocumentRenderMaxPixelsPerPage int64
+	DocumentRenderMaxOutputBytes   int64
+	AgentVerifierModel             string
+	AgentVerifierPrompt            string
+	SourceProcessingMaxBytes       int64
+	SourceProcessingMaxRunes       int
+	AgentInteractiveConcurrency    int
+	SourceProcessingConcurrency    int
+	ReplayKeyID                    string
+	ReplayKEK                      []byte
 }
 
 type traceFlusher interface {
@@ -230,17 +239,28 @@ func main() {
 	sourcePurgeProcessor := sourcepurge.NewProcessorWithProjectionPurger(db.Pool(), sourceObjects, qdrant, config.SourcePurgeLease)
 	go func() { sourcePurgeDone <- sourcePurgeProcessor.Run(ctx, config.SourcePurgePoll) }()
 	sourceQueue := sourcejobs.NewQueue(db.Pool(), config.SourceProcessingLease)
-	sourceProcessor := sourceprocessing.NewProcessorWithExtractorAndTrace(
+	documentRenderer, err := documentrender.NewHTTPAdapter(documentrender.HTTPConfig{
+		Endpoint: config.DocumentRendererURL, ServiceToken: config.DocumentRendererServiceToken,
+		HTTPClient: &http.Client{Timeout: config.DocumentRenderTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
+	})
+	if err != nil {
+		slog.Error("document renderer Adapter invalid", "error", err)
+		os.Exit(1)
+	}
+	sourceProcessor := sourceprocessing.NewProcessorWithExtractorTraceAndRenderer(
 		db.Pool(), sourceQueue, evidence.NewPublisher(db.Pool(), sourceObjects), sourceObjects,
 		sourceprojection.New(db.Pool(), qdrant, modelClient),
 		sourceprocessing.NewNativeExtractor(modelClient, sourceprocessing.NativeExtractorConfig{
 			VisionModel: config.SourceVisionModel, TranscriptionModel: config.SourceTranscriptionModel,
 			VisionPromptVersion: config.SourceVisionPromptVersion,
-		}), traceExporter,
+		}), documentRenderer, traceExporter,
 		sourceprocessing.Config{
 			ExtractionConfigID: config.SourceExtractionConfigID,
-			ExtractorAdapterID: "native-in-process",
+			ExtractorAdapterID: "native-with-isolated-renderer",
 			MaxSourceBytes:     config.SourceProcessingMaxBytes, MaxNormalizedRunes: config.SourceProcessingMaxRunes,
+			RenderConfigID: config.DocumentRenderConfigID, RenderMaxPages: config.DocumentRenderMaxPages,
+			RenderDPI: config.DocumentRenderDPI, RenderMaxPixelsPerPage: config.DocumentRenderMaxPixelsPerPage,
+			RenderMaxOutputBytes: config.DocumentRenderMaxOutputBytes,
 		},
 	)
 	sourceProcessingService := sourceprocessing.NewServiceWithConcurrency(
@@ -415,6 +435,26 @@ func loadWorkerConfig() (workerConfig, error) {
 	if err != nil {
 		return workerConfig{}, err
 	}
+	documentRenderTimeout, err := workerEnvDuration("NANO_DOCUMENT_RENDER_TIMEOUT", 100*time.Second)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	documentRenderMaxPages, err := workerEnvInt("NANO_DOCUMENT_RENDER_MAX_PAGES", 500)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	documentRenderDPI, err := workerEnvInt("NANO_DOCUMENT_RENDER_DPI", 144)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	documentRenderMaxPixels, err := workerEnvInt("NANO_DOCUMENT_RENDER_MAX_PIXELS_PER_PAGE", 20_000_000)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	documentRenderMaxOutput, err := workerEnvInt("NANO_DOCUMENT_RENDER_MAX_OUTPUT_BYTES", 256*1024*1024)
+	if err != nil {
+		return workerConfig{}, err
+	}
 	agentInteractiveConcurrency, err := workerEnvInt("NANO_AGENT_INTERACTIVE_CONCURRENCY", workload.DefaultAgentConcurrency)
 	if err != nil {
 		return workerConfig{}, err
@@ -459,12 +499,18 @@ func loadWorkerConfig() (workerConfig, error) {
 		QdrantDenseDimensions: qdrantDenseDimensions,
 		SourceProcessingLease: sourceProcessingLease, SourceProcessingHeartbeat: sourceProcessingHeartbeat,
 		SourceProcessingPoll: sourceProcessingPoll, SourceExtractionConfigID: env("NANO_SOURCE_EXTRACTION_CONFIG_ID", "extract-text-v1"),
-		SourceVisionModel:         env("NANO_SOURCE_VISION_MODEL", "gemini/gemini-2.5-flash"),
-		SourceTranscriptionModel:  env("NANO_SOURCE_TRANSCRIPTION_MODEL", "openai/whisper-1"),
-		SourceVisionPromptVersion: env("NANO_SOURCE_VISION_PROMPT_VERSION", "vision-normalize-v1"),
-		AgentVerifierModel:        env("NANO_AGENT_VERIFIER_MODEL", "aliyun/qwen-flash"),
-		AgentVerifierPrompt:       env("NANO_AGENT_VERIFIER_PROMPT_VERSION", "claim-support-v1"),
-		SourceProcessingMaxBytes:  int64(sourceProcessingMaxBytes), SourceProcessingMaxRunes: sourceProcessingMaxRunes,
+		SourceVisionModel:            env("NANO_SOURCE_VISION_MODEL", "gemini/gemini-2.5-flash"),
+		SourceTranscriptionModel:     env("NANO_SOURCE_TRANSCRIPTION_MODEL", "openai/whisper-1"),
+		SourceVisionPromptVersion:    env("NANO_SOURCE_VISION_PROMPT_VERSION", "vision-normalize-v1"),
+		DocumentRendererURL:          strings.TrimRight(env("NANO_DOCUMENT_RENDERER_URL", "http://127.0.0.1:8084"), "/"),
+		DocumentRendererServiceToken: env("NANO_DOCUMENT_RENDERER_SERVICE_TOKEN", "nano-local-renderer-token"),
+		DocumentRenderConfigID:       env("NANO_DOCUMENT_RENDER_CONFIG_ID", "pdfium-libreoffice-v1"),
+		DocumentRenderTimeout:        documentRenderTimeout, DocumentRenderMaxPages: documentRenderMaxPages,
+		DocumentRenderDPI: documentRenderDPI, DocumentRenderMaxPixelsPerPage: int64(documentRenderMaxPixels),
+		DocumentRenderMaxOutputBytes: int64(documentRenderMaxOutput),
+		AgentVerifierModel:           env("NANO_AGENT_VERIFIER_MODEL", "aliyun/qwen-flash"),
+		AgentVerifierPrompt:          env("NANO_AGENT_VERIFIER_PROMPT_VERSION", "claim-support-v1"),
+		SourceProcessingMaxBytes:     int64(sourceProcessingMaxBytes), SourceProcessingMaxRunes: sourceProcessingMaxRunes,
 		AgentInteractiveConcurrency: agentInteractiveConcurrency, SourceProcessingConcurrency: sourceProcessingConcurrency,
 		ReplayKeyID: env("NANO_REPLAY_KEY_ID", "nano-local-replay-key-v1"), ReplayKEK: replayKEK,
 	}
@@ -483,6 +529,11 @@ func loadWorkerConfig() (workerConfig, error) {
 		config.SourceProcessingPoll <= 0 || strings.TrimSpace(config.SourceExtractionConfigID) == "" ||
 		strings.TrimSpace(config.SourceVisionModel) == "" || strings.TrimSpace(config.SourceTranscriptionModel) == "" ||
 		strings.TrimSpace(config.SourceVisionPromptVersion) == "" ||
+		strings.TrimSpace(config.DocumentRendererURL) == "" || strings.TrimSpace(config.DocumentRendererServiceToken) == "" ||
+		strings.TrimSpace(config.DocumentRenderConfigID) == "" || config.DocumentRenderTimeout <= 0 ||
+		config.DocumentRenderMaxPages < 1 || config.DocumentRenderMaxPages > 500 || config.DocumentRenderDPI < 72 || config.DocumentRenderDPI > 300 ||
+		config.DocumentRenderMaxPixelsPerPage < 1 || config.DocumentRenderMaxPixelsPerPage > 100_000_000 ||
+		config.DocumentRenderMaxOutputBytes < 1 || config.DocumentRenderMaxOutputBytes > 2<<30 ||
 		strings.TrimSpace(config.AgentVerifierModel) == "" || strings.TrimSpace(config.AgentVerifierPrompt) == "" ||
 		config.SourceProcessingMaxBytes <= 0 || config.SourceProcessingMaxBytes > 100*1024*1024 || config.SourceProcessingMaxRunes <= 0 ||
 		workload.ValidateInteractiveCapacity(config.AgentInteractiveConcurrency, config.SourceProcessingConcurrency) != nil ||

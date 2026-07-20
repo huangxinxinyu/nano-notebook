@@ -19,6 +19,10 @@ var (
 
 type ViewerAsset struct {
 	Format        source.Format
+	Ordinal       int
+	Filename      string
+	Width         int
+	Height        int
 	ByteSize      int64
 	ContentSHA256 string
 	ObjectKey     string
@@ -38,6 +42,12 @@ type RevisionView struct {
 	ExtractionConfigID string       `json:"extraction_config_id"`
 	Coverage           CoverageView `json:"coverage"`
 	Units              []UnitView   `json:"units"`
+	Viewer             *ViewerView  `json:"viewer,omitempty"`
+}
+
+type ViewerView struct {
+	Kind      string `json:"kind"`
+	PageCount int    `json:"page_count"`
 }
 
 type CoverageView struct {
@@ -79,8 +89,8 @@ func NewReader(db readerDB) *Reader {
 	return &Reader{db: db}
 }
 
-func (r *Reader) ViewerAsset(ctx context.Context, sourceID string) (ViewerAsset, error) {
-	if r == nil || r.db == nil || sourceID == "" {
+func (r *Reader) ViewerAsset(ctx context.Context, sourceID string, ordinal int) (ViewerAsset, error) {
+	if r == nil || r.db == nil || sourceID == "" || ordinal < 1 || ordinal > 500 {
 		return ViewerAsset{}, ErrSourceNotFound
 	}
 	var asset ViewerAsset
@@ -101,10 +111,29 @@ func (r *Reader) ViewerAsset(ctx context.Context, sourceID string) (ViewerAsset,
 	if state != source.StateReady {
 		return ViewerAsset{}, ErrSourceNotReady
 	}
-	if asset.Format != source.FormatPNG && asset.Format != source.FormatJPEG && asset.Format != source.FormatWebP {
+	if asset.Format == source.FormatPNG || asset.Format == source.FormatJPEG || asset.Format == source.FormatWebP {
+		if ordinal != 1 {
+			return ViewerAsset{}, ErrViewerUnsupported
+		}
+		asset.Ordinal = 1
+		asset.Filename = "source-image"
+	} else if asset.Format == source.FormatPDF || asset.Format == source.FormatPPTX {
+		err = r.db.QueryRow(ctx, `
+			select a.ordinal,a.filename,a.width,a.height,a.byte_size,a.content_sha256,a.object_key
+			from source_viewer_artifacts a
+			join source_evidence_revisions r on r.id=a.revision_id and r.status='active'
+			where a.source_id=$1 and a.ordinal=$2
+		`, sourceID, ordinal).Scan(&asset.Ordinal, &asset.Filename, &asset.Width, &asset.Height, &asset.ByteSize, &asset.ContentSHA256, &asset.ObjectKey)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ViewerAsset{}, ErrViewerUnsupported
+		}
+		if err != nil {
+			return ViewerAsset{}, err
+		}
+	} else {
 		return ViewerAsset{}, ErrViewerUnsupported
 	}
-	if asset.ByteSize < 1 || asset.ByteSize > 100*1024*1024 || len(asset.ContentSHA256) != 64 || asset.ObjectKey == "" {
+	if asset.ByteSize < 1 || asset.ByteSize > 256*1024*1024 || len(asset.ContentSHA256) != 64 || asset.ObjectKey == "" {
 		return ViewerAsset{}, ErrEvidenceUnavailable
 	}
 	return asset, nil
@@ -204,6 +233,18 @@ func (r *Reader) SourceView(ctx context.Context, sourceID string) (SourceView, e
 	}
 	if len(view.Revision.Units) == 0 {
 		return SourceView{}, ErrEvidenceUnavailable
+	}
+	var pageCount, maxOrdinal int
+	if err := r.db.QueryRow(ctx, `
+		select count(*),coalesce(max(ordinal),0) from source_viewer_artifacts where revision_id=$1
+	`, view.Revision.ID).Scan(&pageCount, &maxOrdinal); err != nil {
+		return SourceView{}, err
+	}
+	if pageCount > 0 {
+		if pageCount != maxOrdinal || pageCount > 500 {
+			return SourceView{}, ErrEvidenceUnavailable
+		}
+		view.Revision.Viewer = &ViewerView{Kind: "pages", PageCount: pageCount}
 	}
 	return view, nil
 }

@@ -43,6 +43,14 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 	t.Setenv("NANO_SOURCE_VISION_MODEL", "gemini/gemini-2.5-flash")
 	t.Setenv("NANO_SOURCE_TRANSCRIPTION_MODEL", "openai/whisper-1")
 	t.Setenv("NANO_SOURCE_VISION_PROMPT_VERSION", "vision-normalize-v1")
+	t.Setenv("NANO_DOCUMENT_RENDERER_URL", "http://renderer.internal:8084/")
+	t.Setenv("NANO_DOCUMENT_RENDERER_SERVICE_TOKEN", "renderer-secret")
+	t.Setenv("NANO_DOCUMENT_RENDER_CONFIG_ID", "pdfium-lo-v7")
+	t.Setenv("NANO_DOCUMENT_RENDER_TIMEOUT", "70s")
+	t.Setenv("NANO_DOCUMENT_RENDER_MAX_PAGES", "25")
+	t.Setenv("NANO_DOCUMENT_RENDER_DPI", "144")
+	t.Setenv("NANO_DOCUMENT_RENDER_MAX_PIXELS_PER_PAGE", "3000000")
+	t.Setenv("NANO_DOCUMENT_RENDER_MAX_OUTPUT_BYTES", "4194304")
 	t.Setenv("NANO_SOURCE_PROCESSING_MAX_BYTES", "1048576")
 	t.Setenv("NANO_SOURCE_PROCESSING_MAX_RUNES", "200000")
 	t.Setenv("NANO_AGENT_INTERACTIVE_CONCURRENCY", "6")
@@ -82,6 +90,10 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 		config.SourceProcessingPoll != 250*time.Millisecond || config.SourceExtractionConfigID != "extract-text-v1" ||
 		config.SourceVisionModel != "gemini/gemini-2.5-flash" || config.SourceTranscriptionModel != "openai/whisper-1" ||
 		config.SourceVisionPromptVersion != "vision-normalize-v1" ||
+		config.DocumentRendererURL != "http://renderer.internal:8084" || config.DocumentRendererServiceToken != "renderer-secret" ||
+		config.DocumentRenderConfigID != "pdfium-lo-v7" || config.DocumentRenderTimeout != 70*time.Second ||
+		config.DocumentRenderMaxPages != 25 || config.DocumentRenderDPI != 144 || config.DocumentRenderMaxPixelsPerPage != 3_000_000 ||
+		config.DocumentRenderMaxOutputBytes != 4<<20 ||
 		config.SourceProcessingMaxBytes != 1048576 || config.SourceProcessingMaxRunes != 200000 ||
 		config.AgentInteractiveConcurrency != 6 || config.SourceProcessingConcurrency != 4 {
 		t.Fatalf("Source processing config = %#v", config)

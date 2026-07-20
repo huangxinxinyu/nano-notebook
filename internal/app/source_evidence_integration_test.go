@@ -4,8 +4,13 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"strings"
 	"testing"
 	"time"
@@ -106,24 +111,48 @@ func TestEvidencePublisherPersistsPDFSourceCoordinates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	revision, _, err := evidence.NewPublisher(api.db.Pool(), objectstore.NewMemoryStore()).Publish(
+	page := evidenceViewerPNG(t, 64, 32)
+	pageDigest := sha256.Sum256(page)
+	objects := objectstore.NewMemoryStore()
+	revision, _, err := evidence.NewPublisher(api.db.Pool(), objects).Publish(
 		context.Background(), evidence.PublishCommand{
 			RevisionID: "evr_evidence_pdf", JobID: lease.ID, LeaseToken: lease.LeaseToken, Artifact: artifact,
+			ViewerArtifacts: []evidence.ViewerArtifact{{
+				Ordinal: 1, Width: 64, Height: 32, MediaType: "image/png", Bytes: int64(len(page)),
+				SHA256: hex.EncodeToString(pageDigest[:]), Filename: "page-000001.png", RenderConfigID: "pdfium-v1", Payload: page,
+			}},
 		})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var kind string
-	var page int
+	var kind, viewerKey, viewerSHA string
+	var pageNumber, viewerWidth, viewerHeight int
 	if err := api.db.Pool().QueryRow(context.Background(), `
 		select coordinate_json->>'kind', (coordinate_json->>'page')::integer
 		from source_evidence_units where revision_id=$1
-	`, revision.ID).Scan(&kind, &page); err != nil {
+	`, revision.ID).Scan(&kind, &pageNumber); err != nil {
 		t.Fatal(err)
 	}
-	if kind != "pdf_region" || page != 1 {
-		t.Fatalf("coordinate kind=%q page=%d", kind, page)
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select object_key,content_sha256,width,height from source_viewer_artifacts where revision_id=$1 and ordinal=1
+	`, revision.ID).Scan(&viewerKey, &viewerSHA, &viewerWidth, &viewerHeight); err != nil {
+		t.Fatal(err)
 	}
+	if kind != "pdf_region" || pageNumber != 1 || viewerKey != "sources/src_evidence_pdf/evidence/evr_evidence_pdf/viewer/page-000001.png" ||
+		viewerSHA != hex.EncodeToString(pageDigest[:]) || viewerWidth != 64 || viewerHeight != 32 || objects.Len() != 2 {
+		t.Fatalf("coordinate kind=%q page=%d viewer=%q sha=%q dimensions=%dx%d objects=%d", kind, pageNumber, viewerKey, viewerSHA, viewerWidth, viewerHeight, objects.Len())
+	}
+}
+
+func evidenceViewerPNG(t *testing.T, width, height int) []byte {
+	t.Helper()
+	value := image.NewRGBA(image.Rect(0, 0, width, height))
+	value.Set(0, 0, color.RGBA{R: 255, A: 255})
+	var output bytes.Buffer
+	if err := png.Encode(&output, value); err != nil {
+		t.Fatal(err)
+	}
+	return output.Bytes()
 }
 
 func TestEvidenceCompletionRejectsMissingVerifiedActiveProjection(t *testing.T) {

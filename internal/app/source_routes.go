@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -356,9 +357,18 @@ func (s *Server) writeSourceViewerAsset(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	var asset evidence.ViewerAsset
+	ordinal := 1
+	if value := r.URL.Query().Get("ordinal"); value != "" {
+		parsed, parseErr := strconv.Atoi(value)
+		if parseErr != nil || parsed < 1 || parsed > 500 {
+			writeError(w, r, http.StatusBadRequest, "validation_failed", "error.source_invalid")
+			return
+		}
+		ordinal = parsed
+	}
 	err := s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
 		var readErr error
-		asset, readErr = evidence.NewReader(tx).ViewerAsset(r.Context(), sourceID)
+		asset, readErr = evidence.NewReader(tx).ViewerAsset(r.Context(), sourceID, ordinal)
 		return readErr
 	})
 	switch {
@@ -383,9 +393,10 @@ func (s *Server) writeSourceViewerAsset(w http.ResponseWriter, r *http.Request, 
 	}
 	mediaType := map[source.Format]string{
 		source.FormatPNG: "image/png", source.FormatJPEG: "image/jpeg", source.FormatWebP: "image/webp",
+		source.FormatPDF: "image/png", source.FormatPPTX: "image/png",
 	}[asset.Format]
 	w.Header().Set("Content-Type", mediaType)
-	w.Header().Set("Content-Disposition", `inline; filename="source-image"`)
+	w.Header().Set("Content-Disposition", `inline; filename="`+asset.Filename+`"`)
 	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)

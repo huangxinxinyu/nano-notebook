@@ -1593,6 +1593,32 @@ h2 {
   object-fit: contain;
 }
 
+.source-document-viewer {
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--muted);
+}
+
+.source-document-viewer-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.source-document-viewer img {
+  display: block;
+  max-width: 100%;
+  max-height: min(58vh, 760px);
+  object-fit: contain;
+  border-radius: 6px;
+  background: white;
+  box-shadow: 0 4px 18px rgb(0 0 0 / 12%);
+}
+
 .source-image-highlight {
   position: absolute;
   border: 2px solid var(--focus-ring);

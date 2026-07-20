@@ -23,10 +23,14 @@ func TestSourcePurgeProcessorDeletesCustodyBeforeCompleting(t *testing.T) {
 	objects := objectstore.NewMemoryStore()
 	const objectKey = "sources/src_purge/original/3333333333333333333333333333333333333333333333333333333333333333"
 	const artifactKey = "sources/src_purge/evidence/evr_purge/normalized.json"
+	const viewerKey = "sources/src_purge/evidence/evr_purge/viewer/page-000001.png"
 	if err := objects.Put(context.Background(), objectKey, []byte("purge me")); err != nil {
 		t.Fatal(err)
 	}
 	if err := objects.Put(context.Background(), artifactKey, []byte("normalized purge me")); err != nil {
+		t.Fatal(err)
+	}
+	if err := objects.Put(context.Background(), viewerKey, []byte("rendered purge me")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := api.db.Pool().Exec(context.Background(), `
@@ -35,6 +39,13 @@ func TestSourcePurgeProcessorDeletesCustodyBeforeCompleting(t *testing.T) {
 			artifact_object_key,artifact_sha256,status,activated_at
 		) values ('evr_purge','src_purge',$1,1,'extract-v1','nano.normalized-source.v1',$2,$3,'active',now())
 	`, notebookID, artifactKey, strings.Repeat("a", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into source_viewer_artifacts(
+			revision_id,source_id,notebook_id,ordinal,width,height,media_type,byte_size,content_sha256,filename,object_key,render_config_id
+		) values('evr_purge','src_purge',$1,1,1,1,'image/png',17,$2,'page-000001.png',$3,'pdfium-v1')
+	`, notebookID, strings.Repeat("d", 64), viewerKey); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := api.db.Pool().Exec(context.Background(), `

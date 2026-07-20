@@ -1,12 +1,15 @@
 package evidence
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/png"
+	"strings"
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/normalize"
@@ -39,10 +42,23 @@ type Revision struct {
 }
 
 type PublishCommand struct {
-	RevisionID string
-	JobID      string
-	LeaseToken string
-	Artifact   normalize.Artifact
+	RevisionID      string
+	JobID           string
+	LeaseToken      string
+	Artifact        normalize.Artifact
+	ViewerArtifacts []ViewerArtifact
+}
+
+type ViewerArtifact struct {
+	Ordinal        int
+	Width          int
+	Height         int
+	MediaType      string
+	Bytes          int64
+	SHA256         string
+	Filename       string
+	RenderConfigID string
+	Payload        []byte
 }
 
 type objectWriter interface {
@@ -65,12 +81,21 @@ func (p *Publisher) Publish(ctx context.Context, command PublishCommand) (Revisi
 	if err := normalize.Validate(command.Artifact); err != nil {
 		return Revision{}, false, err
 	}
+	if err := validateViewerArtifacts(command.Artifact, command.ViewerArtifacts); err != nil {
+		return Revision{}, false, err
+	}
 	if err := p.authorizeLease(ctx, command.JobID, command.LeaseToken, command.Artifact.SourceID); err != nil {
 		return Revision{}, false, err
 	}
 	artifactKey := "sources/" + command.Artifact.SourceID + "/evidence/" + command.RevisionID + "/normalized.json"
 	if err := p.objects.Put(ctx, artifactKey, command.Artifact.CanonicalJSON); err != nil {
 		return Revision{}, false, err
+	}
+	for _, viewer := range command.ViewerArtifacts {
+		objectKey := viewerArtifactKey(command.Artifact.SourceID, command.RevisionID, viewer.Filename)
+		if err := p.objects.Put(ctx, objectKey, viewer.Payload); err != nil {
+			return Revision{}, false, err
+		}
 	}
 
 	tx, err := p.pool.Begin(ctx)
@@ -103,6 +128,9 @@ func (p *Publisher) Publish(ctx context.Context, command PublishCommand) (Revisi
 		if existing.SourceID != sourceID || existing.ArtifactSHA256 != command.Artifact.SHA256 ||
 			existing.ExtractionConfigID != command.Artifact.ExtractionConfigID {
 			return Revision{}, false, ErrPublicationConflict
+		}
+		if err := existingViewerArtifactsMatch(ctx, tx, existing, command.ViewerArtifacts); err != nil {
+			return Revision{}, false, err
 		}
 		if sourceState == "normalizing" && existing.Status == RevisionBuilding {
 			if _, err := tx.Exec(ctx, `update source_sources set state='segmenting', updated_at=now() where id=$1`, sourceID); err != nil {
@@ -188,6 +216,17 @@ func (p *Publisher) Publish(ctx context.Context, command PublishCommand) (Revisi
 			return Revision{}, false, err
 		}
 	}
+	for _, viewer := range command.ViewerArtifacts {
+		if _, err := tx.Exec(ctx, `
+			insert into source_viewer_artifacts(
+				revision_id,source_id,notebook_id,ordinal,width,height,media_type,byte_size,
+				content_sha256,filename,object_key,render_config_id
+			) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+		`, created.ID, sourceID, notebookID, viewer.Ordinal, viewer.Width, viewer.Height, viewer.MediaType, viewer.Bytes,
+			viewer.SHA256, viewer.Filename, viewerArtifactKey(sourceID, created.ID, viewer.Filename), viewer.RenderConfigID); err != nil {
+			return Revision{}, false, err
+		}
+	}
 	if _, err := tx.Exec(ctx, `update source_sources set state='segmenting', updated_at=now() where id=$1`, sourceID); err != nil {
 		return Revision{}, false, err
 	}
@@ -195,6 +234,96 @@ func (p *Publisher) Publish(ctx context.Context, command PublishCommand) (Revisi
 		return Revision{}, false, err
 	}
 	return created, false, nil
+}
+
+func validateViewerArtifacts(artifact normalize.Artifact, viewers []ViewerArtifact) error {
+	if artifact.Format != "pdf" && artifact.Format != "pptx" {
+		if len(viewers) != 0 {
+			return errors.New("Viewer artifacts are unsupported for normalized Source format")
+		}
+		return nil
+	}
+	if len(viewers) < 1 || len(viewers) > 500 {
+		return errors.New("PDF and PPTX evidence requires bounded Viewer artifacts")
+	}
+	prefix := "page"
+	coordinateKind := "pdf_region"
+	if artifact.Format == "pptx" {
+		prefix = "slide"
+		coordinateKind = "slide_region"
+	}
+	maxCoordinate := 0
+	for _, block := range artifact.Blocks {
+		if block.Coordinate == nil || block.Coordinate.Kind != coordinateKind {
+			continue
+		}
+		value := block.Coordinate.Page
+		if artifact.Format == "pptx" {
+			value = block.Coordinate.Slide
+		}
+		if value > maxCoordinate {
+			maxCoordinate = value
+		}
+	}
+	if maxCoordinate > len(viewers) {
+		return errors.New("Viewer artifacts do not cover normalized coordinates")
+	}
+	var totalBytes int64
+	for index, viewer := range viewers {
+		expectedFilename := fmt.Sprintf("%s-%06d.png", prefix, index+1)
+		configuration, err := png.DecodeConfig(bytes.NewReader(viewer.Payload))
+		digest := sha256.Sum256(viewer.Payload)
+		if viewer.Ordinal != index+1 || viewer.Width < 1 || viewer.Height < 1 || int64(viewer.Width) > 100_000_000/int64(viewer.Height) ||
+			viewer.MediaType != "image/png" || viewer.Bytes != int64(len(viewer.Payload)) || viewer.Bytes < 1 ||
+			viewer.SHA256 != hex.EncodeToString(digest[:]) || viewer.Filename != expectedFilename ||
+			strings.TrimSpace(viewer.RenderConfigID) == "" || len(viewer.RenderConfigID) > 255 || err != nil ||
+			configuration.Width != viewer.Width || configuration.Height != viewer.Height || totalBytes > 256*1024*1024-viewer.Bytes {
+			return errors.New("invalid Viewer artifact")
+		}
+		totalBytes += viewer.Bytes
+	}
+	return nil
+}
+
+func viewerArtifactKey(sourceID, revisionID, filename string) string {
+	return "sources/" + sourceID + "/evidence/" + revisionID + "/viewer/" + filename
+}
+
+func existingViewerArtifactsMatch(ctx context.Context, tx pgx.Tx, revision Revision, viewers []ViewerArtifact) error {
+	rows, err := tx.Query(ctx, `
+		select ordinal,width,height,media_type,byte_size,content_sha256,filename,object_key,render_config_id
+		from source_viewer_artifacts where revision_id=$1 order by ordinal
+	`, revision.ID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	index := 0
+	for rows.Next() {
+		if index >= len(viewers) {
+			return ErrPublicationConflict
+		}
+		var ordinal, width, height int
+		var mediaType, sha, filename, objectKey, configID string
+		var byteSize int64
+		if err := rows.Scan(&ordinal, &width, &height, &mediaType, &byteSize, &sha, &filename, &objectKey, &configID); err != nil {
+			return err
+		}
+		viewer := viewers[index]
+		if ordinal != viewer.Ordinal || width != viewer.Width || height != viewer.Height || mediaType != viewer.MediaType ||
+			byteSize != viewer.Bytes || sha != viewer.SHA256 || filename != viewer.Filename || configID != viewer.RenderConfigID ||
+			objectKey != viewerArtifactKey(revision.SourceID, revision.ID, viewer.Filename) {
+			return ErrPublicationConflict
+		}
+		index++
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if index != len(viewers) {
+		return ErrPublicationConflict
+	}
+	return nil
 }
 
 func (p *Publisher) authorizeLease(ctx context.Context, jobID, leaseToken, sourceID string) error {

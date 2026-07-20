@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/documentrender"
 	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/normalize"
@@ -21,10 +22,15 @@ import (
 var ErrProjectionInvalid = errors.New("Source projection verification failed")
 
 type Config struct {
-	ExtractionConfigID string
-	ExtractorAdapterID string
-	MaxSourceBytes     int64
-	MaxNormalizedRunes int
+	ExtractionConfigID     string
+	ExtractorAdapterID     string
+	MaxSourceBytes         int64
+	MaxNormalizedRunes     int
+	RenderConfigID         string
+	RenderMaxPages         int
+	RenderDPI              int
+	RenderMaxPixelsPerPage int64
+	RenderMaxOutputBytes   int64
 }
 
 type ProjectionCommand struct {
@@ -74,6 +80,7 @@ type Processor struct {
 	objects    objectReader
 	projection Projection
 	extractor  Extractor
+	renderer   documentrender.Adapter
 	traceSink  TraceSink
 	config     Config
 }
@@ -90,7 +97,11 @@ func NewProcessorWithExtractor(pool *pgxpool.Pool, queue queue, publisher publis
 }
 
 func NewProcessorWithExtractorAndTrace(pool *pgxpool.Pool, queue queue, publisher publisher, objects objectReader, projection Projection, extractor Extractor, traceSink TraceSink, config Config) *Processor {
-	return &Processor{pool: pool, queue: queue, publisher: publisher, objects: objects, projection: projection, extractor: extractor, traceSink: traceSink, config: config}
+	return NewProcessorWithExtractorTraceAndRenderer(pool, queue, publisher, objects, projection, extractor, nil, traceSink, config)
+}
+
+func NewProcessorWithExtractorTraceAndRenderer(pool *pgxpool.Pool, queue queue, publisher publisher, objects objectReader, projection Projection, extractor Extractor, renderer documentrender.Adapter, traceSink TraceSink, config Config) *Processor {
+	return &Processor{pool: pool, queue: queue, publisher: publisher, objects: objects, projection: projection, extractor: extractor, renderer: renderer, traceSink: traceSink, config: config}
 }
 
 func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) (resultErr error) {
@@ -145,10 +156,14 @@ func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) (r
 		return p.failTraced(ctx, lease, trace, "processing_budget_exceeded")
 	}
 	revisionID := stableRevisionID(item.ID, p.config.ExtractionConfigID)
+	viewerArtifacts, err := p.renderViewerArtifacts(ctx, item, payload)
+	if err != nil {
+		return p.failTraced(ctx, lease, trace, "extraction_invalid")
+	}
 	trace.moveStage("source.segmenting")
 	if item.State == source.StateNormalizing {
 		if _, _, err := p.publisher.Publish(ctx, evidence.PublishCommand{
-			RevisionID: revisionID, JobID: lease.ID, LeaseToken: lease.LeaseToken, Artifact: artifact,
+			RevisionID: revisionID, JobID: lease.ID, LeaseToken: lease.LeaseToken, Artifact: artifact, ViewerArtifacts: viewerArtifacts,
 		}); err != nil {
 			return err
 		}
@@ -185,6 +200,37 @@ func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) (r
 		return fmt.Errorf("unsupported resumable Source state %q", item.State)
 	}
 	return p.queue.CompleteEvidence(ctx, lease.ID, lease.LeaseToken, revisionID)
+}
+
+func (p *Processor) renderViewerArtifacts(ctx context.Context, item source.Source, payload []byte) ([]evidence.ViewerArtifact, error) {
+	if item.Format != source.FormatPDF && item.Format != source.FormatPPTX {
+		return nil, nil
+	}
+	if p.renderer == nil || strings.TrimSpace(p.config.RenderConfigID) == "" || p.config.RenderMaxPages < 1 || p.config.RenderDPI < 72 ||
+		p.config.RenderMaxPixelsPerPage < 1 || p.config.RenderMaxOutputBytes < 1 {
+		return nil, errors.New("document renderer is not configured")
+	}
+	format := documentrender.FormatPDF
+	if item.Format == source.FormatPPTX {
+		format = documentrender.FormatPPTX
+	}
+	result, err := p.renderer.Render(ctx, documentrender.Request{
+		SchemaVersion: 1, SourceID: item.ID, Format: format, InputSHA256: item.ContentSHA256, InputBytes: item.ByteSize,
+		RenderConfigID: p.config.RenderConfigID, MaxPages: p.config.RenderMaxPages, DPI: p.config.RenderDPI,
+		MaxPixelsPerPage: p.config.RenderMaxPixelsPerPage, MaxOutputBytes: p.config.RenderMaxOutputBytes,
+	}, payload)
+	if err != nil {
+		return nil, err
+	}
+	viewers := make([]evidence.ViewerArtifact, 0, len(result.Assets))
+	for _, asset := range result.Assets {
+		viewers = append(viewers, evidence.ViewerArtifact{
+			Ordinal: asset.Page.Ordinal, Width: asset.Page.Width, Height: asset.Page.Height, MediaType: asset.Page.MediaType,
+			Bytes: asset.Page.Bytes, SHA256: asset.Page.SHA256, Filename: asset.Page.Filename,
+			RenderConfigID: result.Manifest.RenderConfigID, Payload: asset.Payload,
+		})
+	}
+	return viewers, nil
 }
 
 func (p *Processor) validate(lease sourcejobs.Lease) error {

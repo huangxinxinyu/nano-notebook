@@ -426,6 +426,28 @@ create table if not exists source_evidence_units (
 	unique (revision_id, ordinal)
 );
 
+create table if not exists source_viewer_artifacts (
+	revision_id text not null references source_evidence_revisions(id) on delete cascade,
+	source_id text not null references source_sources(id) on delete cascade,
+	notebook_id text not null references notebook_notebooks(id) on delete cascade,
+	ordinal integer not null check (ordinal > 0 and ordinal <= 500),
+	width integer not null check (width > 0),
+	height integer not null check (height > 0),
+	media_type text not null check (media_type='image/png'),
+	byte_size bigint not null check (byte_size > 0),
+	content_sha256 text not null check (content_sha256 ~ '^[0-9a-f]{64}$'),
+	filename text not null check (filename ~ '^(page|slide)-[0-9]{6}\.png$'),
+	object_key text not null unique check (char_length(object_key) between 1 and 1024),
+	render_config_id text not null check (char_length(render_config_id) between 1 and 255),
+	created_at timestamptz not null default now(),
+	primary key (revision_id, ordinal),
+	unique (revision_id, filename)
+);
+
+alter table source_viewer_artifacts drop constraint if exists source_viewer_artifacts_filename_check;
+alter table source_viewer_artifacts add constraint source_viewer_artifacts_filename_check
+	check (filename ~ '^(page|slide)-[0-9]{6}\.png$');
+
 alter table source_evidence_units add column if not exists coordinate_json jsonb;
 alter table source_evidence_units drop constraint if exists source_evidence_units_coordinate_check;
 alter table source_evidence_units add constraint source_evidence_units_coordinate_check check (
@@ -1101,6 +1123,7 @@ alter table source_evidence_revisions enable row level security;
 alter table source_evidence_coverage enable row level security;
 alter table source_evidence_coverage_gaps enable row level security;
 alter table source_evidence_units enable row level security;
+alter table source_viewer_artifacts enable row level security;
 alter table retrieval_index_versions enable row level security;
 alter table retrieval_eval_runs enable row level security;
 alter table retrieval_source_index_builds enable row level security;
@@ -1140,6 +1163,7 @@ grant select, insert, update, delete on
 	source_evidence_coverage,
 	source_evidence_coverage_gaps,
 	source_evidence_units,
+	source_viewer_artifacts,
 	retrieval_index_versions,
 	retrieval_eval_runs,
 	platform_idempotency_keys,
@@ -1179,7 +1203,7 @@ grant select, update on source_upload_intents to nano_worker;
 grant select, insert, update, delete on source_processing_jobs to nano_worker;
 grant select, insert, update, delete on source_purge_jobs to nano_worker;
 grant select, insert, update, delete on source_evidence_revisions, source_evidence_coverage,
-	source_evidence_coverage_gaps, source_evidence_units to nano_worker;
+	source_evidence_coverage_gaps, source_evidence_units, source_viewer_artifacts to nano_worker;
 grant select, insert, update, delete on retrieval_index_versions, retrieval_eval_runs to nano_worker;
 grant select, insert, update, delete on retrieval_source_index_builds to nano_worker;
 grant select, insert, update, delete on agent_jobs to nano_worker;
@@ -1385,6 +1409,9 @@ create policy source_evidence_revisions_app on source_evidence_revisions
 drop policy if exists source_evidence_units_app on source_evidence_units;
 create policy source_evidence_units_app on source_evidence_units
 	for select to nano_app using (nano_has_notebook_capability(notebook_id, 'source.read'));
+drop policy if exists source_viewer_artifacts_app on source_viewer_artifacts;
+create policy source_viewer_artifacts_app on source_viewer_artifacts
+	for select to nano_app using (nano_has_notebook_capability(notebook_id, 'source.read'));
 drop policy if exists source_evidence_coverage_app on source_evidence_coverage;
 create policy source_evidence_coverage_app on source_evidence_coverage
 	for select to nano_app using (
@@ -1404,6 +1431,8 @@ drop policy if exists source_evidence_coverage_gaps_worker on source_evidence_co
 create policy source_evidence_coverage_gaps_worker on source_evidence_coverage_gaps for all to nano_worker using (true) with check (true);
 drop policy if exists source_evidence_units_worker on source_evidence_units;
 create policy source_evidence_units_worker on source_evidence_units for all to nano_worker using (true) with check (true);
+drop policy if exists source_viewer_artifacts_worker on source_viewer_artifacts;
+create policy source_viewer_artifacts_worker on source_viewer_artifacts for all to nano_worker using (true) with check (true);
 
 drop policy if exists retrieval_index_versions_worker on retrieval_index_versions;
 create policy retrieval_index_versions_worker on retrieval_index_versions for all to nano_worker using (true) with check (true);

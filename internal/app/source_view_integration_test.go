@@ -62,6 +62,22 @@ func TestReadySourceViewerReturnsAuthoritativeUnitsAndCoverageWithoutCustody(t *
 	`, notebookID); err != nil {
 		t.Fatal(err)
 	}
+	pagePayload := mustDecodeBase64("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2n0YAAAAASUVORK5CYII=")
+	pageDigest := sha256.Sum256(pagePayload)
+	pageKey := "sources/src_view/evidence/evr_view/viewer/page-000001.png"
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into source_viewer_artifacts(
+			revision_id,source_id,notebook_id,ordinal,width,height,media_type,byte_size,content_sha256,filename,object_key,render_config_id
+		) values('evr_view','src_view',$1,1,1,1,'image/png',$2,$3,'page-000001.png',$4,'pdfium-v1')
+	`, notebookID, len(pagePayload), fmt.Sprintf("%x", pageDigest), pageKey); err != nil {
+		t.Fatal(err)
+	}
+	objects := objectstore.NewMemoryStore()
+	if err := objects.Put(context.Background(), pageKey, pagePayload); err != nil {
+		t.Fatal(err)
+	}
+	api.server = app.NewServer(app.Config{CookieSecure: false, SourceSnapshots: objects}, api.db)
+	api.handler = api.server.Handler()
 
 	response := getSourceView(t, api, owner, "src_view")
 	if response.Code != http.StatusOK {
@@ -73,7 +89,11 @@ func TestReadySourceViewerReturnsAuthoritativeUnitsAndCoverageWithoutCustody(t *
 			Title    string `json:"title"`
 			Format   string `json:"format"`
 			Revision struct {
-				ID       string `json:"id"`
+				ID     string `json:"id"`
+				Viewer *struct {
+					Kind      string `json:"kind"`
+					PageCount int    `json:"page_count"`
+				} `json:"viewer"`
 				Coverage struct {
 					Status string `json:"status"`
 					Gaps   []struct {
@@ -107,8 +127,14 @@ func TestReadySourceViewerReturnsAuthoritativeUnitsAndCoverageWithoutCustody(t *
 		decoded.Source.Revision.Coverage.Gaps[0].Coordinate.Page != 1 || len(decoded.Source.Revision.Units) != 2 ||
 		decoded.Source.Revision.Units[0].ID != "unit_view_1" || decoded.Source.Revision.Units[0].Coordinate == nil ||
 		decoded.Source.Revision.Units[0].Coordinate.Kind != "pdf_region" || decoded.Source.Revision.Units[0].Coordinate.Page != 2 ||
-		decoded.Source.Revision.Units[1].Coordinate != nil {
+		decoded.Source.Revision.Units[1].Coordinate != nil || decoded.Source.Revision.Viewer == nil ||
+		decoded.Source.Revision.Viewer.Kind != "pages" || decoded.Source.Revision.Viewer.PageCount != 1 {
 		t.Fatalf("viewer response=%+v", decoded)
+	}
+	pageResponse := api.getWithCookie(t, "/api/v1/sources/src_view/viewer-asset?ordinal=1", owner)
+	if pageResponse.Code != http.StatusOK || pageResponse.Body.String() != string(pagePayload) ||
+		pageResponse.Header().Get("Content-Disposition") != `inline; filename="page-000001.png"` {
+		t.Fatalf("PDF page status=%d headers=%v body=%x", pageResponse.Code, pageResponse.Header(), pageResponse.Body.Bytes())
 	}
 	for _, forbidden := range []string{"original_object_key", "artifact_object_key", "artifact_sha256", "content_sha256", "download_url"} {
 		if strings.Contains(response.Body.String(), forbidden) {

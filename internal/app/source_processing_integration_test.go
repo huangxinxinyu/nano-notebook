@@ -15,6 +15,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agentbatch"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
+	"github.com/huangxinxinyu/nano-notebook/internal/documentrender"
 	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/normalize"
@@ -154,9 +155,12 @@ func TestPDFSourceProcessorPublishesCoordinateEvidenceAndReady(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
 	}
-	processor := sourceprocessing.NewProcessor(
+	page := evidenceViewerPNG(t, 64, 32)
+	processor := sourceprocessing.NewProcessorWithExtractorTraceAndRenderer(
 		api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, newRecordingEvidenceProjection(t, api),
-		sourceprocessing.Config{ExtractionConfigID: "extract-native-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000},
+		sourceprocessing.NewNativeExtractor(nil, sourceprocessing.NativeExtractorConfig{}), fixedDocumentRenderer{page: page}, nil,
+		sourceprocessing.Config{ExtractionConfigID: "extract-native-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000,
+			RenderConfigID: "pdfium-v1", RenderMaxPages: 10, RenderDPI: 144, RenderMaxPixelsPerPage: 1_000_000, RenderMaxOutputBytes: 1 << 20},
 	)
 	if err := processor.ProcessLease(context.Background(), lease); err != nil {
 		t.Fatalf("ProcessLease: %v", err)
@@ -378,10 +382,11 @@ func TestSourceProcessorPublishesOnlyBoundedNonPrimaryCoverageGaps(t *testing.T)
 		if err != nil || !ok {
 			t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
 		}
-		processor := sourceprocessing.NewProcessorWithExtractor(
+		processor := sourceprocessing.NewProcessorWithExtractorTraceAndRenderer(
 			api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, newRecordingEvidenceProjection(t, api),
-			fixedExtractor{artifact: artifact},
-			sourceprocessing.Config{ExtractionConfigID: "extract-gap-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000},
+			fixedExtractor{artifact: artifact}, fixedDocumentRenderer{page: evidenceViewerPNG(t, 64, 32)}, nil,
+			sourceprocessing.Config{ExtractionConfigID: "extract-gap-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000,
+				RenderConfigID: "pdfium-v1", RenderMaxPages: 10, RenderDPI: 144, RenderMaxPixelsPerPage: 1_000_000, RenderMaxOutputBytes: 1 << 20},
 		)
 		if err := processor.ProcessLease(context.Background(), lease); err != nil {
 			t.Fatal(err)
@@ -527,6 +532,31 @@ type recordingEvidenceProjection struct {
 type fixedExtractor struct {
 	artifact normalize.Artifact
 	err      error
+}
+
+type fixedDocumentRenderer struct {
+	page []byte
+	err  error
+}
+
+func (r fixedDocumentRenderer) Render(_ context.Context, request documentrender.Request, _ []byte) (documentrender.Result, error) {
+	if r.err != nil {
+		return documentrender.Result{}, r.err
+	}
+	digest := sha256.Sum256(r.page)
+	prefix := "page"
+	if request.Format == documentrender.FormatPPTX {
+		prefix = "slide"
+	}
+	page := documentrender.Page{
+		Ordinal: 1, Width: 64, Height: 32, MediaType: "image/png", Bytes: int64(len(r.page)),
+		SHA256: hex.EncodeToString(digest[:]), Filename: prefix + "-000001.png",
+	}
+	manifest := documentrender.Manifest{
+		SchemaVersion: 1, SourceID: request.SourceID, Format: request.Format, InputSHA256: request.InputSHA256,
+		RenderConfigID: request.RenderConfigID, Pages: []documentrender.Page{page},
+	}
+	return documentrender.Result{Manifest: manifest, Assets: []documentrender.Asset{{Page: page, Payload: r.page}}}, nil
 }
 
 type recordingSourceTraceSink struct {

@@ -26,6 +26,7 @@ type SourceView = {
   revision: {
     coverage: { status: string; gaps: Array<{ reason: string; impact: string }> };
     units: Array<{ id: string; kind: string; text: string; coordinate?: SourceCoordinate }>;
+	viewer?: { kind: "pages"; page_count: number };
   };
 };
 
@@ -273,12 +274,33 @@ function SourceViewer({ sourceID, onOpenChange, copy }: {
             regions={view.data.revision.units.map((unit) => unit.coordinate ?? {}).filter((coordinate) => coordinate.kind === "image_region")}
           />
         ) : null}
+		{view.data?.revision.viewer?.kind === "pages" ? (
+		  <SourceDocumentViewer sourceID={view.data.id} title={view.data.title} pageCount={view.data.revision.viewer.page_count} />
+		) : null}
         <div className="source-viewer-content">
           {view.data?.revision.units.map((unit) => <section key={unit.id}><small>{unit.kind}</small><p>{unit.text}</p></section>)}
         </div>
       </DialogContent>
     </Dialog>
   );
+}
+
+function SourceDocumentViewer({ sourceID, title, pageCount }: { sourceID: string; title: string; pageCount: number }) {
+	const [page, setPage] = useState(1);
+	return (
+		<div className="source-document-viewer">
+			<div className="source-document-viewer-controls">
+				<Button variant="outline" disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))} aria-label="Previous page">
+					<MaterialSymbol name="chevron_left" />
+				</Button>
+				<span role="status">{page} / {pageCount}</span>
+				<Button variant="outline" disabled={page >= pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))} aria-label="Next page">
+					<MaterialSymbol name="chevron_right" />
+				</Button>
+			</div>
+			<img src={`/api/v1/sources/${sourceID}/viewer-asset?ordinal=${page}`} alt={`${title}, page ${page}`} />
+		</div>
+	);
 }
 
 function isImageFormat(format: string) {
