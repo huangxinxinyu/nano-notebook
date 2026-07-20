@@ -329,6 +329,58 @@ create index if not exists source_purge_jobs_claim_idx
 	on source_purge_jobs(created_at, id)
 	where state = 'pending';
 
+create table if not exists source_evidence_revisions (
+	id text primary key,
+	source_id text not null references source_sources(id) on delete cascade,
+	notebook_id text not null references notebook_notebooks(id) on delete cascade,
+	revision_no integer not null check (revision_no > 0),
+	extraction_config_id text not null check (char_length(extraction_config_id) between 1 and 255),
+	artifact_schema_version text not null check (char_length(artifact_schema_version) between 1 and 255),
+	artifact_object_key text not null unique check (char_length(artifact_object_key) between 1 and 1024),
+	artifact_sha256 text not null check (artifact_sha256 ~ '^[0-9a-f]{64}$'),
+	status text not null check (status in ('building', 'active', 'superseded')),
+	created_at timestamptz not null default now(),
+	activated_at timestamptz,
+	constraint source_evidence_revisions_activation_check check (
+		(status = 'building' and activated_at is null)
+		or (status in ('active', 'superseded') and activated_at is not null)
+	),
+	unique (source_id, revision_no)
+);
+
+create unique index if not exists source_evidence_revisions_one_active_idx
+	on source_evidence_revisions(source_id) where status='active';
+
+create table if not exists source_evidence_coverage (
+	revision_id text primary key references source_evidence_revisions(id) on delete cascade,
+	status text not null check (status in ('complete', 'partial')),
+	total_runes integer not null check (total_runes > 0)
+);
+
+create table if not exists source_evidence_coverage_gaps (
+	revision_id text not null references source_evidence_revisions(id) on delete cascade,
+	ordinal integer not null check (ordinal >= 0),
+	start_rune integer not null check (start_rune >= 0),
+	end_rune integer not null check (end_rune > start_rune),
+	reason text not null check (char_length(reason) between 1 and 255),
+	primary key (revision_id, ordinal)
+);
+
+create table if not exists source_evidence_units (
+	id text primary key,
+	revision_id text not null references source_evidence_revisions(id) on delete cascade,
+	source_id text not null references source_sources(id) on delete cascade,
+	notebook_id text not null references notebook_notebooks(id) on delete cascade,
+	ordinal integer not null check (ordinal >= 0),
+	kind text not null check (kind in ('heading', 'paragraph', 'list', 'code', 'table')),
+	text_content text not null check (char_length(text_content) > 0),
+	start_rune integer not null check (start_rune >= 0),
+	end_rune integer not null check (end_rune > start_rune),
+	heading_level integer check (heading_level between 1 and 6),
+	created_at timestamptz not null default now(),
+	unique (revision_id, ordinal)
+);
+
 create table if not exists platform_idempotency_keys (
 	principal_id text not null,
 	action text not null,
@@ -854,6 +906,10 @@ alter table source_upload_intents enable row level security;
 alter table source_url_admissions enable row level security;
 alter table source_processing_jobs enable row level security;
 alter table source_purge_jobs enable row level security;
+alter table source_evidence_revisions enable row level security;
+alter table source_evidence_coverage enable row level security;
+alter table source_evidence_coverage_gaps enable row level security;
+alter table source_evidence_units enable row level security;
 alter table platform_idempotency_keys enable row level security;
 alter table chat_chats enable row level security;
 alter table chat_messages enable row level security;
@@ -881,6 +937,10 @@ grant select, insert, update, delete on
 	source_url_admissions,
 	source_processing_jobs,
 	source_purge_jobs,
+	source_evidence_revisions,
+	source_evidence_coverage,
+	source_evidence_coverage_gaps,
+	source_evidence_units,
 	platform_idempotency_keys,
 	chat_chats,
 	chat_messages,
@@ -903,6 +963,8 @@ grant select, update on source_sources to nano_worker;
 grant select, update on source_upload_intents to nano_worker;
 grant select, insert, update, delete on source_processing_jobs to nano_worker;
 grant select, insert, update, delete on source_purge_jobs to nano_worker;
+grant select, insert, update, delete on source_evidence_revisions, source_evidence_coverage,
+	source_evidence_coverage_gaps, source_evidence_units to nano_worker;
 grant select, insert, update, delete on agent_jobs to nano_worker;
 grant insert, update on chat_messages, chat_chats, agent_runs to nano_worker;
 revoke all on agent_run_checkpoints from nano_app, nano_worker;
@@ -1099,6 +1161,32 @@ create policy source_purge_jobs_worker on source_purge_jobs
 	for all to nano_worker
 	using (true)
 	with check (true);
+
+drop policy if exists source_evidence_revisions_app on source_evidence_revisions;
+create policy source_evidence_revisions_app on source_evidence_revisions
+	for select to nano_app using (nano_has_notebook_capability(notebook_id, 'source.read'));
+drop policy if exists source_evidence_units_app on source_evidence_units;
+create policy source_evidence_units_app on source_evidence_units
+	for select to nano_app using (nano_has_notebook_capability(notebook_id, 'source.read'));
+drop policy if exists source_evidence_coverage_app on source_evidence_coverage;
+create policy source_evidence_coverage_app on source_evidence_coverage
+	for select to nano_app using (
+		exists (select 1 from source_evidence_revisions r where r.id=revision_id and nano_has_notebook_capability(r.notebook_id, 'source.read'))
+	);
+drop policy if exists source_evidence_coverage_gaps_app on source_evidence_coverage_gaps;
+create policy source_evidence_coverage_gaps_app on source_evidence_coverage_gaps
+	for select to nano_app using (
+		exists (select 1 from source_evidence_revisions r where r.id=revision_id and nano_has_notebook_capability(r.notebook_id, 'source.read'))
+	);
+
+drop policy if exists source_evidence_revisions_worker on source_evidence_revisions;
+create policy source_evidence_revisions_worker on source_evidence_revisions for all to nano_worker using (true) with check (true);
+drop policy if exists source_evidence_coverage_worker on source_evidence_coverage;
+create policy source_evidence_coverage_worker on source_evidence_coverage for all to nano_worker using (true) with check (true);
+drop policy if exists source_evidence_coverage_gaps_worker on source_evidence_coverage_gaps;
+create policy source_evidence_coverage_gaps_worker on source_evidence_coverage_gaps for all to nano_worker using (true) with check (true);
+drop policy if exists source_evidence_units_worker on source_evidence_units;
+create policy source_evidence_units_worker on source_evidence_units for all to nano_worker using (true) with check (true);
 
 drop policy if exists platform_idempotency_owner on platform_idempotency_keys;
 create policy platform_idempotency_owner on platform_idempotency_keys
