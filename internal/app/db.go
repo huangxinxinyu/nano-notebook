@@ -381,6 +381,32 @@ create table if not exists source_evidence_units (
 	unique (revision_id, ordinal)
 );
 
+create table if not exists retrieval_index_versions (
+	id text primary key,
+	config_json jsonb not null,
+	config_sha256 text not null unique check (config_sha256 ~ '^[0-9a-f]{64}$'),
+	status text not null check (status in ('candidate', 'active', 'retired')),
+	promoted_by_eval_run_id text,
+	created_at timestamptz not null default now(),
+	promoted_at timestamptz,
+	constraint retrieval_index_versions_promotion_check check (
+		(status = 'candidate' and promoted_by_eval_run_id is null and promoted_at is null)
+		or (status in ('active', 'retired') and promoted_by_eval_run_id is not null and promoted_at is not null)
+	)
+);
+
+create unique index if not exists retrieval_index_versions_one_active_idx
+	on retrieval_index_versions((status)) where status='active';
+
+create table if not exists retrieval_eval_runs (
+	id text primary key,
+	index_version_id text not null references retrieval_index_versions(id) on delete cascade,
+	fixture_suite_sha256 text not null check (fixture_suite_sha256 ~ '^[0-9a-f]{64}$'),
+	status text not null check (status in ('passed', 'failed')),
+	metrics_json jsonb not null,
+	created_at timestamptz not null default now()
+);
+
 create table if not exists platform_idempotency_keys (
 	principal_id text not null,
 	action text not null,
@@ -910,6 +936,8 @@ alter table source_evidence_revisions enable row level security;
 alter table source_evidence_coverage enable row level security;
 alter table source_evidence_coverage_gaps enable row level security;
 alter table source_evidence_units enable row level security;
+alter table retrieval_index_versions enable row level security;
+alter table retrieval_eval_runs enable row level security;
 alter table platform_idempotency_keys enable row level security;
 alter table chat_chats enable row level security;
 alter table chat_messages enable row level security;
@@ -941,6 +969,8 @@ grant select, insert, update, delete on
 	source_evidence_coverage,
 	source_evidence_coverage_gaps,
 	source_evidence_units,
+	retrieval_index_versions,
+	retrieval_eval_runs,
 	platform_idempotency_keys,
 	chat_chats,
 	chat_messages,
@@ -965,6 +995,7 @@ grant select, insert, update, delete on source_processing_jobs to nano_worker;
 grant select, insert, update, delete on source_purge_jobs to nano_worker;
 grant select, insert, update, delete on source_evidence_revisions, source_evidence_coverage,
 	source_evidence_coverage_gaps, source_evidence_units to nano_worker;
+grant select, insert, update, delete on retrieval_index_versions, retrieval_eval_runs to nano_worker;
 grant select, insert, update, delete on agent_jobs to nano_worker;
 grant insert, update on chat_messages, chat_chats, agent_runs to nano_worker;
 revoke all on agent_run_checkpoints from nano_app, nano_worker;
@@ -1187,6 +1218,11 @@ drop policy if exists source_evidence_coverage_gaps_worker on source_evidence_co
 create policy source_evidence_coverage_gaps_worker on source_evidence_coverage_gaps for all to nano_worker using (true) with check (true);
 drop policy if exists source_evidence_units_worker on source_evidence_units;
 create policy source_evidence_units_worker on source_evidence_units for all to nano_worker using (true) with check (true);
+
+drop policy if exists retrieval_index_versions_worker on retrieval_index_versions;
+create policy retrieval_index_versions_worker on retrieval_index_versions for all to nano_worker using (true) with check (true);
+drop policy if exists retrieval_eval_runs_worker on retrieval_eval_runs;
+create policy retrieval_eval_runs_worker on retrieval_eval_runs for all to nano_worker using (true) with check (true);
 
 drop policy if exists platform_idempotency_owner on platform_idempotency_keys;
 create policy platform_idempotency_owner on platform_idempotency_keys
