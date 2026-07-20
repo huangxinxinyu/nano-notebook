@@ -78,7 +78,7 @@ func TestS3StoreValidatesACompletedDirectUpload(t *testing.T) {
 	payload := []byte("The quick brown fox jumps over the lazy dog")
 	digest := sha256.Sum256(payload)
 	request := objectstore.UploadPolicyRequest{
-		Key: "source-upload-intents/upl_completed/payload", MediaType: "text/plain", ByteSize: int64(len(payload)),
+		Key: "source-upload-intents/upl_completed/payload", ContentFormat: "txt", MediaType: "text/plain", ByteSize: int64(len(payload)),
 		ContentSHA256: hex.EncodeToString(digest[:]), ExpiresAt: time.Now().UTC().Add(15 * time.Minute),
 	}
 	destinationKey := "sources/src_completed/original/" + request.ContentSHA256

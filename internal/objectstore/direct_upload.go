@@ -16,6 +16,7 @@ var ErrUploadMismatch = errors.New("uploaded object does not match intent")
 
 type UploadPolicyRequest struct {
 	Key           string
+	ContentFormat string
 	MediaType     string
 	ByteSize      int64
 	ContentSHA256 string
@@ -98,6 +99,17 @@ func (s *S3Store) PromoteUpload(ctx context.Context, request UploadPolicyRequest
 		return ObjectInfo{}, mapS3Error(err)
 	}
 	if err := validateUploadedObject(request, staged); err != nil {
+		return ObjectInfo{}, err
+	}
+	object, err := s.client.GetObject(ctx, s.bucket, request.Key, minio.GetObjectOptions{})
+	if err != nil {
+		return ObjectInfo{}, mapS3Error(err)
+	}
+	if err := ValidateSourceContent(request.ContentFormat, object, staged.Size); err != nil {
+		_ = object.Close()
+		return ObjectInfo{}, err
+	}
+	if err := object.Close(); err != nil {
 		return ObjectInfo{}, err
 	}
 	if _, err := s.client.CopyObject(ctx,

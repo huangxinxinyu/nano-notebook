@@ -494,7 +494,7 @@ func (s *Server) createSourceUploadIntent(w http.ResponseWriter, r *http.Request
 		return
 	}
 	upload, err := s.cfg.SourceUploads.PresignUpload(r.Context(), objectstore.UploadPolicyRequest{
-		Key: intent.ObjectKey, MediaType: intent.MediaType, ByteSize: intent.ByteSize,
+		Key: intent.ObjectKey, ContentFormat: string(intent.Format), MediaType: intent.MediaType, ByteSize: intent.ByteSize,
 		ContentSHA256: intent.ContentSHA256, ExpiresAt: intent.ExpiresAt,
 	})
 	if err != nil {
@@ -575,7 +575,7 @@ func (s *Server) sourceUploadIntentByID(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		_, err = s.cfg.SourceUploads.PromoteUpload(r.Context(), objectstore.UploadPolicyRequest{
-			Key: intent.ObjectKey, MediaType: intent.MediaType, ByteSize: intent.ByteSize,
+			Key: intent.ObjectKey, ContentFormat: string(intent.Format), MediaType: intent.MediaType, ByteSize: intent.ByteSize,
 			ContentSHA256: intent.ContentSHA256, ExpiresAt: intent.ExpiresAt,
 		}, finalObjectKey)
 		if errors.Is(err, objectstore.ErrUploadMismatch) || errors.Is(err, objectstore.ErrNotFound) {
