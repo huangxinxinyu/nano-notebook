@@ -18,19 +18,27 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/identity"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/notebook"
+	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/replay"
+	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+type SourceUploadStore interface {
+	PresignUpload(context.Context, objectstore.UploadPolicyRequest) (objectstore.UploadPolicy, error)
+	PromoteUpload(context.Context, objectstore.UploadPolicyRequest, string) (objectstore.ObjectInfo, error)
+}
+
 type Config struct {
-	CookieSecure bool
-	Version      string
-	DefaultModel string
-	AgentRun     agent.RunConfig
-	AdminTraces  collector.QueryClient
-	ReplaySealer *replay.Sealer
-	TraceSink    agent.TraceSink
+	CookieSecure  bool
+	Version       string
+	DefaultModel  string
+	AgentRun      agent.RunConfig
+	AdminTraces   collector.QueryClient
+	ReplaySealer  *replay.Sealer
+	TraceSink     agent.TraceSink
+	SourceUploads SourceUploadStore
 }
 
 type Server struct {
@@ -90,6 +98,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/auth/sign-out", s.signOut)
 	s.mux.HandleFunc("/api/v1/notebooks", s.notebooks)
 	s.mux.HandleFunc("/api/v1/notebooks/", s.notebookByID)
+	s.mux.HandleFunc("/api/v1/source-upload-intents/", s.sourceUploadIntentByID)
 	s.mux.HandleFunc("/api/v1/chats/", s.chatByID)
 	s.mux.HandleFunc("/api/v1/agent-runs/", s.agentRunByID)
 	s.mux.HandleFunc("/api/admin/traces", s.adminTraceList)
@@ -366,6 +375,10 @@ func (s *Server) notebookByID(w http.ResponseWriter, r *http.Request) {
 	}
 	remainder := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/notebooks/"), "/")
 	parts := strings.Split(remainder, "/")
+	if len(parts) == 3 && parts[0] != "" && parts[1] == "sources" && parts[2] == "upload-intents" {
+		s.createSourceUploadIntent(w, r, user.ID, parts[0])
+		return
+	}
 	if len(parts) == 2 && parts[0] != "" && parts[1] == "chats" {
 		s.notebookChats(w, r, user.ID, parts[0])
 		return
@@ -386,6 +399,215 @@ func (s *Server) notebookByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"notebook": notebookResult})
+}
+
+func (s *Server) createSourceUploadIntent(w http.ResponseWriter, r *http.Request, userID, notebookID string) {
+	if r.Method != http.MethodPost {
+		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
+		return
+	}
+	if !validCSRF(r) {
+		writeError(w, r, http.StatusForbidden, "csrf_required", "error.csrf_required")
+		return
+	}
+	key := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if key == "" || len(key) > 255 {
+		writeError(w, r, http.StatusBadRequest, "idempotency_required", "error.idempotency_required")
+		return
+	}
+	if s.cfg.SourceUploads == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "source_upload_unavailable", "error.source_upload_unavailable")
+		return
+	}
+
+	var req struct {
+		Title         string        `json:"title"`
+		Format        source.Format `json:"format"`
+		MediaType     string        `json:"media_type"`
+		ByteSize      int64         `json:"byte_size"`
+		ContentSHA256 string        `json:"content_sha256"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	req.Title = strings.TrimSpace(req.Title)
+	req.MediaType = strings.TrimSpace(req.MediaType)
+	req.ContentSHA256 = strings.ToLower(strings.TrimSpace(req.ContentSHA256))
+	if req.Title == "" || len([]rune(req.Title)) > 255 || req.Format != source.FormatTXT ||
+		req.MediaType != "text/plain" || req.ByteSize < 1 || req.ByteSize > 100*1024*1024 ||
+		!validLowerSHA256(req.ContentSHA256) {
+		writeError(w, r, http.StatusBadRequest, "validation_failed", "error.source_upload_invalid")
+		return
+	}
+
+	intentID, err := newOpaqueID("upl")
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	sourceID, err := newOpaqueID("src")
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	expiresAt := time.Now().UTC().Truncate(time.Microsecond).Add(15 * time.Minute)
+	objectKey := "source-upload-intents/" + intentID + "/payload"
+	requestHash := sourceUploadIntentRequestHash(notebookID, req.Title, req.Format, req.MediaType, req.ByteSize, req.ContentSHA256)
+	var intent source.UploadIntent
+	var reused bool
+	err = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
+		var createErr error
+		intent, reused, createErr = source.NewStore(tx).CreateUploadIntent(r.Context(), source.CreateUploadIntentCommand{
+			ID: intentID, SourceID: sourceID, NotebookID: notebookID,
+			IdempotencyKey: key, RequestHash: requestHash, Title: req.Title, Format: req.Format,
+			MediaType: req.MediaType, ByteSize: req.ByteSize, ContentSHA256: req.ContentSHA256,
+			ObjectKey: objectKey, ExpiresAt: expiresAt,
+		})
+		return createErr
+	})
+	if errors.Is(err, source.ErrIdempotencyMismatch) {
+		writeError(w, r, http.StatusConflict, "idempotency_mismatch", "error.idempotency_mismatch")
+		return
+	}
+	if errors.Is(err, source.ErrNotFound) {
+		writeError(w, r, http.StatusNotFound, "not_found", "error.notebook_not_found")
+		return
+	}
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	upload, err := s.cfg.SourceUploads.PresignUpload(r.Context(), objectstore.UploadPolicyRequest{
+		Key: intent.ObjectKey, MediaType: intent.MediaType, ByteSize: intent.ByteSize,
+		ContentSHA256: intent.ContentSHA256, ExpiresAt: intent.ExpiresAt,
+	})
+	if err != nil {
+		writeError(w, r, http.StatusServiceUnavailable, "source_upload_unavailable", "error.source_upload_unavailable")
+		return
+	}
+	status := http.StatusCreated
+	if reused {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, map[string]any{"upload_intent": intent, "upload": upload})
+}
+
+func sourceUploadIntentRequestHash(notebookID, title string, format source.Format, mediaType string, byteSize int64, contentSHA256 string) string {
+	canonical, _ := json.Marshal(struct {
+		NotebookID    string        `json:"notebook_id"`
+		Title         string        `json:"title"`
+		Format        source.Format `json:"format"`
+		MediaType     string        `json:"media_type"`
+		ByteSize      int64         `json:"byte_size"`
+		ContentSHA256 string        `json:"content_sha256"`
+	}{notebookID, title, format, mediaType, byteSize, contentSHA256})
+	return requestHash(canonical)
+}
+
+func validLowerSHA256(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) sourceUploadIntentByID(w http.ResponseWriter, r *http.Request) {
+	user, ok := s.currentUser(r)
+	if !ok {
+		writeError(w, r, http.StatusUnauthorized, "unauthorized", "error.session_expired")
+		return
+	}
+	remainder := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/source-upload-intents/"), "/")
+	parts := strings.Split(remainder, "/")
+	if r.Method != http.MethodPost || len(parts) != 2 || parts[0] == "" || parts[1] != "finalize" {
+		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
+		return
+	}
+	if !validCSRF(r) {
+		writeError(w, r, http.StatusForbidden, "csrf_required", "error.csrf_required")
+		return
+	}
+	if s.cfg.SourceUploads == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "source_upload_unavailable", "error.source_upload_unavailable")
+		return
+	}
+
+	var intent source.UploadIntent
+	err := s.db.WithRequestPrincipal(r.Context(), user.ID, func(tx pgx.Tx) error {
+		var lookupErr error
+		intent, lookupErr = source.NewStore(tx).UploadIntentByID(r.Context(), parts[0])
+		return lookupErr
+	})
+	if errors.Is(err, source.ErrNotFound) {
+		writeError(w, r, http.StatusNotFound, "not_found", "error.source_upload_not_found")
+		return
+	}
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	finalObjectKey := "sources/" + intent.SourceID + "/original/" + intent.ContentSHA256
+	if intent.State == source.UploadIntentPending {
+		if !intent.ExpiresAt.After(now) {
+			writeError(w, r, http.StatusGone, "upload_intent_expired", "error.source_upload_expired")
+			return
+		}
+		_, err = s.cfg.SourceUploads.PromoteUpload(r.Context(), objectstore.UploadPolicyRequest{
+			Key: intent.ObjectKey, MediaType: intent.MediaType, ByteSize: intent.ByteSize,
+			ContentSHA256: intent.ContentSHA256, ExpiresAt: intent.ExpiresAt,
+		}, finalObjectKey)
+		if errors.Is(err, objectstore.ErrUploadMismatch) || errors.Is(err, objectstore.ErrNotFound) {
+			writeError(w, r, http.StatusConflict, "source_upload_mismatch", "error.source_upload_mismatch")
+			return
+		}
+		if err != nil {
+			writeError(w, r, http.StatusServiceUnavailable, "source_upload_unavailable", "error.source_upload_unavailable")
+			return
+		}
+	}
+	jobID, err := newOpaqueID("srcjob")
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	var created source.Source
+	var reused bool
+	err = s.db.WithRequestPrincipal(r.Context(), user.ID, func(tx pgx.Tx) error {
+		var finalizeErr error
+		created, reused, finalizeErr = source.NewStore(tx).FinalizeUploadIntent(r.Context(), intent.ID, jobID, finalObjectKey, now)
+		return finalizeErr
+	})
+	if errors.Is(err, source.ErrNotFound) {
+		writeError(w, r, http.StatusNotFound, "not_found", "error.source_upload_not_found")
+		return
+	}
+	if errors.Is(err, source.ErrUploadIntentExpired) {
+		writeError(w, r, http.StatusGone, "upload_intent_expired", "error.source_upload_expired")
+		return
+	}
+	if errors.Is(err, source.ErrDuplicate) {
+		writeError(w, r, http.StatusConflict, "duplicate_source", "error.source_duplicate")
+		return
+	}
+	if errors.Is(err, source.ErrQuotaReached) {
+		writeError(w, r, http.StatusConflict, "quota_reached", "error.source_quota")
+		return
+	}
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	status := http.StatusCreated
+	if reused {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, map[string]any{"source": created})
 }
 
 func (s *Server) notebookChats(w http.ResponseWriter, r *http.Request, userID, notebookID string) {

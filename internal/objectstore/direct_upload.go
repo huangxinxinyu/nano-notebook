@@ -74,21 +74,65 @@ func (s *S3Store) ValidateUpload(ctx context.Context, request UploadPolicyReques
 	if s == nil || s.client == nil {
 		return ObjectInfo{}, errors.New("nil S3 object Store")
 	}
-	checksum, err := hex.DecodeString(strings.ToLower(strings.TrimSpace(request.ContentSHA256)))
-	if err != nil || len(checksum) != 32 {
-		return ObjectInfo{}, errors.New("invalid direct upload checksum")
-	}
 	info, err := s.client.StatObject(ctx, s.bucket, strings.TrimSpace(request.Key), minio.StatObjectOptions{Checksum: true})
 	if err != nil {
 		return ObjectInfo{}, mapS3Error(err)
 	}
+	if err := validateUploadedObject(request, info); err != nil {
+		return ObjectInfo{}, err
+	}
+	return ObjectInfo{Key: info.Key, Size: info.Size, ModifiedAt: info.LastModified}, nil
+}
+
+func (s *S3Store) PromoteUpload(ctx context.Context, request UploadPolicyRequest, destinationKey string) (ObjectInfo, error) {
+	if s == nil || s.client == nil {
+		return ObjectInfo{}, errors.New("nil S3 object Store")
+	}
+	request.Key = strings.TrimSpace(request.Key)
+	destinationKey = strings.TrimSpace(destinationKey)
+	if destinationKey == "" || destinationKey == request.Key {
+		return ObjectInfo{}, errors.New("invalid direct upload destination")
+	}
+	staged, err := s.client.StatObject(ctx, s.bucket, request.Key, minio.StatObjectOptions{Checksum: true})
+	if err != nil {
+		return ObjectInfo{}, mapS3Error(err)
+	}
+	if err := validateUploadedObject(request, staged); err != nil {
+		return ObjectInfo{}, err
+	}
+	if _, err := s.client.CopyObject(ctx,
+		minio.CopyDestOptions{Bucket: s.bucket, Object: destinationKey},
+		minio.CopySrcOptions{Bucket: s.bucket, Object: request.Key, MatchETag: staged.ETag},
+	); err != nil {
+		return ObjectInfo{}, err
+	}
+	destinationRequest := request
+	destinationRequest.Key = destinationKey
+	promoted, err := s.client.StatObject(ctx, s.bucket, destinationKey, minio.StatObjectOptions{Checksum: true})
+	if err != nil {
+		return ObjectInfo{}, mapS3Error(err)
+	}
+	if err := validateUploadedObject(destinationRequest, promoted); err != nil {
+		return ObjectInfo{}, err
+	}
+	if err := s.client.RemoveObject(ctx, s.bucket, request.Key, minio.RemoveObjectOptions{}); err != nil {
+		return ObjectInfo{}, err
+	}
+	return ObjectInfo{Key: promoted.Key, Size: promoted.Size, ModifiedAt: promoted.LastModified}, nil
+}
+
+func validateUploadedObject(request UploadPolicyRequest, info minio.ObjectInfo) error {
+	checksum, err := hex.DecodeString(strings.ToLower(strings.TrimSpace(request.ContentSHA256)))
+	if err != nil || len(checksum) != 32 {
+		return errors.New("invalid direct upload checksum")
+	}
 	wantChecksum := minio.NewChecksum(minio.ChecksumSHA256, checksum).Encoded()
 	if info.Size != request.ByteSize || info.ContentType != strings.TrimSpace(request.MediaType) || info.ChecksumSHA256 != wantChecksum {
-		return ObjectInfo{}, fmt.Errorf(
+		return fmt.Errorf(
 			"%w: got size=%d media_type=%q checksum=%q; want size=%d media_type=%q checksum=%q",
 			ErrUploadMismatch, info.Size, info.ContentType, info.ChecksumSHA256,
 			request.ByteSize, strings.TrimSpace(request.MediaType), wantChecksum,
 		)
 	}
-	return ObjectInfo{Key: info.Key, Size: info.Size, ModifiedAt: info.LastModified}, nil
+	return nil
 }

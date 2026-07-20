@@ -208,6 +208,58 @@ create unique index if not exists source_sources_notebook_file_hash_idx
 create index if not exists source_sources_notebook_created_idx
 	on source_sources(notebook_id, created_at, id);
 
+create table if not exists source_upload_intents (
+	id text primary key,
+	source_id text not null unique,
+	notebook_id text not null references notebook_notebooks(id) on delete cascade,
+	created_by_user_id text not null references identity_users(id) on delete cascade,
+	idempotency_key text not null check (char_length(idempotency_key) between 1 and 255),
+	request_hash text not null check (request_hash ~ '^[0-9a-f]{64}$'),
+	title text not null check (char_length(title) between 1 and 255),
+	format text not null check (format in ('txt')),
+	media_type text not null check (char_length(media_type) between 1 and 255),
+	byte_size bigint not null check (byte_size between 1 and 104857600),
+	content_sha256 text not null check (content_sha256 ~ '^[0-9a-f]{64}$'),
+	object_key text not null unique check (char_length(object_key) between 1 and 1024),
+	state text not null check (state in ('pending', 'finalized', 'expired')),
+	expires_at timestamptz not null,
+	created_at timestamptz not null default now(),
+	finalized_at timestamptz,
+	constraint source_upload_intents_expiry_check check (expires_at > created_at),
+	constraint source_upload_intents_finalized_check check (
+		(state = 'finalized' and finalized_at is not null)
+		or (state in ('pending', 'expired') and finalized_at is null)
+	),
+	unique (created_by_user_id, idempotency_key)
+);
+
+create index if not exists source_upload_intents_expiry_idx
+	on source_upload_intents(expires_at, id)
+	where state = 'pending';
+
+create table if not exists source_processing_jobs (
+	id text primary key,
+	source_id text not null unique references source_sources(id) on delete cascade,
+	notebook_id text not null references notebook_notebooks(id) on delete cascade,
+	status text not null check (status in ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
+	attempt_no integer not null default 0 check (attempt_no between 0 and 3),
+	available_at timestamptz not null default now(),
+	lease_token uuid,
+	lease_expires_at timestamptz,
+	last_error_code text,
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now(),
+	constraint source_processing_jobs_lease_check check (
+		(status = 'queued' and lease_token is null and lease_expires_at is null)
+		or (status = 'running' and lease_token is not null and lease_expires_at is not null)
+		or (status in ('succeeded', 'failed', 'cancelled') and lease_token is null and lease_expires_at is null)
+	)
+);
+
+create index if not exists source_processing_jobs_claim_idx
+	on source_processing_jobs(available_at, created_at, id)
+	where status = 'queued';
+
 create table if not exists platform_idempotency_keys (
 	principal_id text not null,
 	action text not null,
@@ -729,6 +781,8 @@ alter table platform_replay_access_audit enable row level security;
 alter table notebook_notebooks enable row level security;
 alter table notebook_memberships enable row level security;
 alter table source_sources enable row level security;
+alter table source_upload_intents enable row level security;
+alter table source_processing_jobs enable row level security;
 alter table platform_idempotency_keys enable row level security;
 alter table chat_chats enable row level security;
 alter table chat_messages enable row level security;
@@ -752,6 +806,8 @@ grant select, insert, update, delete on
 	notebook_notebooks,
 	notebook_memberships,
 	source_sources,
+	source_upload_intents,
+	source_processing_jobs,
 	platform_idempotency_keys,
 	chat_chats,
 	chat_messages,
@@ -770,6 +826,7 @@ grant select on
 	chat_messages,
 	agent_runs
 to nano_worker;
+grant select, insert, update, delete on source_processing_jobs to nano_worker;
 grant select, insert, update, delete on agent_jobs to nano_worker;
 grant insert, update on chat_messages, chat_chats, agent_runs to nano_worker;
 revoke all on agent_run_checkpoints from nano_app, nano_worker;
@@ -874,6 +931,46 @@ drop policy if exists source_sources_app_delete on source_sources;
 create policy source_sources_app_delete on source_sources
 	for delete to nano_app
 	using (nano_has_notebook_capability(notebook_id, 'source.maintain'));
+
+drop policy if exists source_upload_intents_app_read on source_upload_intents;
+create policy source_upload_intents_app_read on source_upload_intents
+	for select to nano_app
+	using (
+		created_by_user_id = nullif(current_setting('app.principal_id', true), '')
+		and nano_has_notebook_capability(notebook_id, 'source.maintain')
+	);
+
+drop policy if exists source_upload_intents_app_insert on source_upload_intents;
+create policy source_upload_intents_app_insert on source_upload_intents
+	for insert to nano_app
+	with check (
+		created_by_user_id = nullif(current_setting('app.principal_id', true), '')
+		and nano_has_notebook_capability(notebook_id, 'source.maintain')
+	);
+
+drop policy if exists source_upload_intents_app_update on source_upload_intents;
+create policy source_upload_intents_app_update on source_upload_intents
+	for update to nano_app
+	using (
+		created_by_user_id = nullif(current_setting('app.principal_id', true), '')
+		and nano_has_notebook_capability(notebook_id, 'source.maintain')
+	)
+	with check (
+		created_by_user_id = nullif(current_setting('app.principal_id', true), '')
+		and nano_has_notebook_capability(notebook_id, 'source.maintain')
+	);
+
+drop policy if exists source_processing_jobs_app on source_processing_jobs;
+create policy source_processing_jobs_app on source_processing_jobs
+	for all to nano_app
+	using (nano_has_notebook_capability(notebook_id, 'source.maintain'))
+	with check (nano_has_notebook_capability(notebook_id, 'source.maintain'));
+
+drop policy if exists source_processing_jobs_worker on source_processing_jobs;
+create policy source_processing_jobs_worker on source_processing_jobs
+	for all to nano_worker
+	using (true)
+	with check (true);
 
 drop policy if exists platform_idempotency_owner on platform_idempotency_keys;
 create policy platform_idempotency_owner on platform_idempotency_keys

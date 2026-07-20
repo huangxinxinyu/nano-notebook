@@ -95,6 +95,7 @@ services:
         mc alias set local http://minio:9000 nano nano-password
         mc mb --ignore-existing local/nano-agent-replay-staging
         mc mb --ignore-existing local/nano-agent-replay
+        mc mb --ignore-existing local/nano-sources
 
   qdrant:
     image: qdrant/qdrant:v1.15.1

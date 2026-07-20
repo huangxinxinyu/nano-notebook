@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -23,7 +24,7 @@ func TestS3StorePresignsChecksumBoundDirectUploadPolicy(t *testing.T) {
 	store, err := objectstore.NewS3Store(objectstore.S3Config{
 		Endpoint: endpoint, AccessKeyID: directUploadTestEnv("NANO_TEST_S3_ACCESS_KEY_ID", "nano"),
 		SecretAccessKey: directUploadTestEnv("NANO_TEST_S3_SECRET_ACCESS_KEY", "nano-password"),
-		Bucket:          directUploadTestEnv("NANO_TEST_S3_BUCKET", "nano-agent-replay-staging"),
+		Bucket:          directUploadTestEnv("NANO_TEST_S3_BUCKET", "nano-sources"),
 		Region:          directUploadTestEnv("NANO_TEST_S3_REGION", "us-east-1"),
 	})
 	if err != nil {
@@ -67,7 +68,7 @@ func TestS3StoreValidatesACompletedDirectUpload(t *testing.T) {
 	store, err := objectstore.NewS3Store(objectstore.S3Config{
 		Endpoint: endpoint, AccessKeyID: directUploadTestEnv("NANO_TEST_S3_ACCESS_KEY_ID", "nano"),
 		SecretAccessKey: directUploadTestEnv("NANO_TEST_S3_SECRET_ACCESS_KEY", "nano-password"),
-		Bucket:          directUploadTestEnv("NANO_TEST_S3_BUCKET", "nano-agent-replay-staging"),
+		Bucket:          directUploadTestEnv("NANO_TEST_S3_BUCKET", "nano-sources"),
 		Region:          directUploadTestEnv("NANO_TEST_S3_REGION", "us-east-1"),
 	})
 	if err != nil {
@@ -77,10 +78,12 @@ func TestS3StoreValidatesACompletedDirectUpload(t *testing.T) {
 	payload := []byte("The quick brown fox jumps over the lazy dog")
 	digest := sha256.Sum256(payload)
 	request := objectstore.UploadPolicyRequest{
-		Key: "sources/upl_completed/original", MediaType: "text/plain", ByteSize: int64(len(payload)),
+		Key: "source-upload-intents/upl_completed/payload", MediaType: "text/plain", ByteSize: int64(len(payload)),
 		ContentSHA256: hex.EncodeToString(digest[:]), ExpiresAt: time.Now().UTC().Add(15 * time.Minute),
 	}
+	destinationKey := "sources/src_completed/original/" + request.ContentSHA256
 	t.Cleanup(func() { _ = store.Delete(context.Background(), request.Key) })
+	t.Cleanup(func() { _ = store.Delete(context.Background(), destinationKey) })
 	policy, err := store.PresignUpload(context.Background(), request)
 	if err != nil {
 		t.Fatal(err)
@@ -123,6 +126,20 @@ func TestS3StoreValidatesACompletedDirectUpload(t *testing.T) {
 	}
 	if info.Key != request.Key || info.Size != request.ByteSize {
 		t.Fatalf("validated object = %+v, want key %q size %d", info, request.Key, request.ByteSize)
+	}
+	promoted, err := store.PromoteUpload(context.Background(), request, destinationKey)
+	if err != nil {
+		t.Fatalf("PromoteUpload: %v", err)
+	}
+	if promoted.Key != destinationKey || promoted.Size != request.ByteSize {
+		t.Fatalf("promoted object = %+v, want key %q size %d", promoted, destinationKey, request.ByteSize)
+	}
+	stored, err := store.Get(context.Background(), destinationKey, int64(len(payload)))
+	if err != nil || !bytes.Equal(stored, payload) {
+		t.Fatalf("promoted bytes = %q, err=%v", stored, err)
+	}
+	if _, err := store.Stat(context.Background(), request.Key); !errors.Is(err, objectstore.ErrNotFound) {
+		t.Fatalf("staging object after promotion error = %v, want not found", err)
 	}
 }
 

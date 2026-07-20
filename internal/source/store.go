@@ -10,9 +10,11 @@ import (
 )
 
 var (
-	ErrNotFound     = errors.New("source or notebook not found")
-	ErrDuplicate    = errors.New("duplicate Source")
-	ErrQuotaReached = errors.New("Source quota reached")
+	ErrNotFound            = errors.New("source or notebook not found")
+	ErrDuplicate           = errors.New("duplicate Source")
+	ErrQuotaReached        = errors.New("Source quota reached")
+	ErrIdempotencyMismatch = errors.New("upload intent idempotency mismatch")
+	ErrUploadIntentExpired = errors.New("upload intent expired")
 )
 
 type DuplicateError struct {
@@ -46,6 +48,14 @@ const (
 	StateUploaded State = "uploaded"
 )
 
+type UploadIntentState string
+
+const (
+	UploadIntentPending   UploadIntentState = "pending"
+	UploadIntentFinalized UploadIntentState = "finalized"
+	UploadIntentExpired   UploadIntentState = "expired"
+)
+
 type Source struct {
 	ID                string    `json:"id"`
 	NotebookID        string    `json:"notebook_id"`
@@ -69,6 +79,39 @@ type CreateUploadedCommand struct {
 	ByteSize          int64
 	ContentSHA256     string
 	OriginalObjectKey string
+}
+
+type UploadIntent struct {
+	ID             string            `json:"id"`
+	SourceID       string            `json:"source_id"`
+	NotebookID     string            `json:"notebook_id"`
+	IdempotencyKey string            `json:"-"`
+	RequestHash    string            `json:"-"`
+	Title          string            `json:"title"`
+	Format         Format            `json:"format"`
+	MediaType      string            `json:"media_type"`
+	ByteSize       int64             `json:"byte_size"`
+	ContentSHA256  string            `json:"content_sha256"`
+	ObjectKey      string            `json:"-"`
+	State          UploadIntentState `json:"state"`
+	ExpiresAt      time.Time         `json:"expires_at"`
+	CreatedAt      time.Time         `json:"created_at"`
+	FinalizedAt    *time.Time        `json:"finalized_at,omitempty"`
+}
+
+type CreateUploadIntentCommand struct {
+	ID             string
+	SourceID       string
+	NotebookID     string
+	IdempotencyKey string
+	RequestHash    string
+	Title          string
+	Format         Format
+	MediaType      string
+	ByteSize       int64
+	ContentSHA256  string
+	ObjectKey      string
+	ExpiresAt      time.Time
 }
 
 type DBTX interface {
@@ -131,6 +174,157 @@ func (s *Store) CreateUploaded(ctx context.Context, command CreateUploadedComman
 		&created.CreatedAt, &created.UpdatedAt,
 	)
 	return created, err
+}
+
+func (s *Store) CreateUploadIntent(ctx context.Context, command CreateUploadIntentCommand) (UploadIntent, bool, error) {
+	if err := s.requireCapability(ctx, command.NotebookID, CapabilityMaintain); err != nil {
+		return UploadIntent{}, false, err
+	}
+	var principalID string
+	if err := s.db.QueryRow(ctx, `select nullif(current_setting('app.principal_id', true), '')`).Scan(&principalID); err != nil {
+		return UploadIntent{}, false, err
+	}
+	if _, err := s.db.Exec(ctx, `
+		select pg_advisory_xact_lock(hashtextextended($1, 0))
+	`, "source-upload-intent:"+principalID+":"+command.IdempotencyKey); err != nil {
+		return UploadIntent{}, false, err
+	}
+	existing, err := s.uploadIntentByIdempotency(ctx, principalID, command.IdempotencyKey)
+	if err == nil {
+		if existing.RequestHash != command.RequestHash {
+			return UploadIntent{}, false, ErrIdempotencyMismatch
+		}
+		return existing, true, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return UploadIntent{}, false, err
+	}
+
+	var created UploadIntent
+	err = s.db.QueryRow(ctx, `
+		insert into source_upload_intents(
+			id, source_id, notebook_id, created_by_user_id, idempotency_key, request_hash,
+			title, format, media_type, byte_size, content_sha256, object_key, state, expires_at
+		) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending', $13)
+		returning id, source_id, notebook_id, idempotency_key, request_hash, title, format,
+			media_type, byte_size, content_sha256, object_key, state, expires_at, created_at, finalized_at`,
+		command.ID, command.SourceID, command.NotebookID, principalID, command.IdempotencyKey,
+		command.RequestHash, command.Title, command.Format, command.MediaType, command.ByteSize,
+		command.ContentSHA256, command.ObjectKey, command.ExpiresAt,
+	).Scan(
+		&created.ID, &created.SourceID, &created.NotebookID, &created.IdempotencyKey,
+		&created.RequestHash, &created.Title, &created.Format, &created.MediaType, &created.ByteSize,
+		&created.ContentSHA256, &created.ObjectKey, &created.State, &created.ExpiresAt,
+		&created.CreatedAt, &created.FinalizedAt,
+	)
+	return created, false, err
+}
+
+func (s *Store) uploadIntentByIdempotency(ctx context.Context, principalID, key string) (UploadIntent, error) {
+	var intent UploadIntent
+	err := s.db.QueryRow(ctx, `
+		select id, source_id, notebook_id, idempotency_key, request_hash, title, format,
+			media_type, byte_size, content_sha256, object_key, state, expires_at, created_at, finalized_at
+		from source_upload_intents
+		where created_by_user_id = $1 and idempotency_key = $2`, principalID, key,
+	).Scan(
+		&intent.ID, &intent.SourceID, &intent.NotebookID, &intent.IdempotencyKey,
+		&intent.RequestHash, &intent.Title, &intent.Format, &intent.MediaType, &intent.ByteSize,
+		&intent.ContentSHA256, &intent.ObjectKey, &intent.State, &intent.ExpiresAt,
+		&intent.CreatedAt, &intent.FinalizedAt,
+	)
+	return intent, err
+}
+
+func (s *Store) UploadIntentByID(ctx context.Context, id string) (UploadIntent, error) {
+	var intent UploadIntent
+	err := s.db.QueryRow(ctx, `
+		select id, source_id, notebook_id, idempotency_key, request_hash, title, format,
+			media_type, byte_size, content_sha256, object_key, state, expires_at, created_at, finalized_at
+		from source_upload_intents
+		where id = $1`, id,
+	).Scan(
+		&intent.ID, &intent.SourceID, &intent.NotebookID, &intent.IdempotencyKey,
+		&intent.RequestHash, &intent.Title, &intent.Format, &intent.MediaType, &intent.ByteSize,
+		&intent.ContentSHA256, &intent.ObjectKey, &intent.State, &intent.ExpiresAt,
+		&intent.CreatedAt, &intent.FinalizedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return UploadIntent{}, ErrNotFound
+	}
+	return intent, err
+}
+
+func (s *Store) FinalizeUploadIntent(ctx context.Context, id, processingJobID, originalObjectKey string, now time.Time) (Source, bool, error) {
+	var intent UploadIntent
+	err := s.db.QueryRow(ctx, `
+		select id, source_id, notebook_id, idempotency_key, request_hash, title, format,
+			media_type, byte_size, content_sha256, object_key, state, expires_at, created_at, finalized_at
+		from source_upload_intents
+		where id = $1
+		for update`, id,
+	).Scan(
+		&intent.ID, &intent.SourceID, &intent.NotebookID, &intent.IdempotencyKey,
+		&intent.RequestHash, &intent.Title, &intent.Format, &intent.MediaType, &intent.ByteSize,
+		&intent.ContentSHA256, &intent.ObjectKey, &intent.State, &intent.ExpiresAt,
+		&intent.CreatedAt, &intent.FinalizedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Source{}, false, ErrNotFound
+	}
+	if err != nil {
+		return Source{}, false, err
+	}
+	if err := s.requireCapability(ctx, intent.NotebookID, CapabilityMaintain); err != nil {
+		return Source{}, false, err
+	}
+	if intent.State == UploadIntentFinalized {
+		created, err := s.sourceByID(ctx, intent.SourceID)
+		return created, true, err
+	}
+	if intent.State != UploadIntentPending || !intent.ExpiresAt.After(now) {
+		return Source{}, false, ErrUploadIntentExpired
+	}
+
+	created, err := s.CreateUploaded(ctx, CreateUploadedCommand{
+		ID: intent.SourceID, NotebookID: intent.NotebookID, Title: intent.Title,
+		Format: intent.Format, MediaType: intent.MediaType, ByteSize: intent.ByteSize,
+		ContentSHA256: intent.ContentSHA256, OriginalObjectKey: originalObjectKey,
+	})
+	if err != nil {
+		return Source{}, false, err
+	}
+	if _, err := s.db.Exec(ctx, `
+		insert into source_processing_jobs(id, source_id, notebook_id, status)
+		values ($1, $2, $3, 'queued')
+	`, processingJobID, created.ID, created.NotebookID); err != nil {
+		return Source{}, false, err
+	}
+	if _, err := s.db.Exec(ctx, `
+		update source_upload_intents
+		set state = 'finalized', finalized_at = $2
+		where id = $1
+	`, intent.ID, now); err != nil {
+		return Source{}, false, err
+	}
+	return created, false, nil
+}
+
+func (s *Store) sourceByID(ctx context.Context, id string) (Source, error) {
+	var item Source
+	err := s.db.QueryRow(ctx, `
+		select id, notebook_id, title, format, media_type, byte_size,
+			content_sha256, original_object_key, state, created_at, updated_at
+		from source_sources where id = $1`, id,
+	).Scan(
+		&item.ID, &item.NotebookID, &item.Title, &item.Format, &item.MediaType,
+		&item.ByteSize, &item.ContentSHA256, &item.OriginalObjectKey, &item.State,
+		&item.CreatedAt, &item.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Source{}, ErrNotFound
+	}
+	return item, err
 }
 
 func (s *Store) ListForNotebook(ctx context.Context, notebookID string) ([]Source, error) {
