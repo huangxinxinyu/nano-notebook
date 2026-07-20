@@ -284,6 +284,39 @@ test("renames, retries, and confirms permanent Source removal", async () => {
   await waitFor(() => expect(actions).toEqual(["retry:src_failed", "rename:new-name.pdf", "delete:src_ready"]));
 });
 
+test("opens an immutable image Source with its Evidence region highlighted", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [
+      { id: "src_image", notebook_id: "nb_test", title: "diagram.png", format: "png", byte_size: 1024, state: "ready" }
+    ] });
+    if (url.endsWith("/api/v1/sources/src_image") && method === "GET") return json({ source: {
+      id: "src_image", title: "diagram.png", format: "png",
+      revision: { coverage: { status: "complete", gaps: [] }, units: [
+        { id: "unit_image", kind: "paragraph", text: "Architecture diagram", coordinate: { kind: "image_region", x: 10, y: 20, width: 30, height: 40 } }
+      ] }
+    } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({ chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" }, messages: [], runs: [], citations: [] });
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  const sources = await screen.findByRole("region", { name: "Sources" });
+  await user.click(await within(sources).findByRole("button", { name: "diagram.png" }));
+  const dialog = await screen.findByRole("dialog", { name: "diagram.png" });
+  const image = within(dialog).getByRole("img", { name: "diagram.png" });
+  expect(image).toHaveAttribute("src", "/api/v1/sources/src_image/viewer-asset");
+  Object.defineProperties(image, { naturalWidth: { value: 100 }, naturalHeight: { value: 100 } });
+  act(() => image.dispatchEvent(new Event("load")));
+  expect(dialog.querySelector(".source-image-highlight")).toHaveStyle({ left: "10%", top: "20%", width: "30%", height: "40%" });
+});
+
 test("opens a published Citation without exposing retrieval internals", async () => {
   window.history.pushState(null, "", "/notebooks/nb_test");
   fetchHandler = async (input, init) => {
@@ -297,12 +330,20 @@ test("opens a published Citation without exposing retrieval internals", async ()
       chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" },
       messages: [{ id: "msg_answer", role: "assistant", content: "KV caching avoids recomputing prior keys and values.", created_at: "2026-07-20T12:00:00Z" }],
       runs: [],
-      citations: [{ id: "cit_1", message_id: "msg_answer", claim_ordinal: 0, citation_ordinal: 0, claim_text: "KV caching avoids recomputing prior keys and values.", source_id: "src_1", evidence_revision_id: "rev_1", unit_id: "unit_1", start_rune: 10, end_rune: 67 }]
+      citations: [
+        { id: "cit_1", message_id: "msg_answer", claim_ordinal: 0, citation_ordinal: 0, claim_text: "KV caching avoids recomputing prior keys and values.", source_id: "src_1", evidence_revision_id: "rev_1", unit_id: "unit_1", start_rune: 10, end_rune: 67 },
+        { id: "cit_2", message_id: "msg_answer", claim_ordinal: 0, citation_ordinal: 1, claim_text: "KV caching avoids recomputing prior keys and values.", source_id: "src_image", evidence_revision_id: "rev_image", unit_id: "unit_image", start_rune: 0, end_rune: 7 }
+      ]
     });
     if (url.endsWith("/api/v1/citations/cit_1")) return json({ citation: {
       citation: { id: "cit_1", message_id: "msg_answer", claim_ordinal: 0, citation_ordinal: 0, claim_text: "KV caching avoids recomputing prior keys and values.", source_id: "src_1", evidence_revision_id: "rev_1", unit_id: "unit_1", start_rune: 10, end_rune: 67 },
       source_title: "transformer-notes.pdf", source_format: "pdf", unit_kind: "paragraph",
       preview: "The cache stores keys and values from all prior token positions.", coordinate: { page: 12 }
+    } });
+    if (url.endsWith("/api/v1/citations/cit_2")) return json({ citation: {
+      citation: { id: "cit_2", message_id: "msg_answer", claim_ordinal: 0, citation_ordinal: 1, claim_text: "KV caching avoids recomputing prior keys and values.", source_id: "src_image", evidence_revision_id: "rev_image", unit_id: "unit_image", start_rune: 0, end_rune: 7 },
+      source_title: "cache-diagram.png", source_format: "png", unit_kind: "paragraph",
+      preview: "Diagram", coordinate: { x: 10, y: 20, width: 30, height: 40 }
     } });
     return json({ error: { code: "not_found" } }, 404);
   };
@@ -329,6 +370,11 @@ test("opens a published Citation without exposing retrieval internals", async ()
   expect(within(dialog).getByText("The cache stores keys and values from all prior token positions.")).toBeInTheDocument();
   expect(within(dialog).getByText("Page 12")).toBeInTheDocument();
   expect(within(dialog).queryByText(/rev_1|unit_1/)).not.toBeInTheDocument();
+  await user.click(within(dialog).getByRole("button", { name: "Close" }));
+  await user.click(within(chat).getByRole("button", { name: "Citation 2 for KV caching avoids recomputing prior keys and values." }));
+  const imageDialog = await screen.findByRole("dialog", { name: "cache-diagram.png" });
+  const image = within(imageDialog).getByRole("img", { name: "cache-diagram.png" });
+  expect(image).toHaveAttribute("src", "/api/v1/sources/src_image/viewer-asset");
 });
 
 test("submits one durable Message and projects the final answer from Run SSE", async () => {

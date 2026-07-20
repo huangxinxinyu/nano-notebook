@@ -2,11 +2,16 @@ package app_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/huangxinxinyu/nano-notebook/internal/app"
+	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 )
 
 func TestReadySourceViewerReturnsAuthoritativeUnitsAndCoverageWithoutCustody(t *testing.T) {
@@ -120,6 +125,58 @@ func TestReadySourceViewerReturnsAuthoritativeUnitsAndCoverageWithoutCustody(t *
 		if denied.Code != want {
 			t.Fatalf("denied status=%d want=%d body=%s", denied.Code, want, denied.Body.String())
 		}
+	}
+}
+
+func TestImageViewerAssetStreamsOnlyAuthorizedReadyInlineContent(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "image-view@example.com")
+	intruder := api.register(t, "image-view-intruder@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "image-view")
+	ownerID := sourceTestUserID(t, api, "image-view@example.com")
+	payload := mustDecodeBase64("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2n0YAAAAASUVORK5CYII=")
+	digest := sha256.Sum256(payload)
+	objectKey := fmt.Sprintf("sources/src_image_view/original/%x", digest)
+	seedSourceProcessingJob(t, api, ownerID, notebookID, "src_image_view", "srcjob_image_view", "5")
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		update source_sources set state='ready', title='diagram.png', format='png', media_type='image/png',
+			byte_size=$2, content_sha256=$3, original_object_key=$4 where id=$1
+	`, "src_image_view", len(payload), fmt.Sprintf("%x", digest), objectKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into source_evidence_revisions(id,source_id,notebook_id,revision_no,extraction_config_id,artifact_schema_version,artifact_object_key,artifact_sha256,status,activated_at)
+		values('evr_image_view',$1,$2,1,'extract-image-v1','nano.normalized-source.v1','normalized/image.json',$3,'active',now())
+	`, "src_image_view", notebookID, fmt.Sprintf("%x", digest)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into source_evidence_coverage(revision_id,status,total_runes) values('evr_image_view','complete',7)
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into source_evidence_units(id,revision_id,source_id,notebook_id,ordinal,kind,text_content,start_rune,end_rune,coordinate_json)
+		values('unit_image_view','evr_image_view',$1,$2,0,'paragraph','Diagram',0,7,'{"kind":"image_region","x":0,"y":0,"width":1,"height":1}'::jsonb)
+	`, "src_image_view", notebookID); err != nil {
+		t.Fatal(err)
+	}
+	objects := objectstore.NewMemoryStore()
+	if err := objects.Put(context.Background(), objectKey, payload); err != nil {
+		t.Fatal(err)
+	}
+	api.server = app.NewServer(app.Config{CookieSecure: false, SourceSnapshots: objects}, api.db)
+	api.handler = api.server.Handler()
+
+	response := api.getWithCookie(t, "/api/v1/sources/src_image_view/viewer-asset", owner)
+	if response.Code != http.StatusOK || response.Body.String() != string(payload) || response.Header().Get("Content-Type") != "image/png" ||
+		response.Header().Get("Content-Disposition") != `inline; filename="source-image"` || response.Header().Get("Cache-Control") != "private, no-store" ||
+		response.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("viewer asset status=%d headers=%v body=%x", response.Code, response.Header(), response.Body.Bytes())
+	}
+	denied := api.getWithCookie(t, "/api/v1/sources/src_image_view/viewer-asset", intruder)
+	if denied.Code != http.StatusNotFound || strings.Contains(denied.Body.String(), objectKey) {
+		t.Fatalf("intruder viewer asset=%d %s", denied.Code, denied.Body.String())
 	}
 }
 

@@ -255,8 +255,12 @@ func (s *Server) sourceByID(w http.ResponseWriter, r *http.Request) {
 	}
 	remainder := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/sources/"), "/")
 	parts := strings.Split(remainder, "/")
-	if parts[0] == "" || len(parts) > 2 || (len(parts) == 2 && parts[1] != "retry") {
+	if parts[0] == "" || len(parts) > 2 || (len(parts) == 2 && parts[1] != "retry" && parts[1] != "viewer-asset") {
 		writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
+		return
+	}
+	if r.Method == http.MethodGet && len(parts) == 2 && parts[1] == "viewer-asset" {
+		s.writeSourceViewerAsset(w, r, user.ID, parts[0])
 		return
 	}
 	if r.Method == http.MethodGet && len(parts) == 1 {
@@ -344,4 +348,46 @@ func (s *Server) sourceByID(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
 	}
+}
+
+func (s *Server) writeSourceViewerAsset(w http.ResponseWriter, r *http.Request, userID, sourceID string) {
+	if s.cfg.SourceSnapshots == nil {
+		writeError(w, r, http.StatusServiceUnavailable, "source_unavailable", "error.source_unavailable")
+		return
+	}
+	var asset evidence.ViewerAsset
+	err := s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
+		var readErr error
+		asset, readErr = evidence.NewReader(tx).ViewerAsset(r.Context(), sourceID)
+		return readErr
+	})
+	switch {
+	case errors.Is(err, evidence.ErrSourceNotFound):
+		writeError(w, r, http.StatusNotFound, "not_found", "error.source_not_found")
+		return
+	case errors.Is(err, evidence.ErrSourceNotReady), errors.Is(err, evidence.ErrViewerUnsupported):
+		writeError(w, r, http.StatusConflict, "viewer_unavailable", "error.source_not_ready")
+		return
+	case errors.Is(err, evidence.ErrEvidenceUnavailable):
+		writeError(w, r, http.StatusGone, "source_unavailable", "error.source_unavailable")
+		return
+	case err != nil:
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	payload, err := s.cfg.SourceSnapshots.Get(r.Context(), asset.ObjectKey, asset.ByteSize)
+	digest := sha256.Sum256(payload)
+	if err != nil || int64(len(payload)) != asset.ByteSize || hex.EncodeToString(digest[:]) != asset.ContentSHA256 {
+		writeError(w, r, http.StatusGone, "source_unavailable", "error.source_unavailable")
+		return
+	}
+	mediaType := map[source.Format]string{
+		source.FormatPNG: "image/png", source.FormatJPEG: "image/jpeg", source.FormatWebP: "image/webp",
+	}[asset.Format]
+	w.Header().Set("Content-Type", mediaType)
+	w.Header().Set("Content-Disposition", `inline; filename="source-image"`)
+	w.Header().Set("Cache-Control", "private, no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(payload)
 }

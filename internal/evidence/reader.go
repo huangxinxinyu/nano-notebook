@@ -14,7 +14,15 @@ var (
 	ErrSourceNotFound      = errors.New("Source evidence not found")
 	ErrSourceNotReady      = errors.New("Source evidence not ready")
 	ErrEvidenceUnavailable = errors.New("active Source evidence unavailable")
+	ErrViewerUnsupported   = errors.New("Source has no inline viewer asset")
 )
+
+type ViewerAsset struct {
+	Format        source.Format
+	ByteSize      int64
+	ContentSHA256 string
+	ObjectKey     string
+}
 
 type SourceView struct {
 	ID         string        `json:"id"`
@@ -69,6 +77,37 @@ type Reader struct {
 
 func NewReader(db readerDB) *Reader {
 	return &Reader{db: db}
+}
+
+func (r *Reader) ViewerAsset(ctx context.Context, sourceID string) (ViewerAsset, error) {
+	if r == nil || r.db == nil || sourceID == "" {
+		return ViewerAsset{}, ErrSourceNotFound
+	}
+	var asset ViewerAsset
+	var state source.State
+	err := r.db.QueryRow(ctx, `
+		select s.format,s.byte_size,s.content_sha256,s.original_object_key,s.state
+		from source_sources s
+		where s.id=$1 and exists (
+			select 1 from source_evidence_revisions r where r.source_id=s.id and r.status='active'
+		)
+	`, sourceID).Scan(&asset.Format, &asset.ByteSize, &asset.ContentSHA256, &asset.ObjectKey, &state)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ViewerAsset{}, ErrSourceNotFound
+	}
+	if err != nil {
+		return ViewerAsset{}, err
+	}
+	if state != source.StateReady {
+		return ViewerAsset{}, ErrSourceNotReady
+	}
+	if asset.Format != source.FormatPNG && asset.Format != source.FormatJPEG && asset.Format != source.FormatWebP {
+		return ViewerAsset{}, ErrViewerUnsupported
+	}
+	if asset.ByteSize < 1 || asset.ByteSize > 100*1024*1024 || len(asset.ContentSHA256) != 64 || asset.ObjectKey == "" {
+		return ViewerAsset{}, ErrEvidenceUnavailable
+	}
+	return asset, nil
 }
 
 func (r *Reader) SourceView(ctx context.Context, sourceID string) (SourceView, error) {

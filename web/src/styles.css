@@ -1575,6 +1575,33 @@ h2 {
   margin-top: 16px;
 }
 
+.source-image-viewer {
+  position: relative;
+  align-self: center;
+  overflow: hidden;
+  max-width: 100%;
+  max-height: min(520px, 60vh);
+  margin-top: 16px;
+  border-radius: 10px;
+  background: var(--control-background);
+}
+
+.source-image-viewer img {
+  display: block;
+  max-width: 100%;
+  max-height: min(520px, 60vh);
+  object-fit: contain;
+}
+
+.source-image-highlight {
+  position: absolute;
+  border: 2px solid var(--focus-ring);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--focus-ring) 18%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, white 72%, transparent) inset;
+  pointer-events: none;
+}
+
 .source-viewer-content section {
   padding: 10px 0;
   border-top: 1px solid var(--border-subtle);

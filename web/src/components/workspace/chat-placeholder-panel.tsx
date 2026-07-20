@@ -14,6 +14,7 @@ import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import { appendMessageText, type ChatController, type ChatMessage, type Citation } from "./private-chat";
+import { SourceImageViewer, type SourceImageRegion } from "./source-image-viewer";
 
 export type ChatPanelCopy = {
   title: string;
@@ -141,7 +142,7 @@ function AssistantMessage({ controller, copy }: { controller: ChatController; co
   );
 }
 
-type Coordinate = { page?: number; slide?: number; start_ms?: number; end_ms?: number };
+type Coordinate = { page?: number; slide?: number; start_ms?: number; end_ms?: number } & SourceImageRegion;
 
 type CitationView = {
   citation: Citation;
@@ -187,10 +188,17 @@ function CitationButton({ citation, number, copy }: { citation: Citation; number
         <DialogTitle>{view.data?.source_title ?? copy.citationPreviewLabel}</DialogTitle>
         <DialogDescription>{view.data ? citationLocation(view.data) : copy.citationPreviewLabel}</DialogDescription>
         {view.isError ? <p role="alert">{copy.citationUnavailableLabel}</p> : null}
+        {view.data && isImageFormat(view.data.source_format) ? (
+          <SourceImageViewer sourceID={view.data.citation.source_id} title={view.data.source_title} regions={[view.data.coordinate ?? {}]} />
+        ) : null}
         {view.data ? <blockquote>{view.data.preview}</blockquote> : null}
       </DialogContent>
     </Dialog>
   );
+}
+
+function isImageFormat(format: string) {
+  return format === "png" || format === "jpeg" || format === "webp";
 }
 
 function citationLocation(view: CitationView) {

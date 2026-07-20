@@ -9,14 +9,15 @@ import { Input } from "../ui/input";
 import { Label } from "../ui/label";
 import { acceptedSourceFormats, csrfToken, memberAPI, uploadSourceFile } from "./source-upload";
 import type { MemberSource, SourcesController } from "./sources";
+import { SourceImageViewer, type SourceImageRegion } from "./source-image-viewer";
 
 type SourceCoordinate = {
   page_number?: number;
   slide_number?: number;
   start_seconds?: number;
   end_seconds?: number;
-  [key: string]: unknown;
-};
+  kind?: string;
+} & SourceImageRegion;
 
 type SourceView = {
   id: string;
@@ -265,10 +266,21 @@ function SourceViewer({ sourceID, onOpenChange, copy }: {
             {view.data.revision.coverage.gaps.map((gap, index) => <p key={index}>{gap.reason} · {gap.impact}</p>)}
           </div>
         ) : null}
+        {view.data && isImageFormat(view.data.format) ? (
+          <SourceImageViewer
+            sourceID={view.data.id}
+            title={view.data.title}
+            regions={view.data.revision.units.map((unit) => unit.coordinate ?? {}).filter((coordinate) => coordinate.kind === "image_region")}
+          />
+        ) : null}
         <div className="source-viewer-content">
           {view.data?.revision.units.map((unit) => <section key={unit.id}><small>{unit.kind}</small><p>{unit.text}</p></section>)}
         </div>
       </DialogContent>
     </Dialog>
   );
+}
+
+function isImageFormat(format: string) {
+  return format === "png" || format === "jpeg" || format === "webp";
 }
