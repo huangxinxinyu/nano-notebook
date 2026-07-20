@@ -1,0 +1,23 @@
+{
+  "extraction_config_id": "nano-native-extract-v1",
+  "evidence_schema_version": 1,
+  "index": {
+    "chunk": {"max_runes": 800, "overlap_runes": 120, "preserve_heading_context": true},
+    "analyzer_id": "nano-mixed-v1",
+    "bm25_k1": 1.2,
+    "bm25_b": 0.75,
+    "bm25_average_document_length": 240,
+    "embedding_model": "text-embedding-v1",
+    "embedding_dimensions": 1024,
+    "dense_candidates": 40,
+    "sparse_candidates": 40,
+    "rrf_k": 60,
+    "reranker_id": "qwen-rerank-v1",
+    "rerank_candidates": 20,
+    "degradation_policy_id": "hybrid-required-v1"
+  },
+  "composer_model": "qwen-plus",
+  "verifier_model": "qwen-plus",
+  "prompt_version": "grounded-v1",
+  "agent_config_id": "nano-research-v1"
+}
