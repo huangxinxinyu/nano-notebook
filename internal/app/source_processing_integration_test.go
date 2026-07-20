@@ -145,6 +145,50 @@ func TestDOCXSourceProcessorPublishesStructuralEvidenceAndReady(t *testing.T) {
 	}
 }
 
+func TestHTMLSnapshotProcessorPublishesPrimaryEvidenceAndReady(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "source-processing-html@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-processing-html")
+	ownerID := sourceTestUserID(t, api, "source-processing-html@example.com")
+	payload := []byte(`<html><body><nav>Noise</nav><main><h1>Snapshot</h1><p>Primary web evidence.</p></main></body></html>`)
+	objectKey := seedProcessableSource(t, api, ownerID, notebookID, "src_processing_html", "srcjob_processing_html", source.FormatTXT, payload)
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		update source_sources set format='html', media_type='text/html' where id='src_processing_html'
+	`); err != nil {
+		t.Fatal(err)
+	}
+	objects := objectstore.NewMemoryStore()
+	if err := objects.Put(context.Background(), objectKey, payload); err != nil {
+		t.Fatal(err)
+	}
+	queue := sourcejobs.NewQueue(api.db.Pool(), time.Minute)
+	lease, ok, err := queue.Claim(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
+	}
+	processor := sourceprocessing.NewProcessor(
+		api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, newRecordingEvidenceProjection(t, api),
+		sourceprocessing.Config{ExtractionConfigID: "extract-native-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000},
+	)
+	if err := processor.ProcessLease(context.Background(), lease); err != nil {
+		t.Fatal(err)
+	}
+	var state source.State
+	var evidenceText, coordinateKind string
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select s.state, string_agg(u.text_content, ' ' order by u.ordinal), min(u.coordinate_json->>'kind')
+		from source_sources s
+		join source_evidence_revisions r on r.source_id=s.id and r.status='active'
+		join source_evidence_units u on u.revision_id=r.id
+		where s.id='src_processing_html' group by s.state
+	`).Scan(&state, &evidenceText, &coordinateKind); err != nil {
+		t.Fatal(err)
+	}
+	if state != source.StateReady || evidenceText != "Snapshot Primary web evidence." || coordinateKind != "html_block" {
+		t.Fatalf("state=%q evidence=%q coordinate=%q", state, evidenceText, coordinateKind)
+	}
+}
+
 func TestSourceProcessorPublishesOnlyBoundedNonPrimaryCoverageGaps(t *testing.T) {
 	t.Run("bounded gap reaches Ready", func(t *testing.T) {
 		api := newTestAPI(t)

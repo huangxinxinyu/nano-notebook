@@ -211,6 +211,8 @@ func (nativeExtractor) Extract(item source.Source, payload []byte, extractionCon
 		return normalize.PDF(input)
 	case source.FormatDOCX, source.FormatPPTX:
 		return normalize.OOXML(input)
+	case source.FormatHTML:
+		return normalize.HTML(input)
 	default:
 		return normalize.Artifact{}, errors.New("Extractor Adapter is not configured for Source format")
 	}

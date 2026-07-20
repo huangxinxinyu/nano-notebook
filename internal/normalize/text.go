@@ -127,7 +127,7 @@ func canonicalArtifact(artifact Artifact) ([]byte, error) {
 func Validate(artifact Artifact) error {
 	if artifact.SchemaVersion != "nano.normalized-source.v1" || strings.TrimSpace(artifact.SourceID) == "" ||
 		strings.TrimSpace(artifact.ExtractionConfigID) == "" ||
-		(artifact.Format != "txt" && artifact.Format != "markdown" && artifact.Format != "pdf" && artifact.Format != "docx" && artifact.Format != "pptx") ||
+		(artifact.Format != "txt" && artifact.Format != "markdown" && artifact.Format != "pdf" && artifact.Format != "docx" && artifact.Format != "pptx" && artifact.Format != "html") ||
 		!utf8.ValidString(artifact.Text) || len(artifact.Blocks) == 0 {
 		return errors.New("invalid normalized artifact identity or primary content")
 	}
@@ -198,6 +198,9 @@ func validCoordinate(format string, coordinate *SourceCoordinate) bool {
 	}
 	if format == "docx" {
 		return coordinate.Kind == "document_block" && coordinate.Block > 0
+	}
+	if format == "html" {
+		return coordinate.Kind == "html_block" && coordinate.Block > 0
 	}
 	if format == "pptx" {
 		return coordinate.Kind == "slide_region" && coordinate.Slide > 0 && validRegionCoordinate(coordinate)
