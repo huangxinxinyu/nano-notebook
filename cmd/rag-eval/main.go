@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/rageval"
 	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
@@ -31,14 +32,16 @@ func run(args []string, output io.Writer) error {
 	suitePath := flags.String("suite", "evals/rag/sprint6-v1.json", "path to the frozen Eval Suite")
 	configPath := flags.String("config", "evals/rag/pinned-config-v1.json", "path to the pinned product configuration")
 	observationsPath := flags.String("observations", "", "path to observations emitted by the product Eval Executor")
+	executorCommand := flags.String("executor-command", "", "bounded product Case Executor command (JSON stdin/stdout)")
+	executorTimeout := flags.Duration("executor-timeout", 5*time.Minute, "per-Case product Executor timeout")
 	databaseURL := flags.String("database-url", "", "PostgreSQL URL used to record and promote a passing candidate")
 	evalRunID := flags.String("eval-run-id", "", "durable Eval Run identity")
 	versionID := flags.String("index-version-id", "", "candidate Retrieval Index Version identity")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if strings.TrimSpace(*observationsPath) == "" {
-		return errors.New("-observations is required")
+	if (strings.TrimSpace(*observationsPath) == "") == (strings.TrimSpace(*executorCommand) == "") {
+		return errors.New("exactly one of -observations or -executor-command is required")
 	}
 	var suite rageval.Suite
 	if err := decodeStrictFile(*suitePath, &suite); err != nil {
@@ -48,11 +51,19 @@ func run(args []string, output io.Writer) error {
 	if err := decodeStrictFile(*configPath, &config); err != nil {
 		return fmt.Errorf("load pinned configuration: %w", err)
 	}
-	var observations []rageval.Observation
-	if err := decodeStrictFile(*observationsPath, &observations); err != nil {
-		return fmt.Errorf("load product observations: %w", err)
+	var executor rageval.Executor
+	var err error
+	if strings.TrimSpace(*observationsPath) != "" {
+		var observations []rageval.Observation
+		if err := decodeStrictFile(*observationsPath, &observations); err != nil {
+			return fmt.Errorf("load product observations: %w", err)
+		}
+		executor, err = newObservationExecutor(observations)
+	} else {
+		executor, err = rageval.NewCommandExecutor(rageval.CommandExecutorConfig{
+			Command: *executorCommand, Timeout: *executorTimeout, MaxOutputBytes: 8 << 20,
+		})
 	}
-	executor, err := newObservationExecutor(observations)
 	if err != nil {
 		return err
 	}
