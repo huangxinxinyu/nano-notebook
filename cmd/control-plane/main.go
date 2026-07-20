@@ -17,6 +17,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agentbatch"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
+	"github.com/huangxinxinyu/nano-notebook/internal/fetcher"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/telemetry"
 	"github.com/huangxinxinyu/nano-notebook/internal/realtime"
@@ -37,6 +38,7 @@ type controlPlaneConfig struct {
 	Version               string
 	DefaultModel          string
 	SourceS3              objectstore.S3Config
+	FetcherURL            string
 }
 
 func main() {
@@ -65,6 +67,13 @@ func main() {
 	}
 	if err := sourceStore.CheckReady(ctx); err != nil {
 		slog.Error("Source object Store unavailable", "error", err)
+		os.Exit(1)
+	}
+	remoteFetcher, err := fetcher.NewRemoteClient(
+		config.FetcherURL, &http.Client{Timeout: 25 * time.Second}, 100*1024*1024,
+	)
+	if err != nil {
+		slog.Error("Source Fetcher client configuration invalid", "error", err)
 		os.Exit(1)
 	}
 	shutdownTelemetry, err := telemetry.Start(ctx, "nano-control-plane")
@@ -118,6 +127,7 @@ func main() {
 		CookieSecure: config.CookieSecure, Version: config.Version, DefaultModel: config.DefaultModel,
 		AdminTraces: queryClient, ReplaySealer: replaySealer, TraceSink: traceExporter,
 		SourceUploads: sourceStore,
+		SourceFetcher: remoteFetcher, SourceSnapshots: sourceStore,
 	}, db)
 	runListener := realtime.NewRunListener(db.Pool(), server.NotifyRun)
 	go func() {
@@ -180,11 +190,12 @@ func loadControlPlaneConfig() (controlPlaneConfig, error) {
 			Region:          env("NANO_SOURCE_S3_REGION", "us-east-1"),
 			UseTLS:          sourceUseTLS,
 		},
+		FetcherURL: strings.TrimRight(env("NANO_FETCHER_URL", "http://127.0.0.1:8083"), "/"),
 	}
 	if strings.TrimSpace(config.DatabaseURL) == "" || strings.TrimSpace(config.Addr) == "" ||
 		strings.TrimSpace(config.CollectorURL) == "" || strings.TrimSpace(config.CollectorQueryToken) == "" ||
 		strings.TrimSpace(config.CollectorServiceToken) == "" || strings.TrimSpace(config.ProducerID) == "" ||
-		strings.TrimSpace(config.ReplayKeyID) == "" || len(config.ReplayKEK) != 32 {
+		strings.TrimSpace(config.ReplayKeyID) == "" || strings.TrimSpace(config.FetcherURL) == "" || len(config.ReplayKEK) != 32 {
 		return controlPlaneConfig{}, errors.New("Control Plane configuration is incomplete")
 	}
 	return config, nil

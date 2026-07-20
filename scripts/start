@@ -33,6 +33,7 @@ trap cleanup EXIT INT TERM
 go run ./cmd/control-plane &
 go run ./cmd/worker &
 go run ./cmd/collector &
+go run ./cmd/fetcher &
 npm --prefix web run dev -- --host 127.0.0.1 &
 
 wait

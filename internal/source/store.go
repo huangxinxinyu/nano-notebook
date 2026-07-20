@@ -19,6 +19,7 @@ var (
 	ErrUploadIntentExpired = errors.New("upload intent expired")
 	ErrStateConflict       = errors.New("Source state conflict")
 	ErrInvalidInput        = errors.New("invalid Source input")
+	ErrAdmissionInProgress = errors.New("URL admission in progress")
 )
 
 type DuplicateError struct {
@@ -102,6 +103,21 @@ func ValidFileAdmission(title string, format Format, mediaType string) bool {
 	return false
 }
 
+func FormatForMediaType(mediaType string) (Format, bool) {
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+	if mediaType == "text/html" {
+		return FormatHTML, true
+	}
+	for format, spec := range supportedFileFormats {
+		for _, candidate := range spec.mediaTypes {
+			if mediaType == candidate {
+				return format, true
+			}
+		}
+	}
+	return "", false
+}
+
 type State string
 
 const (
@@ -179,6 +195,49 @@ type CreateUploadIntentCommand struct {
 	ContentSHA256  string
 	ObjectKey      string
 	ExpiresAt      time.Time
+}
+
+type URLAdmissionState string
+
+const (
+	URLAdmissionPending   URLAdmissionState = "pending"
+	URLAdmissionCompleted URLAdmissionState = "completed"
+	URLAdmissionFailed    URLAdmissionState = "failed"
+)
+
+type URLAdmission struct {
+	ID             string
+	SourceID       string
+	NotebookID     string
+	IdempotencyKey string
+	RequestHash    string
+	RequestURL     string
+	State          URLAdmissionState
+	ErrorCode      *string
+	CreatedAt      time.Time
+	CompletedAt    *time.Time
+}
+
+type BeginURLAdmissionCommand struct {
+	ID             string
+	SourceID       string
+	NotebookID     string
+	IdempotencyKey string
+	RequestHash    string
+	RequestURL     string
+}
+
+type FinalizeURLAdmissionCommand struct {
+	AdmissionID       string
+	ProcessingJobID   string
+	Title             string
+	Format            Format
+	MediaType         string
+	ByteSize          int64
+	ContentSHA256     string
+	OriginalObjectKey string
+	FinalURL          string
+	CompletedAt       time.Time
 }
 
 type PurgeState string
@@ -300,6 +359,157 @@ func (s *Store) CreateUploadIntent(ctx context.Context, command CreateUploadInte
 		&created.CreatedAt, &created.FinalizedAt,
 	)
 	return created, false, err
+}
+
+func (s *Store) BeginURLAdmission(ctx context.Context, command BeginURLAdmissionCommand) (URLAdmission, bool, error) {
+	if err := s.requireCapability(ctx, command.NotebookID, CapabilityMaintain); err != nil {
+		return URLAdmission{}, false, err
+	}
+	var principalID string
+	if err := s.db.QueryRow(ctx, `select nullif(current_setting('app.principal_id', true), '')`).Scan(&principalID); err != nil {
+		return URLAdmission{}, false, err
+	}
+	if _, err := s.db.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, "source-url-admission:"+principalID+":"+command.IdempotencyKey); err != nil {
+		return URLAdmission{}, false, err
+	}
+	existing, err := s.urlAdmissionByKey(ctx, principalID, command.IdempotencyKey)
+	if err == nil {
+		if existing.RequestHash != command.RequestHash {
+			return URLAdmission{}, false, ErrIdempotencyMismatch
+		}
+		if existing.State == URLAdmissionPending {
+			return URLAdmission{}, false, ErrAdmissionInProgress
+		}
+		if existing.State == URLAdmissionCompleted {
+			return existing, true, nil
+		}
+		_, err = s.db.Exec(ctx, `
+			update source_url_admissions set state='pending', error_code=null, completed_at=null where id=$1
+		`, existing.ID)
+		if err != nil {
+			return URLAdmission{}, false, err
+		}
+		existing.State, existing.ErrorCode, existing.CompletedAt = URLAdmissionPending, nil, nil
+		return existing, false, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return URLAdmission{}, false, err
+	}
+	var created URLAdmission
+	err = s.db.QueryRow(ctx, `
+		insert into source_url_admissions(
+			id, source_id, notebook_id, created_by_user_id, idempotency_key, request_hash, request_url, state
+		) values ($1, $2, $3, $4, $5, $6, $7, 'pending')
+		returning id, source_id, notebook_id, idempotency_key, request_hash, request_url,
+			state, error_code, created_at, completed_at
+	`, command.ID, command.SourceID, command.NotebookID, principalID, command.IdempotencyKey,
+		command.RequestHash, command.RequestURL).Scan(
+		&created.ID, &created.SourceID, &created.NotebookID, &created.IdempotencyKey,
+		&created.RequestHash, &created.RequestURL, &created.State, &created.ErrorCode,
+		&created.CreatedAt, &created.CompletedAt,
+	)
+	return created, false, err
+}
+
+func (s *Store) FinalizeURLAdmission(ctx context.Context, command FinalizeURLAdmissionCommand) (Source, bool, error) {
+	var admission URLAdmission
+	err := s.db.QueryRow(ctx, `
+		select id, source_id, notebook_id, idempotency_key, request_hash, request_url,
+			state, error_code, created_at, completed_at
+		from source_url_admissions where id=$1 for update
+	`, command.AdmissionID).Scan(
+		&admission.ID, &admission.SourceID, &admission.NotebookID, &admission.IdempotencyKey,
+		&admission.RequestHash, &admission.RequestURL, &admission.State, &admission.ErrorCode,
+		&admission.CreatedAt, &admission.CompletedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Source{}, false, ErrNotFound
+	}
+	if err != nil {
+		return Source{}, false, err
+	}
+	if err := s.requireCapability(ctx, admission.NotebookID, CapabilityMaintain); err != nil {
+		return Source{}, false, err
+	}
+	if admission.State == URLAdmissionCompleted {
+		item, err := s.sourceByID(ctx, admission.SourceID)
+		return item, true, err
+	}
+	if admission.State != URLAdmissionPending {
+		return Source{}, false, ErrStateConflict
+	}
+	if _, err := s.db.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, "source-notebook:"+admission.NotebookID); err != nil {
+		return Source{}, false, err
+	}
+	var sourceCount int
+	if err := s.db.QueryRow(ctx, `select count(*) from source_sources where notebook_id=$1`, admission.NotebookID).Scan(&sourceCount); err != nil {
+		return Source{}, false, err
+	}
+	if sourceCount >= 50 {
+		return Source{}, false, ErrQuotaReached
+	}
+	var created Source
+	err = s.db.QueryRow(ctx, `
+		insert into source_sources(
+			id, notebook_id, input_kind, format, title, media_type, byte_size,
+			content_sha256, original_object_key, origin_url, final_url, state
+		) values ($1, $2, 'url', $3, $4, $5, $6, $7, $8, $9, $10, 'uploaded')
+		returning id, notebook_id, title, format, media_type, byte_size,
+			content_sha256, original_object_key, state, created_at, updated_at
+	`, admission.SourceID, admission.NotebookID, command.Format, command.Title, command.MediaType,
+		command.ByteSize, command.ContentSHA256, command.OriginalObjectKey, admission.RequestURL,
+		command.FinalURL).Scan(
+		&created.ID, &created.NotebookID, &created.Title, &created.Format, &created.MediaType,
+		&created.ByteSize, &created.ContentSHA256, &created.OriginalObjectKey, &created.State,
+		&created.CreatedAt, &created.UpdatedAt,
+	)
+	if err != nil {
+		return Source{}, false, err
+	}
+	if _, err := s.db.Exec(ctx, `
+		insert into source_processing_jobs(id, source_id, notebook_id, status) values ($1, $2, $3, 'queued')
+	`, command.ProcessingJobID, created.ID, created.NotebookID); err != nil {
+		return Source{}, false, err
+	}
+	if _, err := s.db.Exec(ctx, `
+		update source_url_admissions set state='completed', completed_at=$2 where id=$1
+	`, admission.ID, command.CompletedAt); err != nil {
+		return Source{}, false, err
+	}
+	return created, false, nil
+}
+
+func (s *Store) FailURLAdmission(ctx context.Context, id, errorCode string, completedAt time.Time) error {
+	tag, err := s.db.Exec(ctx, `
+		update source_url_admissions
+		set state='failed', error_code=$2, completed_at=$3
+		where id=$1 and state='pending'
+	`, id, errorCode, completedAt)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrStateConflict
+	}
+	return nil
+}
+
+func (s *Store) urlAdmissionByKey(ctx context.Context, principalID, key string) (URLAdmission, error) {
+	var admission URLAdmission
+	err := s.db.QueryRow(ctx, `
+		select id, source_id, notebook_id, idempotency_key, request_hash, request_url,
+			state, error_code, created_at, completed_at
+		from source_url_admissions where created_by_user_id=$1 and idempotency_key=$2
+	`, principalID, key).Scan(
+		&admission.ID, &admission.SourceID, &admission.NotebookID, &admission.IdempotencyKey,
+		&admission.RequestHash, &admission.RequestURL, &admission.State, &admission.ErrorCode,
+		&admission.CreatedAt, &admission.CompletedAt,
+	)
+	return admission, err
+}
+
+func (s *Store) SourceByID(ctx context.Context, id string) (Source, error) {
+	return s.sourceByID(ctx, id)
 }
 
 func (s *Store) uploadIntentByIdempotency(ctx context.Context, principalID, key string) (UploadIntent, error) {

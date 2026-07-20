@@ -201,6 +201,14 @@ create table if not exists source_sources (
 	updated_at timestamptz not null default now()
 );
 
+alter table source_sources add column if not exists origin_url text;
+alter table source_sources add column if not exists final_url text;
+alter table source_sources drop constraint if exists source_sources_input_metadata_check;
+alter table source_sources add constraint source_sources_input_metadata_check check (
+	(input_kind = 'file' and origin_url is null and final_url is null)
+	or (input_kind = 'url' and char_length(origin_url) between 1 and 4096 and char_length(final_url) between 1 and 4096)
+);
+
 alter table source_sources drop constraint if exists source_sources_state_check;
 alter table source_sources add constraint source_sources_state_check check (
 	state in ('uploaded', 'validating', 'normalizing', 'segmenting', 'indexing', 'verifying', 'ready', 'failed')
@@ -250,6 +258,26 @@ alter table source_upload_intents add constraint source_upload_intents_format_ch
 create index if not exists source_upload_intents_expiry_idx
 	on source_upload_intents(expires_at, id)
 	where state = 'pending';
+
+create table if not exists source_url_admissions (
+	id text primary key,
+	source_id text not null unique,
+	notebook_id text not null references notebook_notebooks(id) on delete cascade,
+	created_by_user_id text not null references identity_users(id) on delete cascade,
+	idempotency_key text not null check (char_length(idempotency_key) between 1 and 255),
+	request_hash text not null check (request_hash ~ '^[0-9a-f]{64}$'),
+	request_url text not null check (char_length(request_url) between 1 and 4096),
+	state text not null check (state in ('pending', 'completed', 'failed')),
+	error_code text,
+	created_at timestamptz not null default now(),
+	completed_at timestamptz,
+	constraint source_url_admissions_completion_check check (
+		(state = 'pending' and error_code is null and completed_at is null)
+		or (state = 'completed' and error_code is null and completed_at is not null)
+		or (state = 'failed' and error_code is not null and completed_at is not null)
+	),
+	unique (created_by_user_id, idempotency_key)
+);
 
 create table if not exists source_processing_jobs (
 	id text primary key,
@@ -823,6 +851,7 @@ alter table notebook_notebooks enable row level security;
 alter table notebook_memberships enable row level security;
 alter table source_sources enable row level security;
 alter table source_upload_intents enable row level security;
+alter table source_url_admissions enable row level security;
 alter table source_processing_jobs enable row level security;
 alter table source_purge_jobs enable row level security;
 alter table platform_idempotency_keys enable row level security;
@@ -849,6 +878,7 @@ grant select, insert, update, delete on
 	notebook_memberships,
 	source_sources,
 	source_upload_intents,
+	source_url_admissions,
 	source_processing_jobs,
 	source_purge_jobs,
 	platform_idempotency_keys,
@@ -1007,6 +1037,18 @@ create policy source_upload_intents_app_insert on source_upload_intents
 drop policy if exists source_upload_intents_app_update on source_upload_intents;
 create policy source_upload_intents_app_update on source_upload_intents
 	for update to nano_app
+	using (
+		created_by_user_id = nullif(current_setting('app.principal_id', true), '')
+		and nano_has_notebook_capability(notebook_id, 'source.maintain')
+	)
+	with check (
+		created_by_user_id = nullif(current_setting('app.principal_id', true), '')
+		and nano_has_notebook_capability(notebook_id, 'source.maintain')
+	);
+
+drop policy if exists source_url_admissions_app on source_url_admissions;
+create policy source_url_admissions_app on source_url_admissions
+	for all to nano_app
 	using (
 		created_by_user_id = nullif(current_setting('app.principal_id', true), '')
 		and nano_has_notebook_capability(notebook_id, 'source.maintain')

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
+	"github.com/huangxinxinyu/nano-notebook/internal/fetcher"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/jackc/pgx/v5"
@@ -433,6 +434,81 @@ func TestSourceOwnerAPIListsRenamesRetriesAndRemoves(t *testing.T) {
 	if sources != 0 || purges != 1 {
 		t.Fatalf("after API remove sources=%d purges=%d", sources, purges)
 	}
+}
+
+func TestCreateURLSourceIsIdempotentButRepeatedURLCreatesANewSnapshot(t *testing.T) {
+	api := newTestAPI(t)
+	owner, csrf := api.registerWithCSRF(t, "source-url-api@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-url-api")
+	remote := &recordingSourceFetcher{snapshot: fetcher.Snapshot{
+		FinalURL: "https://example.com/final", MediaType: "text/html",
+		Payload:       []byte("<main>same immutable page</main>"),
+		ContentSHA256: "9e88e59fef7fc7a4e0b3b9c4fd1d50bb9d33ca46ecd77697b82c7e0e500e0791",
+	}}
+	objects := objectstore.NewMemoryStore()
+	api.server = app.NewServer(app.Config{
+		CookieSecure: false, SourceFetcher: remote, SourceSnapshots: objects,
+	}, api.db)
+	api.handler = api.server.Handler()
+
+	create := func(key string) *httptest.ResponseRecorder {
+		return api.postJSONWithCookieAndCSRF(t,
+			"/api/v1/notebooks/"+notebookID+"/sources/urls",
+			map[string]any{"url": "https://example.com/article"}, owner, csrf, csrf.Value, key,
+		)
+	}
+	first := create("url-snapshot-1")
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first URL Source status=%d body=%s", first.Code, first.Body.String())
+	}
+	var firstBody struct {
+		Source struct {
+			ID     string `json:"id"`
+			Format string `json:"format"`
+			State  string `json:"state"`
+		} `json:"source"`
+	}
+	decodeBody(t, first, &firstBody)
+	if firstBody.Source.ID == "" || firstBody.Source.Format != "html" || firstBody.Source.State != "processing" {
+		t.Fatalf("first URL Source = %+v", firstBody.Source)
+	}
+	replayed := create("url-snapshot-1")
+	if replayed.Code != http.StatusOK {
+		t.Fatalf("replayed URL Source status=%d body=%s", replayed.Code, replayed.Body.String())
+	}
+	var replayedBody struct {
+		Source struct {
+			ID string `json:"id"`
+		} `json:"source"`
+	}
+	decodeBody(t, replayed, &replayedBody)
+	if replayedBody.Source.ID != firstBody.Source.ID || remote.calls != 1 || objects.Len() != 1 {
+		t.Fatalf("replay Source=%+v calls=%d objects=%d", replayedBody.Source, remote.calls, objects.Len())
+	}
+	second := create("url-snapshot-2")
+	if second.Code != http.StatusCreated {
+		t.Fatalf("second URL Source status=%d body=%s", second.Code, second.Body.String())
+	}
+	var secondBody struct {
+		Source struct {
+			ID string `json:"id"`
+		} `json:"source"`
+	}
+	decodeBody(t, second, &secondBody)
+	if secondBody.Source.ID == firstBody.Source.ID || remote.calls != 2 || objects.Len() != 2 {
+		t.Fatalf("second Source=%+v first=%+v calls=%d objects=%d", secondBody.Source, firstBody.Source, remote.calls, objects.Len())
+	}
+}
+
+type recordingSourceFetcher struct {
+	snapshot fetcher.Snapshot
+	err      error
+	calls    int
+}
+
+func (f *recordingSourceFetcher) Fetch(_ context.Context, _ string) (fetcher.Snapshot, error) {
+	f.calls++
+	return f.snapshot, f.err
 }
 
 func sourceAPIRequest(t *testing.T, api *testAPI, method, path string, payload map[string]any, session, csrf *http.Cookie) *httptest.ResponseRecorder {

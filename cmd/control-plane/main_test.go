@@ -17,6 +17,7 @@ func TestLoadControlPlaneConfigIncludesCollectorQueryAndReplayKey(t *testing.T) 
 	t.Setenv("NANO_SOURCE_S3_BUCKET", "source-custody")
 	t.Setenv("NANO_SOURCE_S3_REGION", "cn-test-1")
 	t.Setenv("NANO_SOURCE_S3_USE_TLS", "true")
+	t.Setenv("NANO_FETCHER_URL", "http://fetcher.internal:8083/")
 
 	config, err := loadControlPlaneConfig()
 	if err != nil {
@@ -30,5 +31,8 @@ func TestLoadControlPlaneConfigIncludesCollectorQueryAndReplayKey(t *testing.T) 
 		config.SourceS3.SecretAccessKey != "source-secret" || config.SourceS3.Bucket != "source-custody" ||
 		config.SourceS3.Region != "cn-test-1" || !config.SourceS3.UseTLS {
 		t.Fatalf("Control Plane config = %#v", config)
+	}
+	if config.FetcherURL != "http://fetcher.internal:8083" {
+		t.Fatalf("Fetcher URL = %q", config.FetcherURL)
 	}
 }

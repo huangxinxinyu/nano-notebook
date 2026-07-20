@@ -15,6 +15,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/chat"
 	"github.com/huangxinxinyu/nano-notebook/internal/collector"
+	"github.com/huangxinxinyu/nano-notebook/internal/fetcher"
 	"github.com/huangxinxinyu/nano-notebook/internal/identity"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/notebook"
@@ -30,15 +31,21 @@ type SourceUploadStore interface {
 	PromoteUpload(context.Context, objectstore.UploadPolicyRequest, string) (objectstore.ObjectInfo, error)
 }
 
+type SourceSnapshotStore interface {
+	Put(context.Context, string, []byte) error
+}
+
 type Config struct {
-	CookieSecure  bool
-	Version       string
-	DefaultModel  string
-	AgentRun      agent.RunConfig
-	AdminTraces   collector.QueryClient
-	ReplaySealer  *replay.Sealer
-	TraceSink     agent.TraceSink
-	SourceUploads SourceUploadStore
+	CookieSecure    bool
+	Version         string
+	DefaultModel    string
+	AgentRun        agent.RunConfig
+	AdminTraces     collector.QueryClient
+	ReplaySealer    *replay.Sealer
+	TraceSink       agent.TraceSink
+	SourceUploads   SourceUploadStore
+	SourceFetcher   fetcher.SnapshotFetcher
+	SourceSnapshots SourceSnapshotStore
 }
 
 type Server struct {
@@ -376,6 +383,10 @@ func (s *Server) notebookByID(w http.ResponseWriter, r *http.Request) {
 	}
 	remainder := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/notebooks/"), "/")
 	parts := strings.Split(remainder, "/")
+	if len(parts) == 3 && parts[0] != "" && parts[1] == "sources" && parts[2] == "urls" {
+		s.createURLSource(w, r, user.ID, parts[0])
+		return
+	}
 	if len(parts) == 2 && parts[0] != "" && parts[1] == "sources" {
 		s.notebookSources(w, r, user.ID, parts[0])
 		return
