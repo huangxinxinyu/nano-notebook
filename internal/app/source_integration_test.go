@@ -1,10 +1,13 @@
 package app_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -234,6 +237,62 @@ func TestSourceStoreCreatesIdempotentUploadIntent(t *testing.T) {
 	}
 }
 
+func TestSourceStoreRenamesRetriesAndCreatesDurablePurgeIntent(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "source-lifecycle@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-lifecycle")
+	ownerID := sourceTestUserID(t, api, "source-lifecycle@example.com")
+	seedSourceProcessingJob(t, api, ownerID, notebookID, "src_lifecycle", "srcjob_lifecycle", "5")
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		update source_sources set state='failed' where id='src_lifecycle';
+		update source_processing_jobs set status='failed', last_error_code='invalid_text' where id='srcjob_lifecycle'
+	`); err != nil {
+		t.Fatal(err)
+	}
+
+	var renamed source.Source
+	err := api.db.WithRequestPrincipal(context.Background(), ownerID, func(tx pgx.Tx) error {
+		var err error
+		renamed, err = source.NewStore(tx).Rename(context.Background(), "src_lifecycle", "Renamed evidence")
+		return err
+	})
+	if err != nil || renamed.Title != "Renamed evidence" || renamed.State != source.StateFailed {
+		t.Fatalf("Rename = %+v, err=%v", renamed, err)
+	}
+
+	err = api.db.WithRequestPrincipal(context.Background(), ownerID, func(tx pgx.Tx) error {
+		return source.NewStore(tx).RetryFailed(context.Background(), "src_lifecycle")
+	})
+	if err != nil {
+		t.Fatalf("RetryFailed: %v", err)
+	}
+	assertSourceJobState(t, api, "src_lifecycle", "srcjob_lifecycle", source.StateUploaded, "queued", "")
+
+	var purge source.PurgeIntent
+	err = api.db.WithRequestPrincipal(context.Background(), ownerID, func(tx pgx.Tx) error {
+		var err error
+		purge, err = source.NewStore(tx).Remove(context.Background(), "src_lifecycle", "srcpurge_lifecycle")
+		return err
+	})
+	if err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if purge.ID != "srcpurge_lifecycle" || purge.SourceID != "src_lifecycle" ||
+		purge.OriginalObjectKey != "sources/src_lifecycle/original/"+strings.Repeat("5", 64) || purge.State != source.PurgePending {
+		t.Fatalf("purge intent = %+v", purge)
+	}
+	var sourceCount, purgeCount int
+	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from source_sources where id='src_lifecycle'`).Scan(&sourceCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from source_purge_jobs where id='srcpurge_lifecycle' and state='pending'`).Scan(&purgeCount); err != nil {
+		t.Fatal(err)
+	}
+	if sourceCount != 0 || purgeCount != 1 {
+		t.Fatalf("after Remove sources=%d purge jobs=%d", sourceCount, purgeCount)
+	}
+}
+
 func TestCreateSourceUploadIntentReturnsDirectUploadPolicyWithoutCreatingSource(t *testing.T) {
 	api := newTestAPI(t)
 	owner, csrf := api.registerWithCSRF(t, "source-upload-api@example.com")
@@ -275,6 +334,90 @@ func TestCreateSourceUploadIntentReturnsDirectUploadPolicyWithoutCreatingSource(
 	if sourceCount != 0 {
 		t.Fatalf("Source count before finalize = %d, want 0", sourceCount)
 	}
+}
+
+func TestSourceOwnerAPIListsRenamesRetriesAndRemoves(t *testing.T) {
+	api := newTestAPI(t)
+	owner, csrf := api.registerWithCSRF(t, "source-owner-api@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-owner-api")
+	ownerID := sourceTestUserID(t, api, "source-owner-api@example.com")
+	seedSourceProcessingJob(t, api, ownerID, notebookID, "src_owner_api", "srcjob_owner_api", "4")
+	intruder, intruderCSRF := api.registerWithCSRF(t, "source-owner-api-intruder@example.com")
+	privateList := api.getWithCookie(t, "/api/v1/notebooks/"+notebookID+"/sources", intruder)
+	if privateList.Code != http.StatusNotFound {
+		t.Fatalf("intruder list status=%d body=%s", privateList.Code, privateList.Body.String())
+	}
+	privateRename := sourceAPIRequest(t, api, http.MethodPatch, "/api/v1/sources/src_owner_api", map[string]any{"title": "Stolen"}, intruder, intruderCSRF)
+	if privateRename.Code != http.StatusNotFound {
+		t.Fatalf("intruder rename status=%d body=%s", privateRename.Code, privateRename.Body.String())
+	}
+
+	listed := api.getWithCookie(t, "/api/v1/notebooks/"+notebookID+"/sources", owner)
+	if listed.Code != http.StatusOK || strings.Contains(listed.Body.String(), "content_sha256") {
+		t.Fatalf("list Sources status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	var listBody struct {
+		Sources []struct {
+			ID    string `json:"id"`
+			Title string `json:"title"`
+			State string `json:"state"`
+		} `json:"sources"`
+	}
+	decodeBody(t, listed, &listBody)
+	if len(listBody.Sources) != 1 || listBody.Sources[0].ID != "src_owner_api" || listBody.Sources[0].State != "processing" {
+		t.Fatalf("listed Sources = %+v", listBody.Sources)
+	}
+
+	renamed := sourceAPIRequest(t, api, http.MethodPatch, "/api/v1/sources/src_owner_api", map[string]any{"title": "API renamed"}, owner, csrf)
+	if renamed.Code != http.StatusOK || !strings.Contains(renamed.Body.String(), "API renamed") {
+		t.Fatalf("rename status=%d body=%s", renamed.Code, renamed.Body.String())
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		update source_sources set state='failed' where id='src_owner_api';
+		update source_processing_jobs set status='failed', last_error_code='invalid_text' where id='srcjob_owner_api'
+	`); err != nil {
+		t.Fatal(err)
+	}
+	retried := sourceAPIRequest(t, api, http.MethodPost, "/api/v1/sources/src_owner_api/retry", map[string]any{}, owner, csrf)
+	if retried.Code != http.StatusAccepted {
+		t.Fatalf("retry status=%d body=%s", retried.Code, retried.Body.String())
+	}
+	assertSourceJobState(t, api, "src_owner_api", "srcjob_owner_api", source.StateUploaded, "queued", "")
+
+	removed := sourceAPIRequest(t, api, http.MethodDelete, "/api/v1/sources/src_owner_api", nil, owner, csrf)
+	if removed.Code != http.StatusNoContent {
+		t.Fatalf("remove status=%d body=%s", removed.Code, removed.Body.String())
+	}
+	var sources, purges int
+	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from source_sources where id='src_owner_api'`).Scan(&sources); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from source_purge_jobs where source_id='src_owner_api' and state='pending'`).Scan(&purges); err != nil {
+		t.Fatal(err)
+	}
+	if sources != 0 || purges != 1 {
+		t.Fatalf("after API remove sources=%d purges=%d", sources, purges)
+	}
+}
+
+func sourceAPIRequest(t *testing.T, api *testAPI, method, path string, payload map[string]any, session, csrf *http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	body := []byte(nil)
+	if payload != nil {
+		var err error
+		body, err = json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := httptest.NewRequest(method, path, bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CSRF-Token", csrf.Value)
+	request.AddCookie(session)
+	request.AddCookie(csrf)
+	response := httptest.NewRecorder()
+	api.handler.ServeHTTP(response, request)
+	return response
 }
 
 func TestFinalizeSourceUploadValidatesObjectAndAtomicallyQueuesProcessing(t *testing.T) {

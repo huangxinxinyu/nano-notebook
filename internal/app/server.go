@@ -98,6 +98,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/auth/sign-out", s.signOut)
 	s.mux.HandleFunc("/api/v1/notebooks", s.notebooks)
 	s.mux.HandleFunc("/api/v1/notebooks/", s.notebookByID)
+	s.mux.HandleFunc("/api/v1/sources/", s.sourceByID)
 	s.mux.HandleFunc("/api/v1/source-upload-intents/", s.sourceUploadIntentByID)
 	s.mux.HandleFunc("/api/v1/chats/", s.chatByID)
 	s.mux.HandleFunc("/api/v1/agent-runs/", s.agentRunByID)
@@ -375,6 +376,10 @@ func (s *Server) notebookByID(w http.ResponseWriter, r *http.Request) {
 	}
 	remainder := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/notebooks/"), "/")
 	parts := strings.Split(remainder, "/")
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "sources" {
+		s.notebookSources(w, r, user.ID, parts[0])
+		return
+	}
 	if len(parts) == 3 && parts[0] != "" && parts[1] == "sources" && parts[2] == "upload-intents" {
 		s.createSourceUploadIntent(w, r, user.ID, parts[0])
 		return

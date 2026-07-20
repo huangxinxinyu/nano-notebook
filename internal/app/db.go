@@ -265,6 +265,33 @@ create index if not exists source_processing_jobs_claim_idx
 	on source_processing_jobs(available_at, created_at, id)
 	where status = 'queued';
 
+create table if not exists source_purge_jobs (
+	id text primary key,
+	source_id text not null,
+	notebook_id text not null,
+	created_by_user_id text not null,
+	original_object_key text not null check (char_length(original_object_key) between 1 and 1024),
+	state text not null check (state in ('pending', 'running', 'succeeded', 'failed')),
+	attempt_no integer not null default 0 check (attempt_no between 0 and 10),
+	lease_token uuid,
+	lease_expires_at timestamptz,
+	last_error_code text,
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now(),
+	constraint source_purge_jobs_lease_check check (
+		(state = 'pending' and lease_token is null and lease_expires_at is null)
+		or (state = 'running' and lease_token is not null and lease_expires_at is not null)
+		or (state in ('succeeded', 'failed') and lease_token is null and lease_expires_at is null)
+	)
+);
+
+alter table source_purge_jobs drop constraint if exists source_purge_jobs_notebook_id_fkey;
+alter table source_purge_jobs drop constraint if exists source_purge_jobs_created_by_user_id_fkey;
+
+create index if not exists source_purge_jobs_claim_idx
+	on source_purge_jobs(created_at, id)
+	where state = 'pending';
+
 create table if not exists platform_idempotency_keys (
 	principal_id text not null,
 	action text not null,
@@ -788,6 +815,7 @@ alter table notebook_memberships enable row level security;
 alter table source_sources enable row level security;
 alter table source_upload_intents enable row level security;
 alter table source_processing_jobs enable row level security;
+alter table source_purge_jobs enable row level security;
 alter table platform_idempotency_keys enable row level security;
 alter table chat_chats enable row level security;
 alter table chat_messages enable row level security;
@@ -813,6 +841,7 @@ grant select, insert, update, delete on
 	source_sources,
 	source_upload_intents,
 	source_processing_jobs,
+	source_purge_jobs,
 	platform_idempotency_keys,
 	chat_chats,
 	chat_messages,
@@ -833,6 +862,7 @@ grant select on
 to nano_worker;
 grant select, update on source_sources to nano_worker;
 grant select, insert, update, delete on source_processing_jobs to nano_worker;
+grant select, insert, update, delete on source_purge_jobs to nano_worker;
 grant select, insert, update, delete on agent_jobs to nano_worker;
 grant insert, update on chat_messages, chat_chats, agent_runs to nano_worker;
 revoke all on agent_run_checkpoints from nano_app, nano_worker;
@@ -985,6 +1015,24 @@ create policy source_processing_jobs_app on source_processing_jobs
 
 drop policy if exists source_processing_jobs_worker on source_processing_jobs;
 create policy source_processing_jobs_worker on source_processing_jobs
+	for all to nano_worker
+	using (true)
+	with check (true);
+
+drop policy if exists source_purge_jobs_app on source_purge_jobs;
+create policy source_purge_jobs_app on source_purge_jobs
+	for all to nano_app
+	using (
+		created_by_user_id = nullif(current_setting('app.principal_id', true), '')
+		and nano_has_notebook_capability(notebook_id, 'source.maintain')
+	)
+	with check (
+		created_by_user_id = nullif(current_setting('app.principal_id', true), '')
+		and nano_has_notebook_capability(notebook_id, 'source.maintain')
+	);
+
+drop policy if exists source_purge_jobs_worker on source_purge_jobs;
+create policy source_purge_jobs_worker on source_purge_jobs
 	for all to nano_worker
 	using (true)
 	with check (true);

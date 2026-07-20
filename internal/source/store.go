@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -15,6 +16,8 @@ var (
 	ErrQuotaReached        = errors.New("Source quota reached")
 	ErrIdempotencyMismatch = errors.New("upload intent idempotency mismatch")
 	ErrUploadIntentExpired = errors.New("upload intent expired")
+	ErrStateConflict       = errors.New("Source state conflict")
+	ErrInvalidInput        = errors.New("invalid Source input")
 )
 
 type DuplicateError struct {
@@ -119,6 +122,21 @@ type CreateUploadIntentCommand struct {
 	ContentSHA256  string
 	ObjectKey      string
 	ExpiresAt      time.Time
+}
+
+type PurgeState string
+
+const (
+	PurgePending PurgeState = "pending"
+)
+
+type PurgeIntent struct {
+	ID                string     `json:"id"`
+	SourceID          string     `json:"source_id"`
+	NotebookID        string     `json:"notebook_id"`
+	OriginalObjectKey string     `json:"-"`
+	State             PurgeState `json:"state"`
+	CreatedAt         time.Time  `json:"created_at"`
 }
 
 type DBTX interface {
@@ -323,6 +341,103 @@ func (s *Store) sourceByID(ctx context.Context, id string) (Source, error) {
 		select id, notebook_id, title, format, media_type, byte_size,
 			content_sha256, original_object_key, state, created_at, updated_at
 		from source_sources where id = $1`, id,
+	).Scan(
+		&item.ID, &item.NotebookID, &item.Title, &item.Format, &item.MediaType,
+		&item.ByteSize, &item.ContentSHA256, &item.OriginalObjectKey, &item.State,
+		&item.CreatedAt, &item.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Source{}, ErrNotFound
+	}
+	return item, err
+}
+
+func (s *Store) Rename(ctx context.Context, id, title string) (Source, error) {
+	title = strings.TrimSpace(title)
+	if title == "" || len([]rune(title)) > 255 {
+		return Source{}, ErrInvalidInput
+	}
+	current, err := s.sourceByID(ctx, id)
+	if err != nil {
+		return Source{}, err
+	}
+	if err := s.requireCapability(ctx, current.NotebookID, CapabilityMaintain); err != nil {
+		return Source{}, err
+	}
+	if _, err := s.db.Exec(ctx, `update source_sources set title=$2, updated_at=now() where id=$1`, id, title); err != nil {
+		return Source{}, err
+	}
+	return s.sourceByID(ctx, id)
+}
+
+func (s *Store) RetryFailed(ctx context.Context, id string) error {
+	current, err := s.sourceByIDForUpdate(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := s.requireCapability(ctx, current.NotebookID, CapabilityMaintain); err != nil {
+		return err
+	}
+	if current.State != StateFailed {
+		return ErrStateConflict
+	}
+	jobUpdate, err := s.db.Exec(ctx, `
+		update source_processing_jobs
+		set status='queued', attempt_no=0, available_at=now(), lease_token=null,
+			lease_expires_at=null, last_error_code=null, updated_at=now()
+		where source_id=$1 and status='failed'
+	`, id)
+	if err != nil {
+		return err
+	}
+	if jobUpdate.RowsAffected() != 1 {
+		return ErrStateConflict
+	}
+	commandTag, err := s.db.Exec(ctx, `update source_sources set state='uploaded', updated_at=now() where id=$1`, id)
+	if err != nil {
+		return err
+	}
+	if commandTag.RowsAffected() != 1 {
+		return ErrStateConflict
+	}
+	return nil
+}
+
+func (s *Store) Remove(ctx context.Context, id, purgeID string) (PurgeIntent, error) {
+	current, err := s.sourceByIDForUpdate(ctx, id)
+	if err != nil {
+		return PurgeIntent{}, err
+	}
+	if err := s.requireCapability(ctx, current.NotebookID, CapabilityMaintain); err != nil {
+		return PurgeIntent{}, err
+	}
+	var principalID string
+	if err := s.db.QueryRow(ctx, `select nullif(current_setting('app.principal_id', true), '')`).Scan(&principalID); err != nil {
+		return PurgeIntent{}, err
+	}
+	var purge PurgeIntent
+	err = s.db.QueryRow(ctx, `
+		insert into source_purge_jobs(id, source_id, notebook_id, created_by_user_id, original_object_key, state)
+		values ($1, $2, $3, $4, $5, 'pending')
+		returning id, source_id, notebook_id, original_object_key, state, created_at
+	`, purgeID, current.ID, current.NotebookID, principalID, current.OriginalObjectKey).Scan(
+		&purge.ID, &purge.SourceID, &purge.NotebookID, &purge.OriginalObjectKey, &purge.State, &purge.CreatedAt,
+	)
+	if err != nil {
+		return PurgeIntent{}, err
+	}
+	if _, err := s.db.Exec(ctx, `delete from source_sources where id=$1`, current.ID); err != nil {
+		return PurgeIntent{}, err
+	}
+	return purge, nil
+}
+
+func (s *Store) sourceByIDForUpdate(ctx context.Context, id string) (Source, error) {
+	var item Source
+	err := s.db.QueryRow(ctx, `
+		select id, notebook_id, title, format, media_type, byte_size,
+			content_sha256, original_object_key, state, created_at, updated_at
+		from source_sources where id=$1 for update`, id,
 	).Scan(
 		&item.ID, &item.NotebookID, &item.Title, &item.Format, &item.MediaType,
 		&item.ByteSize, &item.ContentSHA256, &item.OriginalObjectKey, &item.State,
