@@ -19,11 +19,16 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/otelbridge"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentoutbox"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
+	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/telemetry"
+	"github.com/huangxinxinyu/nano-notebook/internal/qdrantstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/replay"
+	"github.com/huangxinxinyu/nano-notebook/internal/sourcejobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/sourceprocessing"
+	"github.com/huangxinxinyu/nano-notebook/internal/sourceprojection"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcepurge"
 	agentworker "github.com/huangxinxinyu/nano-notebook/internal/worker"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -31,26 +36,36 @@ import (
 )
 
 type workerConfig struct {
-	DatabaseURL           string
-	Addr                  string
-	CollectorEndpoint     string
-	CollectorServiceToken string
-	ProducerID            string
-	BatchMaxRecords       int
-	BatchMaxEncodedBytes  int
-	BatchMaxDelay         time.Duration
-	HTTPTimeout           time.Duration
-	PurgeMaxCommands      int
-	PurgeLeaseDuration    time.Duration
-	PurgePollInterval     time.Duration
-	PurgeBaseBackoff      time.Duration
-	PurgeMaxBackoff       time.Duration
-	ReplayStagingS3       objectstore.S3Config
-	SourceS3              objectstore.S3Config
-	SourcePurgeLease      time.Duration
-	SourcePurgePoll       time.Duration
-	ReplayKeyID           string
-	ReplayKEK             []byte
+	DatabaseURL               string
+	Addr                      string
+	CollectorEndpoint         string
+	CollectorServiceToken     string
+	ProducerID                string
+	BatchMaxRecords           int
+	BatchMaxEncodedBytes      int
+	BatchMaxDelay             time.Duration
+	HTTPTimeout               time.Duration
+	PurgeMaxCommands          int
+	PurgeLeaseDuration        time.Duration
+	PurgePollInterval         time.Duration
+	PurgeBaseBackoff          time.Duration
+	PurgeMaxBackoff           time.Duration
+	ReplayStagingS3           objectstore.S3Config
+	SourceS3                  objectstore.S3Config
+	SourcePurgeLease          time.Duration
+	SourcePurgePoll           time.Duration
+	QdrantURL                 string
+	QdrantAPIKey              string
+	QdrantCollection          string
+	QdrantDenseDimensions     int
+	SourceProcessingLease     time.Duration
+	SourceProcessingHeartbeat time.Duration
+	SourceProcessingPoll      time.Duration
+	SourceExtractionConfigID  string
+	SourceProcessingMaxBytes  int64
+	SourceProcessingMaxRunes  int
+	ReplayKeyID               string
+	ReplayKEK                 []byte
 }
 
 type traceFlusher interface {
@@ -107,6 +122,19 @@ func main() {
 	}
 	if err := sourceObjects.CheckReady(ctx); err != nil {
 		slog.Error("Source object Store unavailable", "error", err)
+		os.Exit(1)
+	}
+	qdrant, err := qdrantstore.New(qdrantstore.Config{
+		BaseURL: config.QdrantURL, APIKey: config.QdrantAPIKey, Collection: config.QdrantCollection,
+		DenseDimensions: config.QdrantDenseDimensions, RequestTimeout: config.HTTPTimeout,
+		HTTPClient: &http.Client{Timeout: config.HTTPTimeout, Transport: otelhttp.NewTransport(http.DefaultTransport)},
+	})
+	if err != nil {
+		slog.Error("Qdrant projection Store invalid", "error", err)
+		os.Exit(1)
+	}
+	if err := qdrant.EnsureCollection(ctx); err != nil {
+		slog.Error("Qdrant projection Store unavailable", "error", err)
 		os.Exit(1)
 	}
 	keyProvider, err := replay.NewDevelopmentKeyProvider(config.ReplayKeyID, config.ReplayKEK)
@@ -186,6 +214,20 @@ func main() {
 	sourcePurgeDone := make(chan error, 1)
 	sourcePurgeProcessor := sourcepurge.NewProcessor(db.Pool(), sourceObjects, config.SourcePurgeLease)
 	go func() { sourcePurgeDone <- sourcePurgeProcessor.Run(ctx, config.SourcePurgePoll) }()
+	sourceQueue := sourcejobs.NewQueue(db.Pool(), config.SourceProcessingLease)
+	sourceProcessor := sourceprocessing.NewProcessor(
+		db.Pool(), sourceQueue, evidence.NewPublisher(db.Pool(), sourceObjects), sourceObjects,
+		sourceprojection.New(db.Pool(), qdrant, modelClient),
+		sourceprocessing.Config{
+			ExtractionConfigID: config.SourceExtractionConfigID,
+			MaxSourceBytes:     config.SourceProcessingMaxBytes, MaxNormalizedRunes: config.SourceProcessingMaxRunes,
+		},
+	)
+	sourceProcessingService := sourceprocessing.NewService(
+		sourceQueue, sourceProcessor, config.SourceProcessingHeartbeat, config.SourceProcessingPoll,
+	)
+	sourceProcessingDone := make(chan error, 1)
+	go func() { sourceProcessingDone <- sourceProcessingService.Run(ctx) }()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health/live", func(w http.ResponseWriter, r *http.Request) {
@@ -245,6 +287,16 @@ func main() {
 		}
 	case <-shutdownCtx.Done():
 		slog.Error("Source purge Processor did not stop before shutdown", "error", shutdownCtx.Err())
+		os.Exit(1)
+	}
+	select {
+	case err := <-sourceProcessingDone:
+		if err != nil {
+			slog.Error("Source processing Service shutdown failed", "error", err)
+			os.Exit(1)
+		}
+	case <-shutdownCtx.Done():
+		slog.Error("Source processing Service did not stop before shutdown", "error", shutdownCtx.Err())
 		os.Exit(1)
 	}
 	if err := purgeSender.ForceFlush(shutdownCtx); err != nil {
@@ -319,6 +371,30 @@ func loadWorkerConfig() (workerConfig, error) {
 	if err != nil {
 		return workerConfig{}, err
 	}
+	sourceProcessingLease, err := workerEnvDuration("NANO_SOURCE_PROCESSING_LEASE_DURATION", 2*time.Minute)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	sourceProcessingHeartbeat, err := workerEnvDuration("NANO_SOURCE_PROCESSING_HEARTBEAT_INTERVAL", 30*time.Second)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	sourceProcessingPoll, err := workerEnvDuration("NANO_SOURCE_PROCESSING_POLL_INTERVAL", time.Second)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	qdrantDenseDimensions, err := workerEnvInt("NANO_QDRANT_DENSE_DIMENSIONS", 1024)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	sourceProcessingMaxBytes, err := workerEnvInt("NANO_SOURCE_PROCESSING_MAX_BYTES", 100*1024*1024)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	sourceProcessingMaxRunes, err := workerEnvInt("NANO_SOURCE_PROCESSING_MAX_RUNES", 20_000_000)
+	if err != nil {
+		return workerConfig{}, err
+	}
 	replayKEK, err := base64.StdEncoding.DecodeString(env("NANO_REPLAY_KEK_BASE64", "bmFuby1sb2NhbC1kZXYta2VrLTAwMDAwMDAwMDAwMDA="))
 	if err != nil {
 		return workerConfig{}, fmt.Errorf("parse NANO_REPLAY_KEK_BASE64: %w", err)
@@ -349,6 +425,13 @@ func loadWorkerConfig() (workerConfig, error) {
 			Region:          env("NANO_SOURCE_S3_REGION", "us-east-1"), UseTLS: sourceUseTLS,
 		},
 		SourcePurgeLease: sourcePurgeLease, SourcePurgePoll: sourcePurgePoll,
+		QdrantURL:             env("NANO_QDRANT_URL", "http://127.0.0.1:56333"),
+		QdrantAPIKey:          strings.TrimSpace(os.Getenv("NANO_QDRANT_API_KEY")),
+		QdrantCollection:      env("NANO_QDRANT_COLLECTION", "nano-source-evidence"),
+		QdrantDenseDimensions: qdrantDenseDimensions,
+		SourceProcessingLease: sourceProcessingLease, SourceProcessingHeartbeat: sourceProcessingHeartbeat,
+		SourceProcessingPoll: sourceProcessingPoll, SourceExtractionConfigID: env("NANO_SOURCE_EXTRACTION_CONFIG_ID", "extract-text-v1"),
+		SourceProcessingMaxBytes: int64(sourceProcessingMaxBytes), SourceProcessingMaxRunes: sourceProcessingMaxRunes,
 		ReplayKeyID: env("NANO_REPLAY_KEY_ID", "nano-local-replay-key-v1"), ReplayKEK: replayKEK,
 	}
 	if strings.TrimSpace(config.DatabaseURL) == "" || strings.TrimSpace(config.Addr) == "" ||
@@ -361,6 +444,10 @@ func loadWorkerConfig() (workerConfig, error) {
 		strings.TrimSpace(config.ReplayStagingS3.Bucket) == "" || strings.TrimSpace(config.SourceS3.Endpoint) == "" ||
 		strings.TrimSpace(config.SourceS3.AccessKeyID) == "" || strings.TrimSpace(config.SourceS3.SecretAccessKey) == "" ||
 		strings.TrimSpace(config.SourceS3.Bucket) == "" || config.SourcePurgeLease <= 0 || config.SourcePurgePoll <= 0 ||
+		strings.TrimSpace(config.QdrantURL) == "" || strings.TrimSpace(config.QdrantCollection) == "" || config.QdrantDenseDimensions <= 0 ||
+		config.SourceProcessingLease <= 0 || config.SourceProcessingHeartbeat <= 0 || config.SourceProcessingHeartbeat >= config.SourceProcessingLease ||
+		config.SourceProcessingPoll <= 0 || strings.TrimSpace(config.SourceExtractionConfigID) == "" ||
+		config.SourceProcessingMaxBytes <= 0 || config.SourceProcessingMaxBytes > 100*1024*1024 || config.SourceProcessingMaxRunes <= 0 ||
 		strings.TrimSpace(config.ReplayKeyID) == "" || len(config.ReplayKEK) != 32 {
 		return workerConfig{}, errors.New("worker configuration is incomplete or inconsistent")
 	}

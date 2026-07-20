@@ -32,6 +32,16 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 	t.Setenv("NANO_SOURCE_S3_BUCKET", "source-custody")
 	t.Setenv("NANO_SOURCE_S3_REGION", "cn-test-2")
 	t.Setenv("NANO_SOURCE_S3_USE_TLS", "true")
+	t.Setenv("NANO_QDRANT_URL", "http://qdrant.internal:6333")
+	t.Setenv("NANO_QDRANT_API_KEY", "qdrant-secret")
+	t.Setenv("NANO_QDRANT_COLLECTION", "source-evidence")
+	t.Setenv("NANO_QDRANT_DENSE_DIMENSIONS", "768")
+	t.Setenv("NANO_SOURCE_PROCESSING_LEASE_DURATION", "45s")
+	t.Setenv("NANO_SOURCE_PROCESSING_HEARTBEAT_INTERVAL", "10s")
+	t.Setenv("NANO_SOURCE_PROCESSING_POLL_INTERVAL", "250ms")
+	t.Setenv("NANO_SOURCE_EXTRACTION_CONFIG_ID", "extract-text-v1")
+	t.Setenv("NANO_SOURCE_PROCESSING_MAX_BYTES", "1048576")
+	t.Setenv("NANO_SOURCE_PROCESSING_MAX_RUNES", "200000")
 	t.Setenv("NANO_REPLAY_KEY_ID", "replay-key-7")
 	t.Setenv("NANO_REPLAY_KEK_BASE64", "bmFuby1sb2NhbC1kZXYta2VrLTAwMDAwMDAwMDAwMDA=")
 
@@ -60,6 +70,13 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 		config.SourceS3.SecretAccessKey != "worker-source-secret" || config.SourceS3.Bucket != "source-custody" ||
 		config.SourceS3.Region != "cn-test-2" || !config.SourceS3.UseTLS {
 		t.Fatalf("Source config = %#v", config)
+	}
+	if config.QdrantURL != "http://qdrant.internal:6333" || config.QdrantAPIKey != "qdrant-secret" ||
+		config.QdrantCollection != "source-evidence" || config.QdrantDenseDimensions != 768 ||
+		config.SourceProcessingLease != 45*time.Second || config.SourceProcessingHeartbeat != 10*time.Second ||
+		config.SourceProcessingPoll != 250*time.Millisecond || config.SourceExtractionConfigID != "extract-text-v1" ||
+		config.SourceProcessingMaxBytes != 1048576 || config.SourceProcessingMaxRunes != 200000 {
+		t.Fatalf("Source processing config = %#v", config)
 	}
 }
 
