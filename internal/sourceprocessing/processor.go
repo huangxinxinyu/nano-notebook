@@ -188,13 +188,18 @@ func (p *Processor) loadSource(ctx context.Context, lease sourcejobs.Lease) (sou
 }
 
 func (p *Processor) normalize(item source.Source, payload []byte) (normalize.Artifact, error) {
-	if item.Format != source.FormatTXT && item.Format != source.FormatMarkdown {
-		return normalize.Artifact{}, errors.New("Extractor Adapter is not configured for Source format")
-	}
-	return normalize.Text(normalize.Input{
+	input := normalize.Input{
 		SourceID: item.ID, ExtractionConfigID: p.config.ExtractionConfigID,
 		Format: string(item.Format), Payload: payload,
-	})
+	}
+	switch item.Format {
+	case source.FormatTXT, source.FormatMarkdown:
+		return normalize.Text(input)
+	case source.FormatPDF:
+		return normalize.PDF(input)
+	default:
+		return normalize.Artifact{}, errors.New("Extractor Adapter is not configured for Source format")
+	}
 }
 
 func (p *Processor) fail(ctx context.Context, lease sourcejobs.Lease, code string) error {

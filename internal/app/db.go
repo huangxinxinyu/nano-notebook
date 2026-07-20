@@ -377,9 +377,34 @@ create table if not exists source_evidence_units (
 	start_rune integer not null check (start_rune >= 0),
 	end_rune integer not null check (end_rune > start_rune),
 	heading_level integer check (heading_level between 1 and 6),
+	coordinate_json jsonb,
 	created_at timestamptz not null default now(),
+	constraint source_evidence_units_coordinate_check check (
+		coordinate_json is null or (
+			jsonb_typeof(coordinate_json)='object'
+			and coordinate_json->>'kind'='pdf_region'
+			and coordinate_json ?& array['page','x','y','width','height']
+		)
+	),
 	unique (revision_id, ordinal)
 );
+
+alter table source_evidence_units add column if not exists coordinate_json jsonb;
+
+do $$
+begin
+	if not exists (
+		select 1 from pg_constraint where conname='source_evidence_units_coordinate_check'
+	) then
+		alter table source_evidence_units add constraint source_evidence_units_coordinate_check check (
+			coordinate_json is null or (
+				jsonb_typeof(coordinate_json)='object'
+				and coordinate_json->>'kind'='pdf_region'
+				and coordinate_json ?& array['page','x','y','width','height']
+			)
+		);
+	end if;
+end $$;
 
 create table if not exists retrieval_index_versions (
 	id text primary key,

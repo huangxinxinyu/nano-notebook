@@ -1,8 +1,11 @@
 package app_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -73,6 +76,55 @@ func TestEvidencePublisherPersistsValidatedArtifactUnitsUnderLease(t *testing.T)
 	}
 }
 
+func TestEvidencePublisherPersistsPDFSourceCoordinates(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "source-evidence-pdf@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-evidence-pdf")
+	ownerID := sourceTestUserID(t, api, "source-evidence-pdf@example.com")
+	seedSourceProcessingJob(t, api, ownerID, notebookID, "src_evidence_pdf", "srcjob_evidence_pdf", "7")
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		update source_sources set format='pdf', media_type='application/pdf' where id='src_evidence_pdf'
+	`); err != nil {
+		t.Fatal(err)
+	}
+	queue := sourcejobs.NewQueue(api.db.Pool(), time.Minute)
+	lease, ok, err := queue.Claim(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
+	}
+	if err := queue.Advance(context.Background(), lease.ID, lease.LeaseToken, source.StateUploaded, source.StateValidating); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Advance(context.Background(), lease.ID, lease.LeaseToken, source.StateValidating, source.StateNormalizing); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := normalize.PDF(normalize.Input{
+		SourceID: lease.SourceID, ExtractionConfigID: "extract-native-v1", Format: "pdf",
+		Payload: evidenceTestPDF("Coordinate evidence."),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, _, err := evidence.NewPublisher(api.db.Pool(), objectstore.NewMemoryStore()).Publish(
+		context.Background(), evidence.PublishCommand{
+			RevisionID: "evr_evidence_pdf", JobID: lease.ID, LeaseToken: lease.LeaseToken, Artifact: artifact,
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kind string
+	var page int
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select coordinate_json->>'kind', (coordinate_json->>'page')::integer
+		from source_evidence_units where revision_id=$1
+	`, revision.ID).Scan(&kind, &page); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "pdf_region" || page != 1 {
+		t.Fatalf("coordinate kind=%q page=%d", kind, page)
+	}
+}
+
 func TestEvidenceCompletionRejectsMissingVerifiedActiveProjection(t *testing.T) {
 	api := newTestAPI(t)
 	owner := api.register(t, "source-evidence-projection@example.com")
@@ -110,4 +162,29 @@ func TestEvidenceCompletionRejectsMissingVerifiedActiveProjection(t *testing.T) 
 	if err := queue.CompleteEvidence(context.Background(), lease.ID, lease.LeaseToken, "evr_missing_projection"); !errors.Is(err, sourcejobs.ErrTransitionConflict) {
 		t.Fatalf("CompleteEvidence without verified active projection = %v", err)
 	}
+}
+
+func evidenceTestPDF(text string) []byte {
+	objects := []string{
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		"<< /Type /Pages /Kids [4 0 R] /Count 1 >>",
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+		"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>",
+	}
+	content := "BT /F1 12 Tf 72 720 Td (" + strings.NewReplacer("\\", "\\\\", "(", "\\(", ")", "\\)").Replace(text) + ") Tj ET"
+	objects = append(objects, fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(content), content))
+	var document bytes.Buffer
+	document.WriteString("%PDF-1.4\n")
+	offsets := make([]int, len(objects)+1)
+	for index, object := range objects {
+		offsets[index+1] = document.Len()
+		fmt.Fprintf(&document, "%d 0 obj\n%s\nendobj\n", index+1, object)
+	}
+	xref := document.Len()
+	fmt.Fprintf(&document, "xref\n0 %d\n0000000000 65535 f \n", len(objects)+1)
+	for index := 1; index < len(offsets); index++ {
+		fmt.Fprintf(&document, "%010d 00000 n \n", offsets[index])
+	}
+	fmt.Fprintf(&document, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objects)+1, xref)
+	return document.Bytes()
 }

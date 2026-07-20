@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -159,13 +160,20 @@ func (p *Publisher) Publish(ctx context.Context, command PublishCommand) (Revisi
 		if block.HeadingLevel > 0 {
 			headingLevel = block.HeadingLevel
 		}
+		var coordinateJSON any
+		if block.Coordinate != nil {
+			coordinateJSON, err = json.Marshal(block.Coordinate)
+			if err != nil {
+				return Revision{}, false, err
+			}
+		}
 		if _, err := tx.Exec(ctx, `
 			insert into source_evidence_units(
 				id, revision_id, source_id, notebook_id, ordinal, kind, text_content,
-				start_rune, end_rune, heading_level
-			) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				start_rune, end_rune, heading_level, coordinate_json
+			) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		`, unitID, created.ID, sourceID, notebookID, block.Ordinal, block.Kind, block.Text,
-			block.StartRune, block.EndRune, headingLevel); err != nil {
+			block.StartRune, block.EndRune, headingLevel, coordinateJSON); err != nil {
 			return Revision{}, false, err
 		}
 	}

@@ -43,10 +43,11 @@ func TestReadySourceViewerReturnsAuthoritativeUnitsAndCoverageWithoutCustody(t *
 	}
 	if _, err := api.db.Pool().Exec(context.Background(), `
 		insert into source_evidence_units(
-			id,revision_id,source_id,notebook_id,ordinal,kind,text_content,start_rune,end_rune
+			id,revision_id,source_id,notebook_id,ordinal,kind,text_content,start_rune,end_rune,coordinate_json
 		) values
-			('unit_view_1','evr_view','src_view',$1,0,'paragraph','First evidence.',0,10),
-			('unit_view_2','evr_view','src_view',$1,1,'paragraph','Second.',12,19)
+			('unit_view_1','evr_view','src_view',$1,0,'paragraph','First evidence.',0,10,
+			 '{"kind":"pdf_region","page":2,"x":72,"y":640,"width":120,"height":12}'::jsonb),
+			('unit_view_2','evr_view','src_view',$1,1,'paragraph','Second.',12,19,null)
 	`, notebookID); err != nil {
 		t.Fatal(err)
 	}
@@ -69,8 +70,12 @@ func TestReadySourceViewerReturnsAuthoritativeUnitsAndCoverageWithoutCustody(t *
 					} `json:"gaps"`
 				} `json:"coverage"`
 				Units []struct {
-					ID   string `json:"id"`
-					Text string `json:"text"`
+					ID         string `json:"id"`
+					Text       string `json:"text"`
+					Coordinate *struct {
+						Kind string `json:"kind"`
+						Page int    `json:"page"`
+					} `json:"coordinate"`
 				} `json:"units"`
 			} `json:"revision"`
 		} `json:"source"`
@@ -81,7 +86,9 @@ func TestReadySourceViewerReturnsAuthoritativeUnitsAndCoverageWithoutCustody(t *
 	if decoded.Source.ID != "src_view" || decoded.Source.Revision.ID != "evr_view" ||
 		decoded.Source.Revision.Coverage.Status != "partial" || len(decoded.Source.Revision.Coverage.Gaps) != 1 ||
 		decoded.Source.Revision.Coverage.Gaps[0].Reason != "decorative_image_skipped" || len(decoded.Source.Revision.Units) != 2 ||
-		decoded.Source.Revision.Units[0].ID != "unit_view_1" {
+		decoded.Source.Revision.Units[0].ID != "unit_view_1" || decoded.Source.Revision.Units[0].Coordinate == nil ||
+		decoded.Source.Revision.Units[0].Coordinate.Kind != "pdf_region" || decoded.Source.Revision.Units[0].Coordinate.Page != 2 ||
+		decoded.Source.Revision.Units[1].Coordinate != nil {
 		t.Fatalf("viewer response=%+v", decoded)
 	}
 	for _, forbidden := range []string{"original_object_key", "artifact_object_key", "artifact_sha256", "content_sha256", "download_url"} {

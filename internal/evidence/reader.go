@@ -2,8 +2,10 @@ package evidence
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/normalize"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/jackc/pgx/v5"
 )
@@ -44,13 +46,14 @@ type GapView struct {
 }
 
 type UnitView struct {
-	ID           string `json:"id"`
-	Ordinal      int    `json:"ordinal"`
-	Kind         string `json:"kind"`
-	Text         string `json:"text"`
-	StartRune    int    `json:"start_rune"`
-	EndRune      int    `json:"end_rune"`
-	HeadingLevel *int   `json:"heading_level,omitempty"`
+	ID           string                      `json:"id"`
+	Ordinal      int                         `json:"ordinal"`
+	Kind         string                      `json:"kind"`
+	Text         string                      `json:"text"`
+	StartRune    int                         `json:"start_rune"`
+	EndRune      int                         `json:"end_rune"`
+	HeadingLevel *int                        `json:"heading_level,omitempty"`
+	Coordinate   *normalize.SourceCoordinate `json:"coordinate,omitempty"`
 }
 
 type readerDB interface {
@@ -124,7 +127,7 @@ func (r *Reader) SourceView(ctx context.Context, sourceID string) (SourceView, e
 
 	view.Revision.Units = make([]UnitView, 0)
 	rows, err = r.db.Query(ctx, `
-		select id, ordinal, kind, text_content, start_rune, end_rune, heading_level
+		select id, ordinal, kind, text_content, start_rune, end_rune, heading_level, coordinate_json
 		from source_evidence_units where revision_id=$1 order by ordinal
 	`, view.Revision.ID)
 	if err != nil {
@@ -133,8 +136,16 @@ func (r *Reader) SourceView(ctx context.Context, sourceID string) (SourceView, e
 	defer rows.Close()
 	for rows.Next() {
 		var unit UnitView
-		if err := rows.Scan(&unit.ID, &unit.Ordinal, &unit.Kind, &unit.Text, &unit.StartRune, &unit.EndRune, &unit.HeadingLevel); err != nil {
+		var coordinateJSON []byte
+		if err := rows.Scan(&unit.ID, &unit.Ordinal, &unit.Kind, &unit.Text, &unit.StartRune, &unit.EndRune, &unit.HeadingLevel, &coordinateJSON); err != nil {
 			return SourceView{}, err
+		}
+		if len(coordinateJSON) > 0 {
+			var coordinate normalize.SourceCoordinate
+			if err := json.Unmarshal(coordinateJSON, &coordinate); err != nil {
+				return SourceView{}, err
+			}
+			unit.Coordinate = &coordinate
 		}
 		view.Revision.Units = append(view.Revision.Units, unit)
 	}
