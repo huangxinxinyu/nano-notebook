@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcejobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceprocessing"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestTextSourceProcessorPublishesActiveEvidenceAndReadyAtomically(t *testing.T) {
@@ -33,7 +35,7 @@ func TestTextSourceProcessorPublishesActiveEvidenceAndReadyAtomically(t *testing
 	if err != nil || !ok {
 		t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
 	}
-	projection := &recordingEvidenceProjection{}
+	projection := newRecordingEvidenceProjection(t, api)
 	processor := sourceprocessing.NewProcessor(api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, projection, sourceprocessing.Config{
 		ExtractionConfigID: "extract-text-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000,
 	})
@@ -106,7 +108,8 @@ func TestTextSourceProcessorResumesFromPublishedEvidenceBoundary(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
 	}
-	projection := &recordingEvidenceProjection{buildError: errors.New("Qdrant temporarily unavailable")}
+	projection := newRecordingEvidenceProjection(t, api)
+	projection.buildError = errors.New("Qdrant temporarily unavailable")
 	processor := sourceprocessing.NewProcessor(api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, projection, sourceprocessing.Config{
 		ExtractionConfigID: "extract-text-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000,
 	})
@@ -125,11 +128,13 @@ func TestTextSourceProcessorResumesFromPublishedEvidenceBoundary(t *testing.T) {
 }
 
 type recordingEvidenceProjection struct {
-	builds        int
-	verifications int
-	revisionID    string
-	unitCount     int
-	buildError    error
+	builds         int
+	verifications  int
+	revisionID     string
+	unitCount      int
+	buildError     error
+	pool           *pgxpool.Pool
+	indexVersionID string
 }
 
 func (p *recordingEvidenceProjection) Build(_ context.Context, command sourceprocessing.ProjectionCommand) error {
@@ -144,7 +149,28 @@ func (p *recordingEvidenceProjection) Verify(_ context.Context, command sourcepr
 	if command.RevisionID != p.revisionID {
 		return sourceprocessing.ErrProjectionInvalid
 	}
-	return nil
+	if p.pool == nil {
+		return nil
+	}
+	_, err := p.pool.Exec(context.Background(), `
+		insert into retrieval_source_index_builds(
+			revision_id, index_version_id, source_id, notebook_id, expected_points, projection_sha256, status, verified_at
+		) values ($1,$2,$3,$4,$5,$6,'verified',now())
+	`, command.RevisionID, p.indexVersionID, command.Lease.SourceID, command.Lease.NotebookID, p.unitCount, strings.Repeat("d", 64))
+	return err
+}
+
+func newRecordingEvidenceProjection(t *testing.T, api *testAPI) *recordingEvidenceProjection {
+	t.Helper()
+	const versionID = "riv_recording_projection"
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into retrieval_index_versions(
+			id, config_json, config_sha256, status, promoted_by_eval_run_id, promoted_at
+		) values ($1, '{}'::jsonb, $2, 'active', 'eval_recording_projection', now())
+	`, versionID, strings.Repeat("c", 64)); err != nil {
+		t.Fatal(err)
+	}
+	return &recordingEvidenceProjection{pool: api.db.Pool(), indexVersionID: versionID}
 }
 
 func seedProcessableSource(t *testing.T, api *testAPI, ownerID, notebookID, sourceID, jobID string, format source.Format, payload []byte) string {

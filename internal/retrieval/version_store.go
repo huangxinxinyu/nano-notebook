@@ -137,6 +137,9 @@ func (s *VersionStore) Promote(ctx context.Context, versionID, evalRunID string)
 		return IndexVersion{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended('retrieval-index-promotion', 0))`); err != nil {
+		return IndexVersion{}, err
+	}
 	version, err := versionByID(ctx, tx, versionID, true)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return IndexVersion{}, ErrVersionNotFound

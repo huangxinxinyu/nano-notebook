@@ -407,6 +407,25 @@ create table if not exists retrieval_eval_runs (
 	created_at timestamptz not null default now()
 );
 
+create table if not exists retrieval_source_index_builds (
+	revision_id text not null references source_evidence_revisions(id) on delete cascade,
+	index_version_id text not null references retrieval_index_versions(id) on delete cascade,
+	source_id text not null references source_sources(id) on delete cascade,
+	notebook_id text not null references notebook_notebooks(id) on delete cascade,
+	expected_points integer not null check (expected_points > 0),
+	projection_sha256 text not null check (projection_sha256 ~ '^[0-9a-f]{64}$'),
+	status text not null check (status in ('building', 'verified')),
+	created_at timestamptz not null default now(),
+	verified_at timestamptz,
+	constraint retrieval_source_index_builds_verification_check check (
+		(status='building' and verified_at is null) or (status='verified' and verified_at is not null)
+	),
+	primary key (revision_id, index_version_id)
+);
+
+create index if not exists retrieval_source_index_builds_source_idx
+	on retrieval_source_index_builds(source_id, index_version_id, status);
+
 create table if not exists platform_idempotency_keys (
 	principal_id text not null,
 	action text not null,
@@ -938,6 +957,7 @@ alter table source_evidence_coverage_gaps enable row level security;
 alter table source_evidence_units enable row level security;
 alter table retrieval_index_versions enable row level security;
 alter table retrieval_eval_runs enable row level security;
+alter table retrieval_source_index_builds enable row level security;
 alter table platform_idempotency_keys enable row level security;
 alter table chat_chats enable row level security;
 alter table chat_messages enable row level security;
@@ -996,6 +1016,7 @@ grant select, insert, update, delete on source_purge_jobs to nano_worker;
 grant select, insert, update, delete on source_evidence_revisions, source_evidence_coverage,
 	source_evidence_coverage_gaps, source_evidence_units to nano_worker;
 grant select, insert, update, delete on retrieval_index_versions, retrieval_eval_runs to nano_worker;
+grant select, insert, update, delete on retrieval_source_index_builds to nano_worker;
 grant select, insert, update, delete on agent_jobs to nano_worker;
 grant insert, update on chat_messages, chat_chats, agent_runs to nano_worker;
 revoke all on agent_run_checkpoints from nano_app, nano_worker;
@@ -1223,6 +1244,8 @@ drop policy if exists retrieval_index_versions_worker on retrieval_index_version
 create policy retrieval_index_versions_worker on retrieval_index_versions for all to nano_worker using (true) with check (true);
 drop policy if exists retrieval_eval_runs_worker on retrieval_eval_runs;
 create policy retrieval_eval_runs_worker on retrieval_eval_runs for all to nano_worker using (true) with check (true);
+drop policy if exists retrieval_source_index_builds_worker on retrieval_source_index_builds;
+create policy retrieval_source_index_builds_worker on retrieval_source_index_builds for all to nano_worker using (true) with check (true);
 
 drop policy if exists platform_idempotency_owner on platform_idempotency_keys;
 create policy platform_idempotency_owner on platform_idempotency_keys

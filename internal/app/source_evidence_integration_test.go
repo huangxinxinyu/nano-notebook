@@ -72,3 +72,42 @@ func TestEvidencePublisherPersistsValidatedArtifactUnitsUnderLease(t *testing.T)
 		t.Fatalf("stale Publish error=%v, want lease lost", err)
 	}
 }
+
+func TestEvidenceCompletionRejectsMissingVerifiedActiveProjection(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "source-evidence-projection@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-evidence-projection")
+	ownerID := sourceTestUserID(t, api, "source-evidence-projection@example.com")
+	seedSourceProcessingJob(t, api, ownerID, notebookID, "src_evidence_projection", "srcjob_evidence_projection", "3")
+	queue := sourcejobs.NewQueue(api.db.Pool(), time.Minute)
+	lease, ok, err := queue.Claim(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
+	}
+	if err := queue.Advance(context.Background(), lease.ID, lease.LeaseToken, source.StateUploaded, source.StateValidating); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Advance(context.Background(), lease.ID, lease.LeaseToken, source.StateValidating, source.StateNormalizing); err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := normalize.Text(normalize.Input{
+		SourceID: lease.SourceID, ExtractionConfigID: "extract-text-v1", Format: "txt", Payload: []byte("Evidence."),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := evidence.NewPublisher(api.db.Pool(), objectstore.NewMemoryStore()).Publish(context.Background(), evidence.PublishCommand{
+		RevisionID: "evr_missing_projection", JobID: lease.ID, LeaseToken: lease.LeaseToken, Artifact: artifact,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Advance(context.Background(), lease.ID, lease.LeaseToken, source.StateSegmenting, source.StateIndexing); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.Advance(context.Background(), lease.ID, lease.LeaseToken, source.StateIndexing, source.StateVerifying); err != nil {
+		t.Fatal(err)
+	}
+	if err := queue.CompleteEvidence(context.Background(), lease.ID, lease.LeaseToken, "evr_missing_projection"); !errors.Is(err, sourcejobs.ErrTransitionConflict) {
+		t.Fatalf("CompleteEvidence without verified active projection = %v", err)
+	}
+}

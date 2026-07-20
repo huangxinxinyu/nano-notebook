@@ -219,6 +219,9 @@ func (q *Queue) CompleteEvidence(ctx context.Context, jobID, leaseToken, revisio
 	if current != source.StateVerifying {
 		return ErrTransitionConflict
 	}
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended('retrieval-index-promotion', 0))`); err != nil {
+		return err
+	}
 	var revisionSourceID, revisionStatus string
 	err = tx.QueryRow(ctx, `
 		select source_id, status from source_evidence_revisions where id=$1 for update
@@ -230,6 +233,20 @@ func (q *Queue) CompleteEvidence(ctx context.Context, jobID, leaseToken, revisio
 		return err
 	}
 	if revisionSourceID != sourceID || revisionStatus != "building" {
+		return ErrTransitionConflict
+	}
+	var verifiedProjection bool
+	if err := tx.QueryRow(ctx, `
+		select exists(
+			select 1
+			from retrieval_source_index_builds b
+			join retrieval_index_versions v on v.id=b.index_version_id
+			where b.revision_id=$1 and b.source_id=$2 and b.status='verified' and v.status='active'
+		)
+	`, revisionID, sourceID).Scan(&verifiedProjection); err != nil {
+		return err
+	}
+	if !verifiedProjection {
 		return ErrTransitionConflict
 	}
 	now := time.Now().UTC()
