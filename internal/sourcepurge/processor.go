@@ -36,6 +36,9 @@ func (p *Processor) RunOnce(ctx context.Context) (bool, error) {
 	if p == nil || p.pool == nil || p.objects == nil || p.leaseDuration <= 0 {
 		return false, errors.New("invalid Source purge Processor")
 	}
+	if _, err := p.materializeExpiredUpload(ctx); err != nil {
+		return false, err
+	}
 	claimed, ok, err := p.claim(ctx)
 	if err != nil || !ok {
 		return false, err
@@ -47,6 +50,48 @@ func (p *Processor) RunOnce(ctx context.Context) (bool, error) {
 	}
 	if err := p.complete(ctx, claimed); err != nil {
 		return true, err
+	}
+	return true, nil
+}
+
+func (p *Processor) materializeExpiredUpload(ctx context.Context) (bool, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `set local role nano_worker`); err != nil {
+		return false, err
+	}
+	var intentID, sourceID, notebookID, userID, objectKey string
+	err = tx.QueryRow(ctx, `
+		select id, source_id, notebook_id, created_by_user_id, object_key
+		from source_upload_intents
+		where state='pending' and expires_at <= now()
+		order by expires_at, id
+		for update skip locked limit 1
+	`).Scan(&intentID, &sourceID, &notebookID, &userID, &objectKey)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if err := tx.Commit(ctx); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into source_purge_jobs(
+			id, source_id, notebook_id, created_by_user_id, original_object_key, state
+		) values ($1, $2, $3, $4, $5, 'pending')
+	`, "srcpurge_"+uuid.NewString(), sourceID, notebookID, userID, objectKey); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `update source_upload_intents set state='expired' where id=$1`, intentID); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
 	}
 	return true, nil
 }

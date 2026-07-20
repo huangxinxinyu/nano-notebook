@@ -900,6 +900,7 @@ grant select on
 	agent_runs
 to nano_worker;
 grant select, update on source_sources to nano_worker;
+grant select, update on source_upload_intents to nano_worker;
 grant select, insert, update, delete on source_processing_jobs to nano_worker;
 grant select, insert, update, delete on source_purge_jobs to nano_worker;
 grant select, insert, update, delete on agent_jobs to nano_worker;
@@ -1045,6 +1046,17 @@ create policy source_upload_intents_app_update on source_upload_intents
 		created_by_user_id = nullif(current_setting('app.principal_id', true), '')
 		and nano_has_notebook_capability(notebook_id, 'source.maintain')
 	);
+
+drop policy if exists source_upload_intents_worker on source_upload_intents;
+create policy source_upload_intents_worker on source_upload_intents
+	for select to nano_worker
+	using (true);
+
+drop policy if exists source_upload_intents_worker_update on source_upload_intents;
+create policy source_upload_intents_worker_update on source_upload_intents
+	for update to nano_worker
+	using (true)
+	with check (true);
 
 drop policy if exists source_url_admissions_app on source_url_admissions;
 create policy source_url_admissions_app on source_url_admissions
