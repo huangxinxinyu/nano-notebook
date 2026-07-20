@@ -63,8 +63,18 @@ type Page struct {
 	Filename  string `json:"filename"`
 }
 
+type Result struct {
+	Manifest Manifest
+	Assets   []Asset
+}
+
+type Asset struct {
+	Page    Page
+	Payload []byte
+}
+
 type Adapter interface {
-	Render(context.Context, Request, []byte) (Manifest, error)
+	Render(context.Context, Request, []byte) (Result, error)
 }
 
 func Validate(request Request, manifest Manifest) error {
