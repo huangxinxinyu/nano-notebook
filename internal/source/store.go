@@ -45,7 +45,14 @@ const (
 type State string
 
 const (
-	StateUploaded State = "uploaded"
+	StateUploaded    State = "uploaded"
+	StateValidating  State = "validating"
+	StateNormalizing State = "normalizing"
+	StateSegmenting  State = "segmenting"
+	StateIndexing    State = "indexing"
+	StateVerifying   State = "verifying"
+	StateReady       State = "ready"
+	StateFailed      State = "failed"
 )
 
 type UploadIntentState string

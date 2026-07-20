@@ -201,6 +201,11 @@ create table if not exists source_sources (
 	updated_at timestamptz not null default now()
 );
 
+alter table source_sources drop constraint if exists source_sources_state_check;
+alter table source_sources add constraint source_sources_state_check check (
+	state in ('uploaded', 'validating', 'normalizing', 'segmenting', 'indexing', 'verifying', 'ready', 'failed')
+);
+
 create unique index if not exists source_sources_notebook_file_hash_idx
 	on source_sources(notebook_id, content_sha256)
 	where input_kind = 'file';
@@ -826,6 +831,7 @@ grant select on
 	chat_messages,
 	agent_runs
 to nano_worker;
+grant select, update on source_sources to nano_worker;
 grant select, insert, update, delete on source_processing_jobs to nano_worker;
 grant select, insert, update, delete on agent_jobs to nano_worker;
 grant insert, update on chat_messages, chat_chats, agent_runs to nano_worker;
@@ -931,6 +937,17 @@ drop policy if exists source_sources_app_delete on source_sources;
 create policy source_sources_app_delete on source_sources
 	for delete to nano_app
 	using (nano_has_notebook_capability(notebook_id, 'source.maintain'));
+
+drop policy if exists source_sources_worker on source_sources;
+create policy source_sources_worker on source_sources
+	for select to nano_worker
+	using (true);
+
+drop policy if exists source_sources_worker_update on source_sources;
+create policy source_sources_worker_update on source_sources
+	for update to nano_worker
+	using (true)
+	with check (true);
 
 drop policy if exists source_upload_intents_app_read on source_upload_intents;
 create policy source_upload_intents_app_read on source_upload_intents
