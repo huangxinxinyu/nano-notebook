@@ -186,6 +186,28 @@ create unique index if not exists notebook_single_owner_idx
 create index if not exists notebook_owned_recent_idx
 	on notebook_memberships(user_id, role, notebook_id);
 
+create table if not exists source_sources (
+	id text primary key,
+	notebook_id text not null references notebook_notebooks(id) on delete cascade,
+	input_kind text not null check (input_kind in ('file', 'url')),
+	format text not null check (format in ('txt')),
+	title text not null check (char_length(title) between 1 and 255),
+	media_type text not null check (char_length(media_type) between 1 and 255),
+	byte_size bigint not null check (byte_size between 1 and 104857600),
+	content_sha256 text not null check (content_sha256 ~ '^[0-9a-f]{64}$'),
+	original_object_key text not null check (char_length(original_object_key) between 1 and 1024),
+	state text not null check (state in ('uploaded')),
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now()
+);
+
+create unique index if not exists source_sources_notebook_file_hash_idx
+	on source_sources(notebook_id, content_sha256)
+	where input_kind = 'file';
+
+create index if not exists source_sources_notebook_created_idx
+	on source_sources(notebook_id, created_at, id);
+
 create table if not exists platform_idempotency_keys (
 	principal_id text not null,
 	action text not null,
@@ -706,6 +728,7 @@ alter table platform_capability_grants enable row level security;
 alter table platform_replay_access_audit enable row level security;
 alter table notebook_notebooks enable row level security;
 alter table notebook_memberships enable row level security;
+alter table source_sources enable row level security;
 alter table platform_idempotency_keys enable row level security;
 alter table chat_chats enable row level security;
 alter table chat_messages enable row level security;
@@ -728,6 +751,7 @@ grant select, insert, update, delete on
 	platform_replay_access_audit,
 	notebook_notebooks,
 	notebook_memberships,
+	source_sources,
 	platform_idempotency_keys,
 	chat_chats,
 	chat_messages,
@@ -810,6 +834,46 @@ drop policy if exists notebook_notebooks_worker on notebook_notebooks;
 create policy notebook_notebooks_worker on notebook_notebooks
 	for select to nano_worker
 	using (true);
+
+create or replace function nano_has_notebook_capability(candidate_notebook_id text, candidate_capability text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = pg_catalog, public
+as $$
+	select exists (
+		select 1
+		from public.notebook_memberships m
+		where m.notebook_id = candidate_notebook_id
+		  and m.user_id = nullif(current_setting('app.principal_id', true), '')
+		  and m.role = 'owner'
+		  and candidate_capability in ('source.read', 'source.maintain')
+	)
+$$;
+revoke all on function nano_has_notebook_capability(text, text) from public;
+grant execute on function nano_has_notebook_capability(text, text) to nano_app;
+
+drop policy if exists source_sources_app_read on source_sources;
+create policy source_sources_app_read on source_sources
+	for select to nano_app
+	using (nano_has_notebook_capability(notebook_id, 'source.read'));
+
+drop policy if exists source_sources_app_insert on source_sources;
+create policy source_sources_app_insert on source_sources
+	for insert to nano_app
+	with check (nano_has_notebook_capability(notebook_id, 'source.maintain'));
+
+drop policy if exists source_sources_app_update on source_sources;
+create policy source_sources_app_update on source_sources
+	for update to nano_app
+	using (nano_has_notebook_capability(notebook_id, 'source.maintain'))
+	with check (nano_has_notebook_capability(notebook_id, 'source.maintain'));
+
+drop policy if exists source_sources_app_delete on source_sources;
+create policy source_sources_app_delete on source_sources
+	for delete to nano_app
+	using (nano_has_notebook_capability(notebook_id, 'source.maintain'));
 
 drop policy if exists platform_idempotency_owner on platform_idempotency_keys;
 create policy platform_idempotency_owner on platform_idempotency_keys
