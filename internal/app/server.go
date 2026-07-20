@@ -438,8 +438,8 @@ func (s *Server) createSourceUploadIntent(w http.ResponseWriter, r *http.Request
 	req.Title = strings.TrimSpace(req.Title)
 	req.MediaType = strings.TrimSpace(req.MediaType)
 	req.ContentSHA256 = strings.ToLower(strings.TrimSpace(req.ContentSHA256))
-	if req.Title == "" || len([]rune(req.Title)) > 255 || req.Format != source.FormatTXT ||
-		req.MediaType != "text/plain" || req.ByteSize < 1 || req.ByteSize > 100*1024*1024 ||
+	if req.Title == "" || len([]rune(req.Title)) > 255 || !source.ValidFileAdmission(req.Title, req.Format, req.MediaType) ||
+		req.ByteSize < 1 || req.ByteSize > 100*1024*1024 ||
 		!validLowerSHA256(req.ContentSHA256) {
 		writeError(w, r, http.StatusBadRequest, "validation_failed", "error.source_upload_invalid")
 		return

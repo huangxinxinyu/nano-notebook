@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -42,8 +43,64 @@ const (
 type Format string
 
 const (
-	FormatTXT Format = "txt"
+	FormatTXT      Format = "txt"
+	FormatMarkdown Format = "markdown"
+	FormatPDF      Format = "pdf"
+	FormatDOCX     Format = "docx"
+	FormatPPTX     Format = "pptx"
+	FormatMP3      Format = "mp3"
+	FormatWAV      Format = "wav"
+	FormatM4A      Format = "m4a"
+	FormatPNG      Format = "png"
+	FormatJPEG     Format = "jpeg"
+	FormatWebP     Format = "webp"
+	FormatHTML     Format = "html"
+	FormatYouTube  Format = "youtube"
 )
+
+type fileFormatSpec struct {
+	extensions []string
+	mediaTypes []string
+}
+
+var supportedFileFormats = map[Format]fileFormatSpec{
+	FormatTXT:      {extensions: []string{".txt"}, mediaTypes: []string{"text/plain"}},
+	FormatMarkdown: {extensions: []string{".md", ".markdown"}, mediaTypes: []string{"text/markdown"}},
+	FormatPDF:      {extensions: []string{".pdf"}, mediaTypes: []string{"application/pdf"}},
+	FormatDOCX:     {extensions: []string{".docx"}, mediaTypes: []string{"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}},
+	FormatPPTX:     {extensions: []string{".pptx"}, mediaTypes: []string{"application/vnd.openxmlformats-officedocument.presentationml.presentation"}},
+	FormatMP3:      {extensions: []string{".mp3"}, mediaTypes: []string{"audio/mpeg"}},
+	FormatWAV:      {extensions: []string{".wav"}, mediaTypes: []string{"audio/wav", "audio/x-wav"}},
+	FormatM4A:      {extensions: []string{".m4a"}, mediaTypes: []string{"audio/mp4", "audio/x-m4a"}},
+	FormatPNG:      {extensions: []string{".png"}, mediaTypes: []string{"image/png"}},
+	FormatJPEG:     {extensions: []string{".jpg", ".jpeg"}, mediaTypes: []string{"image/jpeg"}},
+	FormatWebP:     {extensions: []string{".webp"}, mediaTypes: []string{"image/webp"}},
+}
+
+func ValidFileAdmission(title string, format Format, mediaType string) bool {
+	spec, ok := supportedFileFormats[format]
+	if !ok {
+		return false
+	}
+	extension := strings.ToLower(filepath.Ext(strings.TrimSpace(title)))
+	mediaType = strings.ToLower(strings.TrimSpace(mediaType))
+	extensionAllowed := false
+	for _, candidate := range spec.extensions {
+		if extension == candidate {
+			extensionAllowed = true
+			break
+		}
+	}
+	if !extensionAllowed {
+		return false
+	}
+	for _, candidate := range spec.mediaTypes {
+		if mediaType == candidate {
+			return true
+		}
+	}
+	return false
+}
 
 type State string
 

@@ -205,6 +205,10 @@ alter table source_sources drop constraint if exists source_sources_state_check;
 alter table source_sources add constraint source_sources_state_check check (
 	state in ('uploaded', 'validating', 'normalizing', 'segmenting', 'indexing', 'verifying', 'ready', 'failed')
 );
+alter table source_sources drop constraint if exists source_sources_format_check;
+alter table source_sources add constraint source_sources_format_check check (
+	format in ('txt', 'markdown', 'pdf', 'docx', 'pptx', 'mp3', 'wav', 'm4a', 'png', 'jpeg', 'webp', 'html', 'youtube')
+);
 
 create unique index if not exists source_sources_notebook_file_hash_idx
 	on source_sources(notebook_id, content_sha256)
@@ -236,6 +240,11 @@ create table if not exists source_upload_intents (
 		or (state in ('pending', 'expired') and finalized_at is null)
 	),
 	unique (created_by_user_id, idempotency_key)
+);
+
+alter table source_upload_intents drop constraint if exists source_upload_intents_format_check;
+alter table source_upload_intents add constraint source_upload_intents_format_check check (
+	format in ('txt', 'markdown', 'pdf', 'docx', 'pptx', 'mp3', 'wav', 'm4a', 'png', 'jpeg', 'webp')
 );
 
 create index if not exists source_upload_intents_expiry_idx

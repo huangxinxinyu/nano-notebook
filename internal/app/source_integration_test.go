@@ -336,6 +336,41 @@ func TestCreateSourceUploadIntentReturnsDirectUploadPolicyWithoutCreatingSource(
 	}
 }
 
+func TestCreateSourceUploadIntentAcceptsEverySupportedFileFormatIndependently(t *testing.T) {
+	api := newTestAPI(t)
+	owner, csrf := api.registerWithCSRF(t, "source-formats-api@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-formats-api")
+	uploads := &recordingSourceUploads{}
+	api.server = app.NewServer(app.Config{CookieSecure: false, SourceUploads: uploads}, api.db)
+	api.handler = api.server.Handler()
+	cases := []struct {
+		title, format, mediaType string
+	}{
+		{"paper.pdf", "pdf", "application/pdf"},
+		{"notes.md", "markdown", "text/markdown"},
+		{"brief.docx", "docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+		{"deck.pptx", "pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+		{"interview.mp3", "mp3", "audio/mpeg"},
+		{"recording.wav", "wav", "audio/wav"},
+		{"memo.m4a", "m4a", "audio/mp4"},
+		{"scan.png", "png", "image/png"},
+		{"photo.jpg", "jpeg", "image/jpeg"},
+		{"diagram.webp", "webp", "image/webp"},
+	}
+	for index, item := range cases {
+		response := api.postJSONWithCookieAndCSRF(t,
+			"/api/v1/notebooks/"+notebookID+"/sources/upload-intents",
+			map[string]any{
+				"title": item.title, "format": item.format, "media_type": item.mediaType,
+				"byte_size": 16, "content_sha256": fmt.Sprintf("%064x", index+100),
+			}, owner, csrf, csrf.Value, fmt.Sprintf("format-item-%d", index),
+		)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("%s upload intent status=%d body=%s", item.format, response.Code, response.Body.String())
+		}
+	}
+}
+
 func TestSourceOwnerAPIListsRenamesRetriesAndRemoves(t *testing.T) {
 	api := newTestAPI(t)
 	owner, csrf := api.registerWithCSRF(t, "source-owner-api@example.com")
