@@ -19,21 +19,24 @@ import (
 )
 
 type HTTPConfig struct {
-	Endpoint   string
-	HTTPClient *http.Client
+	Endpoint     string
+	ServiceToken string
+	HTTPClient   *http.Client
 }
 
 type HTTPAdapter struct {
-	endpoint string
-	client   *http.Client
+	endpoint     string
+	serviceToken string
+	client       *http.Client
 }
 
 func NewHTTPAdapter(config HTTPConfig) (*HTTPAdapter, error) {
 	parsed, err := url.Parse(strings.TrimRight(strings.TrimSpace(config.Endpoint), "/"))
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" || config.HTTPClient == nil {
+	config.ServiceToken = strings.TrimSpace(config.ServiceToken)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || config.ServiceToken == "" || config.HTTPClient == nil {
 		return nil, errors.New("document renderer HTTP Adapter configuration is invalid")
 	}
-	return &HTTPAdapter{endpoint: parsed.String(), client: config.HTTPClient}, nil
+	return &HTTPAdapter{endpoint: parsed.String(), serviceToken: config.ServiceToken, client: config.HTTPClient}, nil
 }
 
 func (a *HTTPAdapter) Render(ctx context.Context, request Request, input []byte) (Result, error) {
@@ -52,6 +55,7 @@ func (a *HTTPAdapter) Render(ctx context.Context, request Request, input []byte)
 		return Result{}, err
 	}
 	httpRequest.Header.Set("Content-Type", map[Format]string{FormatPDF: "application/pdf", FormatPPTX: "application/vnd.openxmlformats-officedocument.presentationml.presentation"}[request.Format])
+	httpRequest.Header.Set("Authorization", "Bearer "+a.serviceToken)
 	httpRequest.Header.Set("X-Nano-Source-ID", request.SourceID)
 	httpRequest.Header.Set("X-Nano-Input-SHA256", request.InputSHA256)
 	httpRequest.Header.Set("X-Nano-Render-Config-ID", request.RenderConfigID)

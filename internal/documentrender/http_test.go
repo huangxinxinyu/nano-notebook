@@ -45,7 +45,7 @@ func TestHTTPAdapterSendsBoundedIdentityAndVerifiesRenderedPNGArchive(t *testing
 	}))
 	defer server.Close()
 
-	adapter, err := documentrender.NewHTTPAdapter(documentrender.HTTPConfig{Endpoint: server.URL, HTTPClient: server.Client()})
+	adapter, err := documentrender.NewHTTPAdapter(documentrender.HTTPConfig{Endpoint: server.URL, ServiceToken: "renderer-token", HTTPClient: server.Client()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestHTTPAdapterRejectsArchiveTraversalAndPNGIdentityDrift(t *testing.T) {
 				_, _ = w.Write(archive)
 			}))
 			defer server.Close()
-			adapter, _ := documentrender.NewHTTPAdapter(documentrender.HTTPConfig{Endpoint: server.URL, HTTPClient: server.Client()})
+			adapter, _ := documentrender.NewHTTPAdapter(documentrender.HTTPConfig{Endpoint: server.URL, ServiceToken: "renderer-token", HTTPClient: server.Client()})
 			if _, err := adapter.Render(context.Background(), request, payload); err == nil {
 				t.Fatal("accepted invalid renderer archive")
 			}
