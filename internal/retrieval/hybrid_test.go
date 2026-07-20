@@ -57,6 +57,36 @@ func TestRRFUsesRanksAndDeterministicIdentityTieBreaks(t *testing.T) {
 	}
 }
 
+func TestVersionedSparseEncoderProducesClassicBM25Factors(t *testing.T) {
+	encoder, err := retrieval.NewSparseEncoder(retrieval.NewMixedAnalyzer("nano-mixed-v1"), 1.2, 0.75, 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := encoder.Document("苹果 apple 苹果")
+	if err != nil {
+		t.Fatal(err)
+	}
+	query, err := encoder.Query("apple 苹果")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Indices) == 0 || len(document.Indices) != len(document.Values) || len(query.Indices) == 0 {
+		t.Fatalf("document=%+v query=%+v", document, query)
+	}
+	for _, value := range query.Values {
+		if value != 1 {
+			t.Fatalf("query value=%f, want Qdrant IDF input 1", value)
+		}
+	}
+	second, err := encoder.Document("苹果 apple 苹果")
+	if err != nil || !reflect.DeepEqual(document, second) {
+		t.Fatalf("sparse encoding is not deterministic: first=%+v second=%+v err=%v", document, second, err)
+	}
+	if _, err := retrieval.NewSparseEncoder(retrieval.NewMixedAnalyzer("nano-mixed-v1"), 1.2, 0.75, 0); err == nil {
+		t.Fatal("Sparse Encoder accepted zero average document length")
+	}
+}
+
 func containsToken(tokens []string, want string) bool {
 	for _, token := range tokens {
 		if token == want {

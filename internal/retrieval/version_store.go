@@ -20,18 +20,19 @@ var (
 )
 
 type IndexConfig struct {
-	Chunk               ChunkConfig `json:"chunk"`
-	AnalyzerID          string      `json:"analyzer_id"`
-	BM25K1              float64     `json:"bm25_k1"`
-	BM25B               float64     `json:"bm25_b"`
-	EmbeddingModel      string      `json:"embedding_model"`
-	EmbeddingDimensions int         `json:"embedding_dimensions"`
-	DenseCandidates     int         `json:"dense_candidates"`
-	SparseCandidates    int         `json:"sparse_candidates"`
-	RRFK                int         `json:"rrf_k"`
-	RerankerID          string      `json:"reranker_id"`
-	RerankCandidates    int         `json:"rerank_candidates"`
-	DegradationPolicyID string      `json:"degradation_policy_id"`
+	Chunk                     ChunkConfig `json:"chunk"`
+	AnalyzerID                string      `json:"analyzer_id"`
+	BM25K1                    float64     `json:"bm25_k1"`
+	BM25B                     float64     `json:"bm25_b"`
+	BM25AverageDocumentLength float64     `json:"bm25_average_document_length"`
+	EmbeddingModel            string      `json:"embedding_model"`
+	EmbeddingDimensions       int         `json:"embedding_dimensions"`
+	DenseCandidates           int         `json:"dense_candidates"`
+	SparseCandidates          int         `json:"sparse_candidates"`
+	RRFK                      int         `json:"rrf_k"`
+	RerankerID                string      `json:"reranker_id"`
+	RerankCandidates          int         `json:"rerank_candidates"`
+	DegradationPolicyID       string      `json:"degradation_policy_id"`
 }
 
 type VersionStatus string
@@ -247,6 +248,7 @@ func validIndexConfig(config IndexConfig) bool {
 	return config.Chunk.MaxRunes > 0 && config.Chunk.OverlapRunes >= 0 && config.Chunk.OverlapRunes < config.Chunk.MaxRunes &&
 		strings.TrimSpace(config.AnalyzerID) != "" && config.BM25K1 > 0 && !math.IsNaN(config.BM25K1) &&
 		config.BM25B >= 0 && config.BM25B <= 1 && !math.IsNaN(config.BM25B) &&
+		config.BM25AverageDocumentLength > 0 && !math.IsNaN(config.BM25AverageDocumentLength) && !math.IsInf(config.BM25AverageDocumentLength, 0) &&
 		strings.TrimSpace(config.EmbeddingModel) != "" && config.EmbeddingDimensions > 0 &&
 		config.DenseCandidates > 0 && config.SparseCandidates > 0 && config.RRFK > 0 &&
 		strings.TrimSpace(config.RerankerID) != "" && config.RerankCandidates > 0 &&

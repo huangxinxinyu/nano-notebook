@@ -13,7 +13,7 @@ func TestRetrievalIndexPromotionRequiresPassingOfflineEval(t *testing.T) {
 	store := retrieval.NewVersionStore(api.db.Pool())
 	config := retrieval.IndexConfig{
 		Chunk:      retrieval.ChunkConfig{MaxRunes: 800, OverlapRunes: 120, PreserveHeadingContext: true},
-		AnalyzerID: "nano-mixed-v1", BM25K1: 1.2, BM25B: 0.75,
+		AnalyzerID: "nano-mixed-v1", BM25K1: 1.2, BM25B: 0.75, BM25AverageDocumentLength: 240,
 		EmbeddingModel: "text-embedding-v1", EmbeddingDimensions: 1024,
 		DenseCandidates: 40, SparseCandidates: 40, RRFK: 60,
 		RerankerID: "qwen-rerank-v1", RerankCandidates: 20,
