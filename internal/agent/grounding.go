@@ -161,7 +161,7 @@ func (s *GroundingService) prepare(ctx context.Context, tracer *agentobs.Tracer,
 		return result, err
 	}
 	request := models.ClaimSupportRequest{
-		Model: s.config.VerifierModel, PromptVersion: s.config.VerifierPromptVersion, Claims: claims,
+		Model: s.config.VerifierModel, PromptVersion: s.config.VerifierPromptVersion, Answer: draft.Text, Claims: claims,
 	}
 	var verified models.ClaimSupportOutcome
 	if tracer != nil {
@@ -179,6 +179,9 @@ func (s *GroundingService) prepare(ctx context.Context, tracer *agentobs.Tracer,
 	if len(verified.Verdicts) != len(claims) {
 		return result, ErrGroundingInvalid
 	}
+	if !validUncoveredClaims(draft, verified.UncoveredClaims) {
+		return result, ErrGroundingInvalid
+	}
 	unsupported := make(map[int]struct{})
 	for ordinal, verdict := range verified.Verdicts {
 		if verdict.Ordinal != ordinal {
@@ -191,6 +194,7 @@ func (s *GroundingService) prepare(ctx context.Context, tracer *agentobs.Tracer,
 	if len(unsupported) > 0 {
 		draft = removeUnsupportedClaims(draft, unsupported)
 	}
+	draft = discloseUncoveredClaims(draft, verified.UncoveredClaims)
 	groundingOutcome := "supported"
 	var planNotebook *string = &notebookID
 	if len(draft.Claims) == 0 {
@@ -206,10 +210,7 @@ func (s *GroundingService) prepare(ctx context.Context, tracer *agentobs.Tracer,
 }
 
 func removeUnsupportedClaims(draft models.FinalDraft, unsupported map[int]struct{}) models.FinalDraft {
-	message := "The selected Sources do not provide enough evidence for this point."
-	if containsHan(draft.Text) {
-		message = "所选来源没有为这一点提供足够证据。"
-	}
+	message := insufficientEvidenceMessage(draft.Text)
 	claims := make([]models.DraftClaim, 0, len(draft.Claims)-len(unsupported))
 	for ordinal, claim := range draft.Claims {
 		if _, remove := unsupported[ordinal]; remove {
@@ -220,6 +221,43 @@ func removeUnsupportedClaims(draft models.FinalDraft, unsupported map[int]struct
 	}
 	draft.Claims = claims
 	return draft
+}
+
+func validUncoveredClaims(draft models.FinalDraft, uncovered []string) bool {
+	if len(uncovered) > 64 {
+		return false
+	}
+	seen := make(map[string]struct{}, len(uncovered))
+	for _, claim := range uncovered {
+		if strings.TrimSpace(claim) != claim || claim == "" || len([]rune(claim)) > 4000 || !strings.Contains(draft.Text, claim) {
+			return false
+		}
+		if _, duplicate := seen[claim]; duplicate {
+			return false
+		}
+		for _, declared := range draft.Claims {
+			if strings.Contains(claim, declared.Text) || strings.Contains(declared.Text, claim) {
+				return false
+			}
+		}
+		seen[claim] = struct{}{}
+	}
+	return true
+}
+
+func discloseUncoveredClaims(draft models.FinalDraft, uncovered []string) models.FinalDraft {
+	message := insufficientEvidenceMessage(draft.Text)
+	for _, claim := range uncovered {
+		draft.Text = strings.ReplaceAll(draft.Text, claim, message)
+	}
+	return draft
+}
+
+func insufficientEvidenceMessage(text string) string {
+	if containsHan(text) {
+		return "所选来源没有为这一点提供足够证据。"
+	}
+	return "The selected Sources do not provide enough evidence for this point."
 }
 
 func parseResearchState(prefix CheckpointPrefix) (researchState, error) {

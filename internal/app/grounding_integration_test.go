@@ -14,9 +14,10 @@ import (
 )
 
 type claimVerifierStub struct {
-	calls   int
-	request models.ClaimSupportRequest
-	pass    bool
+	calls     int
+	request   models.ClaimSupportRequest
+	pass      bool
+	uncovered []string
 }
 
 func (s *claimVerifierStub) VerifyClaimSupport(_ context.Context, request models.ClaimSupportRequest) (models.ClaimSupportOutcome, error) {
@@ -26,7 +27,24 @@ func (s *claimVerifierStub) VerifyClaimSupport(_ context.Context, request models
 	for index := range verdicts {
 		verdicts[index] = models.ClaimSupportVerdict{Ordinal: index, Supported: s.pass}
 	}
-	return models.ClaimSupportOutcome{Verdicts: verdicts}, nil
+	return models.ClaimSupportOutcome{Verdicts: verdicts, UncoveredClaims: append([]string(nil), s.uncovered...)}, nil
+}
+
+func TestGroundingDisclosesMaterialClaimsOmittedFromTheComposerClaimMap(t *testing.T) {
+	api, attempt, _, _ := groundingFixture(t, "omitted-grounding@example.com", "src_omitted", "evr_omitted")
+	verifier := &claimVerifierStub{pass: true, uncovered: []string{"The budget is $5M."}}
+	service := agent.NewGroundingService(api.db.Pool(), verifier, &fallbackDecisionStub{}, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
+	draft := models.FinalDraft{Text: "The launch is 20 July. The budget is $5M.", Claims: []models.DraftClaim{{
+		Text: "The launch is 20 July.", Citations: []models.EvidenceAddress{{SourceID: "src_omitted", EvidenceRevisionID: "evr_omitted", UnitID: "unit_ground", StartRune: 0, EndRune: 27}},
+	}}}
+	prepared, err := service.Prepare(context.Background(), attempt,
+		checkpointedEvidencePrefix("src_omitted", "evr_omitted", "unit_ground", 0, 27, false, false), draft)
+	if err != nil || len(prepared.Claims) != 1 || strings.Contains(prepared.Text, "$5M") || !strings.Contains(prepared.Text, "do not provide enough evidence") {
+		t.Fatalf("prepared=%+v err=%v", prepared, err)
+	}
+	if verifier.request.Answer != draft.Text {
+		t.Fatalf("verifier Answer=%q", verifier.request.Answer)
+	}
 }
 
 type fallbackDecisionStub struct {

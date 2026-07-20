@@ -182,7 +182,7 @@ func TestClaimSupportAdapterStagesReplayAndRecordsOnlySafeRAGMetadata(t *testing
 	stager := &recordingReplayStager{}
 	inputTokens, totalTokens := int64(31), int64(39)
 	request := models.ClaimSupportRequest{
-		Model: "aliyun/qwen-plus", PromptVersion: "claim-support-v1",
+		Model: "aliyun/qwen-plus", PromptVersion: "claim-support-v1", Answer: "private answer",
 		Claims: []models.ClaimSupportInput{{
 			Ordinal: 0, Text: "private claim",
 			Evidence: []models.ClaimEvidence{{SourceID: "source-1", RevisionID: "revision-1", UnitID: "unit-1", StartRune: 0, EndRune: 14, Text: "private evidence"}},
@@ -190,7 +190,7 @@ func TestClaimSupportAdapterStagesReplayAndRecordsOnlySafeRAGMetadata(t *testing
 	}
 	verifier := claimSupportVerifierFunc(func(context.Context, models.ClaimSupportRequest) (models.ClaimSupportOutcome, error) {
 		return models.ClaimSupportOutcome{
-			Verdicts: []models.ClaimSupportVerdict{{Ordinal: 0, Supported: false}},
+			Verdicts: []models.ClaimSupportVerdict{{Ordinal: 0, Supported: false}}, UncoveredClaims: []string{"private omitted claim"},
 			Metadata: models.CapabilityMetadata{
 				RequestedModel: "aliyun/qwen-plus", Provider: "aliyun", Model: "qwen-plus",
 				InputTokens: &inputTokens, TotalTokens: &totalTokens,
@@ -209,7 +209,10 @@ func TestClaimSupportAdapterStagesReplayAndRecordsOnlySafeRAGMetadata(t *testing
 	if len(stager.requests) != 2 || stager.requests[0].Payload.Class != replay.ClassModelRequest || stager.requests[1].Payload.Class != replay.ClassModelDecision {
 		t.Fatalf("staged Replay requests = %#v", stager.requests)
 	}
-	if !strings.Contains(string(stager.requests[0].Payload.Bytes), "private claim") || !strings.Contains(string(stager.requests[0].Payload.Bytes), "private evidence") {
+	if !strings.Contains(string(stager.requests[1].Payload.Bytes), "private omitted claim") {
+		t.Fatalf("verdict Replay omitted uncovered claim: %s", stager.requests[1].Payload.Bytes)
+	}
+	if !strings.Contains(string(stager.requests[0].Payload.Bytes), "private answer") || !strings.Contains(string(stager.requests[0].Payload.Bytes), "private claim") || !strings.Contains(string(stager.requests[0].Payload.Bytes), "private evidence") {
 		t.Fatalf("request Replay omitted verifier inputs: %s", stager.requests[0].Payload.Bytes)
 	}
 	records := exporter.Records()
@@ -217,7 +220,7 @@ func TestClaimSupportAdapterStagesReplayAndRecordsOnlySafeRAGMetadata(t *testing
 	if stringAttribute(start, TraceKeyVerifierPromptVersion) != "claim-support-v1" ||
 		int64Attribute(start, TraceKeyVerifierClaimCount) != 1 ||
 		int64Attribute(start, TraceKeyVerifierEvidenceCount) != 1 ||
-		int64Attribute(terminal, TraceKeyVerifierUnsupportedCount) != 1 {
+		int64Attribute(terminal, TraceKeyVerifierUnsupportedCount) != 2 {
 		t.Fatalf("claim support records = %#v", records)
 	}
 	for _, record := range records[len(records)-2:] {
@@ -225,7 +228,7 @@ func TestClaimSupportAdapterStagesReplayAndRecordsOnlySafeRAGMetadata(t *testing
 		if payloadErr != nil {
 			t.Fatal(payloadErr)
 		}
-		if strings.Contains(string(payload), "private claim") || strings.Contains(string(payload), "private evidence") {
+		if strings.Contains(string(payload), "private answer") || strings.Contains(string(payload), "private claim") || strings.Contains(string(payload), "private evidence") || strings.Contains(string(payload), "private omitted claim") {
 			t.Fatalf("sensitive verifier body entered Trace: %s", payload)
 		}
 	}

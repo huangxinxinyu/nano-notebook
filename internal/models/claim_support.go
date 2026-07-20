@@ -28,6 +28,7 @@ type ClaimSupportInput struct {
 type ClaimSupportRequest struct {
 	Model         string
 	PromptVersion string
+	Answer        string
 	Claims        []ClaimSupportInput
 }
 
@@ -37,12 +38,14 @@ type ClaimSupportVerdict struct {
 }
 
 type ClaimSupportOutcome struct {
-	Verdicts []ClaimSupportVerdict
-	Metadata CapabilityMetadata
+	Verdicts        []ClaimSupportVerdict
+	UncoveredClaims []string
+	Metadata        CapabilityMetadata
 }
 
 func (c *BifrostClient) VerifyClaimSupport(ctx context.Context, request ClaimSupportRequest) (ClaimSupportOutcome, error) {
-	if strings.TrimSpace(request.Model) == "" || strings.TrimSpace(request.PromptVersion) == "" || len(request.Claims) == 0 || len(request.Claims) > 64 {
+	if strings.TrimSpace(request.Model) == "" || strings.TrimSpace(request.PromptVersion) == "" || strings.TrimSpace(request.Answer) == "" ||
+		!utf8.ValidString(request.Answer) || utf8.RuneCountInString(request.Answer) > 100_000 || len(request.Claims) == 0 || len(request.Claims) > 64 {
 		return ClaimSupportOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid Claim Support request")}
 	}
 	for ordinal, claim := range request.Claims {
@@ -58,12 +61,13 @@ func (c *BifrostClient) VerifyClaimSupport(ctx context.Context, request ClaimSup
 	}
 	payload, err := json.Marshal(struct {
 		PromptVersion string              `json:"prompt_version"`
+		Answer        string              `json:"answer"`
 		Claims        []ClaimSupportInput `json:"claims"`
-	}{request.PromptVersion, request.Claims})
+	}{request.PromptVersion, request.Answer, request.Claims})
 	if err != nil {
 		return ClaimSupportOutcome{}, err
 	}
-	system := "Independently verify whether each claim is fully entailed by only its supplied evidence. Return only JSON matching {\"claims\":[{\"ordinal\":integer,\"supported\":boolean}]}. Return every ordinal exactly once and no explanation or reasoning. Prompt version: " + request.PromptVersion
+	system := "Independently verify whether each declared claim is fully entailed by only its supplied evidence, and detect every material factual or synthesized statement in the complete answer that is not covered by a declared claim. Return uncovered claims as exact verbatim answer spans. Return only JSON matching {\"claims\":[{\"ordinal\":integer,\"supported\":boolean}],\"uncovered_claims\":[string]}. Return every ordinal exactly once and no explanation or reasoning. Prompt version: " + request.PromptVersion
 	body, err := json.Marshal(struct {
 		Model    string `json:"model"`
 		Messages []struct {
@@ -103,14 +107,15 @@ func (c *BifrostClient) VerifyClaimSupport(ctx context.Context, request ClaimSup
 		return ClaimSupportOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid Claim Support response")}
 	}
 	var result struct {
-		Claims []ClaimSupportVerdict `json:"claims"`
+		Claims          []ClaimSupportVerdict `json:"claims"`
+		UncoveredClaims *[]string             `json:"uncovered_claims"`
 	}
 	decoder := json.NewDecoder(bytes.NewBufferString(*decoded.Choices[0].Message.Content))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&result); err != nil {
 		return ClaimSupportOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid Claim Support verdict")}
 	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) || len(result.Claims) != len(request.Claims) {
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) || len(result.Claims) != len(request.Claims) || result.UncoveredClaims == nil {
 		return ClaimSupportOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid Claim Support verdict set")}
 	}
 	seen := make(map[int]struct{}, len(result.Claims))
@@ -127,7 +132,35 @@ func (c *BifrostClient) VerifyClaimSupport(ctx context.Context, request ClaimSup
 	for _, verdict := range result.Claims {
 		ordered[verdict.Ordinal] = verdict
 	}
-	return ClaimSupportOutcome{Verdicts: ordered, Metadata: CapabilityMetadata{
+	uncovered, err := validateUncoveredClaims(request, *result.UncoveredClaims)
+	if err != nil {
+		return ClaimSupportOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
+	}
+	return ClaimSupportOutcome{Verdicts: ordered, UncoveredClaims: uncovered, Metadata: CapabilityMetadata{
 		RequestedModel: request.Model, Provider: strings.TrimSpace(decoded.Provider), Model: strings.TrimSpace(decoded.Model), Latency: latency,
 	}}, nil
+}
+
+func validateUncoveredClaims(request ClaimSupportRequest, uncovered []string) ([]string, error) {
+	if len(uncovered) > 64 {
+		return nil, errors.New("too many uncovered material claims")
+	}
+	result := make([]string, 0, len(uncovered))
+	seen := make(map[string]struct{}, len(uncovered))
+	for _, claim := range uncovered {
+		if strings.TrimSpace(claim) != claim || claim == "" || !utf8.ValidString(claim) || utf8.RuneCountInString(claim) > 4000 || !strings.Contains(request.Answer, claim) {
+			return nil, errors.New("uncovered material claim is not a verbatim Answer span")
+		}
+		if _, duplicate := seen[claim]; duplicate {
+			return nil, errors.New("uncovered material claim is duplicated")
+		}
+		for _, declared := range request.Claims {
+			if strings.Contains(claim, declared.Text) || strings.Contains(declared.Text, claim) {
+				return nil, errors.New("uncovered material claim overlaps a declared claim")
+			}
+		}
+		seen[claim] = struct{}{}
+		result = append(result, claim)
+	}
+	return result, nil
 }

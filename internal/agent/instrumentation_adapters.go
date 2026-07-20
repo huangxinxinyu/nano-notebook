@@ -339,7 +339,7 @@ func claimSupportTerminal(outcome models.ClaimSupportOutcome, callErr error) age
 		}
 		attributes = append(attributes,
 			agentobs.Int64(TraceKeyVerifierSupportedCount, supported),
-			agentobs.Int64(TraceKeyVerifierUnsupportedCount, int64(len(outcome.Verdicts))-supported),
+			agentobs.Int64(TraceKeyVerifierUnsupportedCount, int64(len(outcome.Verdicts))-supported+int64(len(outcome.UncoveredClaims))),
 		)
 	} else {
 		status = agentobs.StatusError
