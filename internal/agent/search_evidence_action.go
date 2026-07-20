@@ -9,6 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
 )
@@ -94,7 +95,40 @@ func (a searchEvidenceAction) Execute(ctx context.Context, request ActionRequest
 	if err != nil {
 		return ActionResult{}, err
 	}
-	return ActionResult{Status: ActionSucceeded, Output: encoded}, nil
+	return ActionResult{Status: ActionSucceeded, Output: encoded, traceAttributes: searchEvidenceTraceAttributes(result)}, nil
+}
+
+func searchEvidenceTraceAttributes(result retrieval.SearchResult) []agentobs.Attribute {
+	diagnostics := result.Diagnostics
+	return []agentobs.Attribute{
+		agentobs.Bool(TraceKeyDenseCompleted, diagnostics.Dense.Completed),
+		agentobs.Int64(TraceKeyDenseCandidateCount, int64(len(diagnostics.Dense.CandidateIDs))),
+		agentobs.String(TraceKeyDenseCandidateIDs, traceIdentityList(diagnostics.Dense.CandidateIDs)),
+		agentobs.Int64(TraceKeyDenseDuration, diagnostics.Dense.DurationNanoseconds),
+		agentobs.Bool(TraceKeyBM25Completed, diagnostics.BM25.Completed),
+		agentobs.Int64(TraceKeyBM25CandidateCount, int64(len(diagnostics.BM25.CandidateIDs))),
+		agentobs.String(TraceKeyBM25CandidateIDs, traceIdentityList(diagnostics.BM25.CandidateIDs)),
+		agentobs.Int64(TraceKeyBM25Duration, diagnostics.BM25.DurationNanoseconds),
+		agentobs.String(TraceKeyRRFTransitionIDs, traceIdentityList(diagnostics.Fused.CandidateIDs)),
+		agentobs.Int64(TraceKeyRRFDuration, diagnostics.Fused.DurationNanoseconds),
+		agentobs.String(TraceKeyEvidenceLoadIDs, traceIdentityList(diagnostics.EvidenceLoad.CandidateIDs)),
+		agentobs.Int64(TraceKeyEvidenceLoadDuration, diagnostics.EvidenceLoad.DurationNanoseconds),
+		agentobs.String(TraceKeyRerankTransitionIDs, traceIdentityList(diagnostics.Rerank.CandidateIDs)),
+		agentobs.Int64(TraceKeyRerankDuration, diagnostics.Rerank.DurationNanoseconds),
+		agentobs.Int64(TraceKeySelectedEvidenceCount, int64(len(result.Candidates))),
+		agentobs.Bool(TraceKeyRetrievalDegraded, result.Degraded),
+		agentobs.String(TraceKeyRetrievalDegradations, traceIdentityList(result.Degradations)),
+		agentobs.Bool(TraceKeyRetrievalCompleteEmpty, result.CompleteEmpty),
+	}
+}
+
+func traceIdentityList(values []string) string {
+	const maximum = 64
+	if len(values) > maximum {
+		values = values[:maximum]
+	}
+	encoded, _ := json.Marshal(values)
+	return string(encoded)
 }
 
 func decodeSearchEvidenceInput(raw json.RawMessage) (searchEvidenceInput, error) {

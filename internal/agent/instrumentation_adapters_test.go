@@ -12,6 +12,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/semconv"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/replay"
+	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
 )
 
 func TestModelAdapterRecordsNormalizedMetadataWithoutContent(t *testing.T) {
@@ -137,6 +138,99 @@ func TestActionAdapterStagesReplayAndBindsBothSidesOfThePhysicalCall(t *testing.
 	}
 }
 
+func TestSearchEvidenceActionRecordsRAGMetadataWithoutQueryOrEvidenceBodies(t *testing.T) {
+	tracer, exporter, ctx := instrumentationTestTracer(t)
+	backend := &evidenceSearchStub{result: retrieval.SearchResult{
+		Candidates: []retrieval.EvidenceCandidate{{ID: "chunk_a", Preview: "secret evidence"}},
+		Degraded:   true, Degradations: []string{"reranker_unavailable"},
+		Diagnostics: retrieval.SearchDiagnostics{
+			Dense:        retrieval.SearchStageDiagnostics{Completed: true, CandidateIDs: []string{"chunk_a", "chunk_b"}},
+			BM25:         retrieval.SearchStageDiagnostics{Completed: true, CandidateIDs: []string{"chunk_b"}},
+			Fused:        retrieval.SearchStageDiagnostics{Completed: true, CandidateIDs: []string{"chunk_b", "chunk_a"}},
+			EvidenceLoad: retrieval.SearchStageDiagnostics{Completed: true, CandidateIDs: []string{"chunk_a"}},
+		},
+	}}
+	action := NewSearchEvidenceAction(backend)
+	_, err := InvokeAgentAction(ctx, tracer, action, "decision:1/action:0", ActionRequest{
+		Input:   json.RawMessage(`{"query":"private query","purpose":"compare stated methods"}`),
+		Attempt: Attempt{RunID: "run"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := exporter.Records()
+	start, terminal := records[len(records)-2], records[len(records)-1]
+	if stringAttribute(start, TraceKeySearchPurpose) != "compare stated methods" ||
+		stringAttribute(terminal, TraceKeyDenseCandidateIDs) != `["chunk_a","chunk_b"]` ||
+		stringAttribute(terminal, TraceKeyRRFTransitionIDs) != `["chunk_b","chunk_a"]` ||
+		stringAttribute(terminal, TraceKeyRetrievalDegradations) != `["reranker_unavailable"]` {
+		t.Fatalf("RAG records=%#v", records)
+	}
+	for _, record := range records[len(records)-2:] {
+		payload, payloadErr := record.CanonicalPayload()
+		if payloadErr != nil {
+			t.Fatal(payloadErr)
+		}
+		if strings.Contains(string(payload), "private query") || strings.Contains(string(payload), "secret evidence") {
+			t.Fatalf("sensitive RAG body entered Trace: %s", payload)
+		}
+	}
+}
+
+func TestClaimSupportAdapterStagesReplayAndRecordsOnlySafeRAGMetadata(t *testing.T) {
+	tracer, exporter, ctx := instrumentationTestTracer(t)
+	stager := &recordingReplayStager{}
+	inputTokens, totalTokens := int64(31), int64(39)
+	request := models.ClaimSupportRequest{
+		Model: "aliyun/qwen-plus", PromptVersion: "claim-support-v1",
+		Claims: []models.ClaimSupportInput{{
+			Ordinal: 0, Text: "private claim",
+			Evidence: []models.ClaimEvidence{{SourceID: "source-1", RevisionID: "revision-1", UnitID: "unit-1", StartRune: 0, EndRune: 14, Text: "private evidence"}},
+		}},
+	}
+	verifier := claimSupportVerifierFunc(func(context.Context, models.ClaimSupportRequest) (models.ClaimSupportOutcome, error) {
+		return models.ClaimSupportOutcome{
+			Verdicts: []models.ClaimSupportVerdict{{Ordinal: 0, Supported: false}},
+			Metadata: models.CapabilityMetadata{
+				RequestedModel: "aliyun/qwen-plus", Provider: "aliyun", Model: "qwen-plus",
+				InputTokens: &inputTokens, TotalTokens: &totalTokens,
+			},
+		}, nil
+	})
+	outcome, err := InvokeClaimSupportVerifier(ctx, tracer, verifier, request, ClaimSupportTraceOptions{
+		StartIdentity:   "run/run-1/attempt/1/grounding/verifier/start",
+		RequestIdentity: "run/run-1/attempt/1/grounding/verifier/replay/request",
+		VerdictIdentity: "run/run-1/attempt/1/grounding/verifier/replay/verdict",
+		ReplayStager:    stager,
+	})
+	if err != nil || len(outcome.Verdicts) != 1 {
+		t.Fatalf("InvokeClaimSupportVerifier = %#v, %v", outcome, err)
+	}
+	if len(stager.requests) != 2 || stager.requests[0].Payload.Class != replay.ClassModelRequest || stager.requests[1].Payload.Class != replay.ClassModelDecision {
+		t.Fatalf("staged Replay requests = %#v", stager.requests)
+	}
+	if !strings.Contains(string(stager.requests[0].Payload.Bytes), "private claim") || !strings.Contains(string(stager.requests[0].Payload.Bytes), "private evidence") {
+		t.Fatalf("request Replay omitted verifier inputs: %s", stager.requests[0].Payload.Bytes)
+	}
+	records := exporter.Records()
+	start, terminal := records[len(records)-2], records[len(records)-1]
+	if stringAttribute(start, TraceKeyVerifierPromptVersion) != "claim-support-v1" ||
+		int64Attribute(start, TraceKeyVerifierClaimCount) != 1 ||
+		int64Attribute(start, TraceKeyVerifierEvidenceCount) != 1 ||
+		int64Attribute(terminal, TraceKeyVerifierUnsupportedCount) != 1 {
+		t.Fatalf("claim support records = %#v", records)
+	}
+	for _, record := range records[len(records)-2:] {
+		payload, payloadErr := record.CanonicalPayload()
+		if payloadErr != nil {
+			t.Fatal(payloadErr)
+		}
+		if strings.Contains(string(payload), "private claim") || strings.Contains(string(payload), "private evidence") {
+			t.Fatalf("sensitive verifier body entered Trace: %s", payload)
+		}
+	}
+}
+
 func TestModelAdapterClassifiesObservedErrors(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -213,6 +307,12 @@ func (f outcomeModelFunc) Decide(ctx context.Context, request models.ModelReques
 	return f(ctx, request)
 }
 
+type claimSupportVerifierFunc func(context.Context, models.ClaimSupportRequest) (models.ClaimSupportOutcome, error)
+
+func (f claimSupportVerifierFunc) VerifyClaimSupport(ctx context.Context, request models.ClaimSupportRequest) (models.ClaimSupportOutcome, error) {
+	return f(ctx, request)
+}
+
 type adapterAction struct{}
 
 func (adapterAction) Definition() models.ActionDefinition {
@@ -249,4 +349,13 @@ func stringAttribute(record agentobs.Record, key string) string {
 		}
 	}
 	return ""
+}
+
+func int64Attribute(record agentobs.Record, key string) int64 {
+	for _, item := range record.Attributes {
+		if item.Key == key && item.Value.Kind == agentobs.ValueInt64 {
+			return item.Value.Int64
+		}
+	}
+	return 0
 }

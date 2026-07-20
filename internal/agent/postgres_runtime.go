@@ -98,6 +98,16 @@ func (r *PostgresRuntime) PrepareFinal(ctx context.Context, attempt Attempt, exe
 	return draft, nil
 }
 
+func (r *PostgresRuntime) PrepareFinalTraced(ctx context.Context, tracer *agentobs.Tracer, attempt Attempt, execution Execution, prefix CheckpointPrefix, draft models.FinalDraft) (models.FinalDraft, error) {
+	if r != nil && r.grounder != nil {
+		return r.grounder.PrepareTraced(ctx, tracer, r.replayStager, attempt, prefix, draft)
+	}
+	if execution.SelectedSourceCount > 0 {
+		return models.FinalDraft{}, ErrGroundingIncomplete
+	}
+	return draft, nil
+}
+
 func NewPostgresRuntime(pool *pgxpool.Pool, systemPrompt string, newMessageID func() string, options ...RuntimeOption) *PostgresRuntime {
 	if systemPrompt == "" {
 		systemPrompt = BareSystemPrompt
@@ -309,6 +319,7 @@ func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, mess
 	publicationContext, _, err := tracer.StartSpan(agentobs.ContextWithSpanContext(traceCtx, attemptSpan), agentobs.SpanStart{
 		IdentityKey: fmt.Sprintf("run/%s/attempt/%d/publication/start", attempt.RunID, attempt.AttemptNo),
 		Name:        TraceSpanPublication,
+		Attributes:  []agentobs.Attribute{agentobs.String(TraceKeyGroundingOutcome, groundingOutcome)},
 	})
 	if err != nil {
 		return err
@@ -365,10 +376,13 @@ func (r *PostgresRuntime) publishOnce(ctx context.Context, attempt Attempt, mess
 	if err := tracer.Event(publicationContext, agentobs.Event{
 		IdentityKey: fmt.Sprintf("run/%s/attempt/%d/publication/passed", attempt.RunID, attempt.AttemptNo),
 		Name:        TraceEventPublicationPassed,
+		Attributes:  []agentobs.Attribute{agentobs.String(TraceKeyGroundingOutcome, groundingOutcome)},
 	}); err != nil {
 		return err
 	}
-	if err := tracer.EndSpan(publicationContext, agentobs.SpanEnd{Name: TraceSpanPublication, Status: agentobs.StatusOK}); err != nil {
+	if err := tracer.EndSpan(publicationContext, agentobs.SpanEnd{Name: TraceSpanPublication, Status: agentobs.StatusOK, Attributes: []agentobs.Attribute{
+		agentobs.String(TraceKeyGroundingOutcome, groundingOutcome),
+	}}); err != nil {
 		return err
 	}
 	if err := RecordRunTerminalInTx(traceCtx, tx, attempt.RunID, RunTerminalTrace{

@@ -45,6 +45,10 @@ type FinalPreparationRuntime interface {
 	PrepareFinal(context.Context, Attempt, Execution, CheckpointPrefix, models.FinalDraft) (models.FinalDraft, error)
 }
 
+type FinalPreparationTraceRuntime interface {
+	PrepareFinalTraced(context.Context, *agentobs.Tracer, Attempt, Execution, CheckpointPrefix, models.FinalDraft) (models.FinalDraft, error)
+}
+
 type Controller struct {
 	runtime  ControllerRuntime
 	model    DecisionModel
@@ -136,7 +140,15 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		decisionNo := prefix.AcceptedDecisions + 1
 		if decision.Final != nil {
 			prepared := *decision.Final
-			if runtime, ok := c.runtime.(FinalPreparationRuntime); ok {
+			if runtime, ok := c.runtime.(FinalPreparationTraceRuntime); ok && tracer != nil {
+				prepared, err = runtime.PrepareFinalTraced(ctx, tracer, attempt, execution, prefix, prepared)
+				if err != nil {
+					if handled, result := c.handleRecordingError(ctx, attempt, err); handled {
+						return result
+					}
+					return c.fail(ctx, attempt, "grounding_failed", err)
+				}
+			} else if runtime, ok := c.runtime.(FinalPreparationRuntime); ok {
 				prepared, err = runtime.PrepareFinal(ctx, attempt, execution, prefix, prepared)
 				if err != nil {
 					return c.fail(ctx, attempt, "grounding_failed", err)

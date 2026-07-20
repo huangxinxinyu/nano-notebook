@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 var (
@@ -42,6 +43,22 @@ type SearchResult struct {
 	Degraded      bool
 	CompleteEmpty bool
 	Degradations  []string
+	Diagnostics   SearchDiagnostics
+}
+
+type SearchStageDiagnostics struct {
+	Completed           bool
+	DurationNanoseconds int64
+	CandidateIDs        []string
+}
+
+type SearchDiagnostics struct {
+	Dense        SearchStageDiagnostics
+	BM25         SearchStageDiagnostics
+	Fused        SearchStageDiagnostics
+	EvidenceLoad SearchStageDiagnostics
+	Rerank       SearchStageDiagnostics
+	Degradations []string
 }
 
 type DenseSearchFunc func(context.Context, SearchRequest) ([]Candidate, error)
@@ -61,13 +78,17 @@ func (p Pipeline) Search(ctx context.Context, request SearchRequest) (SearchResu
 		return SearchResult{}, err
 	}
 
+	result := SearchResult{}
+	denseStarted := time.Now()
 	dense, denseErr := runSearchChannel(ctx, p.Dense, request, request.DenseLimit)
+	result.Diagnostics.Dense = candidateStage(denseErr == nil, time.Since(denseStarted), candidateIDs(dense))
+	sparseStarted := time.Now()
 	sparse, sparseErr := runSearchChannel(ctx, p.Sparse, request, request.SparseLimit)
+	result.Diagnostics.BM25 = candidateStage(sparseErr == nil, time.Since(sparseStarted), candidateIDs(sparse))
 	if denseErr != nil && sparseErr != nil {
 		return SearchResult{}, fmt.Errorf("%w: dense and BM25 channels failed", ErrRetrievalUnavailable)
 	}
 
-	result := SearchResult{}
 	channels := make(map[string][]Candidate, 2)
 	if denseErr != nil {
 		result.Degradations = append(result.Degradations, "dense_unavailable")
@@ -80,6 +101,7 @@ func (p Pipeline) Search(ctx context.Context, request SearchRequest) (SearchResu
 		channels["bm25"] = sparse
 	}
 	result.Degraded = len(result.Degradations) > 0
+	result.Diagnostics.Degradations = append([]string(nil), result.Degradations...)
 
 	if !result.Degraded && len(dense) == 0 && len(sparse) == 0 {
 		result.CompleteEmpty = true
@@ -94,6 +116,7 @@ func (p Pipeline) Search(ctx context.Context, request SearchRequest) (SearchResu
 		}
 	}
 
+	fusedStarted := time.Now()
 	fused, err := FuseRRF(channels, request.RRFK)
 	if err != nil {
 		return SearchResult{}, fmt.Errorf("%w: invalid channel result: %v", ErrRetrievalUnavailable, err)
@@ -105,6 +128,7 @@ func (p Pipeline) Search(ctx context.Context, request SearchRequest) (SearchResu
 	for _, candidate := range fused {
 		ids = append(ids, candidate.ID)
 	}
+	result.Diagnostics.Fused = candidateStage(true, time.Since(fusedStarted), ids)
 
 	if len(ids) == 0 {
 		if result.Degraded {
@@ -116,6 +140,7 @@ func (p Pipeline) Search(ctx context.Context, request SearchRequest) (SearchResu
 	if p.Reload == nil {
 		return SearchResult{}, fmt.Errorf("%w: authority reload is not configured", ErrRetrievalUnavailable)
 	}
+	reloadStarted := time.Now()
 	reloaded, err := p.Reload(ctx, request.Scope, ids)
 	if err != nil {
 		return SearchResult{}, fmt.Errorf("%w: authority reload failed: %v", ErrRetrievalUnavailable, err)
@@ -127,6 +152,7 @@ func (p Pipeline) Search(ctx context.Context, request SearchRequest) (SearchResu
 	if result.Degraded && len(authoritative) < request.MinimumSurvivors {
 		return SearchResult{}, fmt.Errorf("%w: authority reload retained %d candidates, need %d", ErrRetrievalUnavailable, len(authoritative), request.MinimumSurvivors)
 	}
+	result.Diagnostics.EvidenceLoad = candidateStage(true, time.Since(reloadStarted), evidenceCandidateIDs(authoritative))
 	if len(authoritative) == 0 {
 		if result.Degraded {
 			return SearchResult{}, fmt.Errorf("%w: authority reload retained no candidates", ErrRetrievalUnavailable)
@@ -134,22 +160,45 @@ func (p Pipeline) Search(ctx context.Context, request SearchRequest) (SearchResu
 		result.CompleteEmpty = true
 		return result, nil
 	}
-
 	result.Candidates = authoritative
 	if p.Rerank == nil {
 		return result, nil
 	}
+	rerankStarted := time.Now()
 	orderedIDs, err := p.Rerank(ctx, request.Query, append([]EvidenceCandidate(nil), authoritative...))
 	if err != nil {
 		result.Degraded = true
 		result.Degradations = append(result.Degradations, "reranker_unavailable")
+		result.Diagnostics.Rerank = candidateStage(false, time.Since(rerankStarted), nil)
+		result.Diagnostics.Degradations = append([]string(nil), result.Degradations...)
 		return result, nil
 	}
 	result.Candidates, err = applyRerankOrder(authoritative, orderedIDs)
 	if err != nil {
 		return SearchResult{}, fmt.Errorf("%w: invalid reranker result: %v", ErrRetrievalUnavailable, err)
 	}
+	result.Diagnostics.Rerank = candidateStage(true, time.Since(rerankStarted), evidenceCandidateIDs(result.Candidates))
 	return result, nil
+}
+
+func candidateStage(completed bool, duration time.Duration, ids []string) SearchStageDiagnostics {
+	return SearchStageDiagnostics{Completed: completed, DurationNanoseconds: duration.Nanoseconds(), CandidateIDs: append([]string(nil), ids...)}
+}
+
+func candidateIDs(candidates []Candidate) []string {
+	result := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		result = append(result, candidate.ID)
+	}
+	return result
+}
+
+func evidenceCandidateIDs(candidates []EvidenceCandidate) []string {
+	result := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		result = append(result, candidate.ID)
+	}
+	return result
 }
 
 func validateSearchRequest(request SearchRequest) error {

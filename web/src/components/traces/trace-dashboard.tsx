@@ -17,7 +17,8 @@ const copy = {
     tree: "Trace Tree", timeline: "Trace Timeline", inspector: "Inspector", overview: "Overview", replay: "Replay", attributes: "Attributes", eventsLinks: "Events & Links", analysis: "Trace analysis", kind: "Kind", errorKind: "Error kind", modelCall: "Model call", actionCall: "Action", jobAttempt: "Job attempt", agentExecution: "Agent execution", spanKind: "Span",
     unfinished: "Unfinished", selectTimeline: "Select", openLink: "Open", expand: "Expand", collapse: "Collapse", zoomIn: "Zoom in", zoomOut: "Zoom out", resetZoom: "Reset zoom",
     loadReplay: "Load sensitive Replay", sensitive: "This action accesses sensitive user content and will be audited.", replayForbidden: "Replay capability is not granted.", replayLoading: "Loading Replay…", replayExpired: "Replay has expired.", replayCorrupt: "Replay failed its integrity check.", replayUnavailable: "Replay is unavailable.",
-    unknown: "Unknown", unknownCost: "Unknown cost", total: "Total", modelCalls: "Model calls", actions: "Actions", other: "Other", duration: "Duration", input: "Input", output: "Output", cached: "Cached", reasoning: "Reasoning", provider: "Provider", noSelection: "Select a Span to inspect it.", noReplay: "This Span has no Replay payload.", noEvents: "No Events or Links for this Span."
+    unknown: "Unknown", unknownCost: "Unknown cost", total: "Total", modelCalls: "Model calls", actions: "Actions", other: "Other", duration: "Duration", input: "Input", output: "Output", cached: "Cached", reasoning: "Reasoning", provider: "Provider", noSelection: "Select a Span to inspect it.", noReplay: "This Span has no Replay payload.", noEvents: "No Events or Links for this Span.",
+    ragExecution: "RAG execution", searchPurpose: "Search purpose", candidates: "Dense / BM25 candidates", rankFlow: "RRF order", reranked: "Rerank selection", degradation: "Degradation", claimSupport: "Claim support", publicationOutcome: "Publication outcome", stageLatency: "Stage latency", supported: "supported", unsupported: "unsupported", healthy: "None"
   },
   zh: {
     explorer: "Trace 调试台", restricted: "Trace 访问受限", restrictedBody: "需要 platform.trace.read 授权；Notebook 角色不会授予可观测性访问。",
@@ -27,7 +28,8 @@ const copy = {
     tree: "Trace 树", timeline: "Trace 时间线", inspector: "检查器", overview: "概览", replay: "Replay", attributes: "属性", eventsLinks: "事件与链接", analysis: "Trace 分析", kind: "类型", errorKind: "错误类型", modelCall: "模型调用", actionCall: "Action", jobAttempt: "任务尝试", agentExecution: "Agent 执行", spanKind: "Span",
     unfinished: "未闭合", selectTimeline: "在时间线选择", openLink: "打开", expand: "展开", collapse: "收起", zoomIn: "放大", zoomOut: "缩小", resetZoom: "重置缩放",
     loadReplay: "加载敏感 Replay", sensitive: "此操作会访问敏感用户内容并被审计。", replayForbidden: "未授予 Replay 权限。", replayLoading: "正在加载 Replay…", replayExpired: "Replay 已过期。", replayCorrupt: "Replay 完整性校验失败。", replayUnavailable: "Replay 不可用。",
-    unknown: "未知", unknownCost: "成本未知", total: "总计", modelCalls: "模型调用", actions: "Action", other: "其他", duration: "耗时", input: "输入", output: "输出", cached: "缓存", reasoning: "推理", provider: "Provider", noSelection: "请选择一个 Span。", noReplay: "这个 Span 没有 Replay 数据。", noEvents: "这个 Span 没有事件或链接。"
+    unknown: "未知", unknownCost: "成本未知", total: "总计", modelCalls: "模型调用", actions: "Action", other: "其他", duration: "耗时", input: "输入", output: "输出", cached: "缓存", reasoning: "推理", provider: "Provider", noSelection: "请选择一个 Span。", noReplay: "这个 Span 没有 Replay 数据。", noEvents: "这个 Span 没有事件或链接。",
+    ragExecution: "RAG 执行", searchPurpose: "检索目的", candidates: "Dense / BM25 候选", rankFlow: "RRF 排序", reranked: "重排入选", degradation: "降级", claimSupport: "主张支持", publicationOutcome: "发布结果", stageLatency: "阶段耗时", supported: "支持", unsupported: "不支持", healthy: "无"
   }
 } satisfies Record<Locale, Record<string, string>>;
 
@@ -155,9 +157,31 @@ function TraceDetailView(props: TraceDashboardProps & { traceID: string }) {
         <section className="trace-tree-panel"><h2>{t.tree}</h2><div role="tree" aria-label={t.tree}>{spans.filter((span) => !span.parent_span_id).map((root) => <TreeNode key={root.span_id} span={root} spans={spans} depth={0} selectedID={selected?.span_id ?? ""} collapsed={collapsed} t={t} onSelect={select} onToggle={(spanID) => setCollapsed((current) => toggleSet(current, spanID))} />)}</div></section>
         <section className="trace-inspector" aria-label={t.inspector}><h2>{t.inspector}</h2><div className="trace-tabs" role="tablist">{[["overview", t.overview], ["replay", t.replay], ["attributes", t.attributes], ["events", t.eventsLinks]].map(([value, label]) => <button key={value} role="tab" aria-selected={tab === value} onClick={() => setTab(value)}>{label}</button>)}</div>{selected ? <InspectorTab tab={tab} span={selected} events={events} links={links} canReplay={props.canReplay} t={t} onNavigate={props.onNavigate} /> : <p>{t.noSelection}</p>}</section>
       </div>
+      <RAGExecution spans={spans} t={t} />
       <TraceAnalysis summary={summary} spans={spans} t={t} />
     </main>
   );
+}
+
+function RAGExecution({ spans, t }: { spans: Span[]; t: TraceCopy }) {
+  const searches = spans.filter((span) => spanAttribute(span, "agent.action.name") === "search_evidence" || spanAttribute(span, "nano.rag.search.purpose"));
+  const verifier = spans.find((span) => span.name === "nano.claim_support");
+  const publication = spans.find((span) => span.name === "nano.publication");
+  if (!searches.length && !verifier && !publication) return null;
+  const search = searches[searches.length - 1];
+  const dense = search ? spanAttribute(search, "nano.rag.dense.candidate_count") : "";
+  const bm25 = search ? spanAttribute(search, "nano.rag.bm25.candidate_count") : "";
+  const rrf = search ? parseAttributeList(spanAttribute(search, "nano.rag.rrf.candidate_ids")) : [];
+  const rerank = search ? parseAttributeList(spanAttribute(search, "nano.rag.rerank.candidate_ids")) : [];
+  const degradations = searches.flatMap((span) => parseAttributeList(spanAttribute(span, "nano.rag.retrieval.degradations")));
+  const supported = verifier ? spanAttribute(verifier, "nano.rag.verifier.supported_count") : "";
+  const unsupported = verifier ? spanAttribute(verifier, "nano.rag.verifier.unsupported_count") : "";
+  const latencies = [
+    ...searches.map((span, index) => [`search_evidence ${index + 1}`, span.duration_nanoseconds] as const),
+    ...(verifier ? [["claim_support", verifier.duration_nanoseconds] as const] : []),
+    ...(publication ? [["publication", publication.duration_nanoseconds] as const] : [])
+  ];
+  return <section className="trace-rag" aria-label={t.ragExecution}><h2>{t.ragExecution}</h2><div className="trace-rag-grid"><article><h3>{t.searchPurpose}</h3><strong>{search ? spanAttribute(search, "nano.rag.search.purpose") || t.unknown : t.unknown}</strong><dl><dt>{t.candidates}</dt><dd>{dense || t.unknown} → {bm25 || t.unknown}</dd><dt>{t.rankFlow}</dt><dd>{rrf.join(" → ") || t.unknown}</dd><dt>{t.reranked}</dt><dd>{rerank.join(" → ") || t.unknown}</dd><dt>{t.degradation}</dt><dd>{degradations.join(", ") || t.healthy}</dd></dl></article><article><h3>{t.claimSupport}</h3><strong>{supported || t.unknown} {t.supported} / {unsupported || t.unknown} {t.unsupported}</strong><dl><dt>{t.publicationOutcome}</dt><dd>{publication ? spanAttribute(publication, "nano.rag.grounding.outcome") || t.unknown : t.unknown}</dd></dl></article><article><h3>{t.stageLatency}</h3><dl>{latencies.map(([label, duration]) => <div key={label}><dt>{label}</dt><dd>{formatDuration(duration, t.unknown)}</dd></div>)}</dl></article></div></section>;
 }
 
 function TraceTopbar({ title, backLabel, onBack }: { title: string; backLabel: string; onBack: () => void }) {
@@ -254,6 +278,7 @@ function ancestorSpanIDs(spanID: string, spans: Span[]) { const ancestors: strin
 function toggleSet(current: Set<string>, value: string) { const next = new Set(current); if (next.has(value)) next.delete(value); else next.add(value); return next; }
 function attributeValue(attribute: Attribute, unknown: string) { const value = { ...(attribute.Value ?? {}), ...(attribute.value ?? {}) } as Record<string, unknown>; const kind = String(value.Kind ?? value.kind ?? ""); if (kind === "string") return String(value.String ?? value.string ?? ""); if (kind === "int64") return String(value.Int64 ?? value.int64 ?? 0); if (kind === "float64") return String(value.Float64 ?? value.float64 ?? 0); if (kind === "bool") return String(value.Bool ?? value.bool ?? false); return unknown; }
 function spanAttribute(span: Span, key: string) { const attribute = [...span.end_attributes, ...span.start_attributes].find((item) => (item.Key ?? item.key) === key); return attribute ? attributeValue(attribute, "") : ""; }
+function parseAttributeList(value: string) { if (!value) return [] as string[]; try { const parsed: unknown = JSON.parse(value); return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string").slice(0, 64) : []; } catch { return []; } }
 function spanKind(span: Span, t: TraceCopy) { if (span.name === "agent.execution") return t.agentExecution; if (span.name === "nano.job.attempt") return t.jobAttempt; if (span.name === "agent.model.call" || span.name === "gen_ai.model.call") return t.modelCall; if (span.name === "agent.action" || span.name.includes("action")) return t.actionCall; return t.spanKind; }
 function collectStrings(value: unknown): string[] { if (typeof value === "string") return [value]; if (Array.isArray(value)) return value.flatMap(collectStrings); if (value && typeof value === "object") return Object.values(value).flatMap(collectStrings); return []; }
 function timeRangeStart(value: string) { const hours = Number.parseInt(value, 10); return Number.isFinite(hours) && hours > 0 ? new Date(Date.now() - hours * 60 * 60 * 1000).toISOString() : ""; }

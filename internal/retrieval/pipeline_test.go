@@ -44,6 +44,14 @@ func TestHybridPipelineReloadsAuthorityBeforeBoundedReranking(t *testing.T) {
 		len(result.Candidates) != 2 || result.Candidates[0].ID != "unit_b" {
 		t.Fatalf("result=%+v reranked=%v", result, rerankedInput)
 	}
+	if !result.Diagnostics.Dense.Completed || !result.Diagnostics.BM25.Completed ||
+		!reflect.DeepEqual(result.Diagnostics.Dense.CandidateIDs, []string{"unit_a", "deleted"}) ||
+		!reflect.DeepEqual(result.Diagnostics.BM25.CandidateIDs, []string{"unit_b", "unit_a"}) ||
+		!reflect.DeepEqual(result.Diagnostics.Fused.CandidateIDs, []string{"unit_a", "unit_b"}) ||
+		!reflect.DeepEqual(result.Diagnostics.EvidenceLoad.CandidateIDs, []string{"unit_a", "unit_b"}) ||
+		!reflect.DeepEqual(result.Diagnostics.Rerank.CandidateIDs, []string{"unit_b", "unit_a"}) {
+		t.Fatalf("diagnostics=%+v", result.Diagnostics)
+	}
 }
 
 func TestHybridPipelineAppliesExplicitDegradationMatrix(t *testing.T) {
@@ -75,6 +83,10 @@ func TestHybridPipelineAppliesExplicitDegradationMatrix(t *testing.T) {
 	if !result.Degraded || result.CompleteEmpty || !reflect.DeepEqual(result.Degradations, []string{"dense_unavailable", "reranker_unavailable"}) ||
 		len(result.Candidates) != 2 || result.Candidates[0].ID != "unit_a" {
 		t.Fatalf("degraded result = %+v", result)
+	}
+	if result.Diagnostics.Dense.Completed || !result.Diagnostics.BM25.Completed || result.Diagnostics.Rerank.Completed ||
+		!reflect.DeepEqual(result.Diagnostics.Degradations, result.Degradations) {
+		t.Fatalf("degraded diagnostics = %+v", result.Diagnostics)
 	}
 
 	request.MinimumSurvivors = 3

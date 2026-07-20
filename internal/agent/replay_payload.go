@@ -183,6 +183,62 @@ func EncodeModelDecisionReplay(decision models.ModelDecision) (replay.PlainPaylo
 	return marshalReplayPayload(replay.ClassModelDecision, document)
 }
 
+type claimSupportRequestReplay struct {
+	replayPayloadHeader
+	Operation     string                     `json:"operation"`
+	Model         string                     `json:"model"`
+	PromptVersion string                     `json:"prompt_version"`
+	Claims        []models.ClaimSupportInput `json:"claims"`
+}
+
+func EncodeClaimSupportRequestReplay(request models.ClaimSupportRequest) (replay.PlainPayload, error) {
+	if strings.TrimSpace(request.Model) == "" || strings.TrimSpace(request.PromptVersion) == "" || len(request.Claims) == 0 {
+		return replay.PlainPayload{}, errors.New("Replay Claim Support request is invalid")
+	}
+	budget := newReplaySizeBudget()
+	budget.addString(request.Model)
+	budget.addString(request.PromptVersion)
+	for ordinal, claim := range request.Claims {
+		if claim.Ordinal != ordinal || strings.TrimSpace(claim.Text) == "" || len(claim.Evidence) == 0 {
+			return replay.PlainPayload{}, errors.New("Replay Claim Support claim is invalid")
+		}
+		budget.addString(claim.Text)
+		for _, evidence := range claim.Evidence {
+			budget.addString(evidence.SourceID)
+			budget.addString(evidence.RevisionID)
+			budget.addString(evidence.UnitID)
+			budget.addString(evidence.Text)
+		}
+	}
+	if err := budget.err(); err != nil {
+		return replay.PlainPayload{}, err
+	}
+	return marshalReplayPayload(replay.ClassModelRequest, claimSupportRequestReplay{
+		replayPayloadHeader: replayHeader(replay.ClassModelRequest), Operation: "claim_support",
+		Model: request.Model, PromptVersion: request.PromptVersion, Claims: request.Claims,
+	})
+}
+
+type claimSupportVerdictReplay struct {
+	replayPayloadHeader
+	Operation string                       `json:"operation"`
+	Verdicts  []models.ClaimSupportVerdict `json:"verdicts"`
+}
+
+func EncodeClaimSupportVerdictReplay(outcome models.ClaimSupportOutcome) (replay.PlainPayload, error) {
+	if len(outcome.Verdicts) == 0 {
+		return replay.PlainPayload{}, errors.New("Replay Claim Support verdict is empty")
+	}
+	for ordinal, verdict := range outcome.Verdicts {
+		if verdict.Ordinal != ordinal {
+			return replay.PlainPayload{}, errors.New("Replay Claim Support verdict is invalid")
+		}
+	}
+	return marshalReplayPayload(replay.ClassModelDecision, claimSupportVerdictReplay{
+		replayPayloadHeader: replayHeader(replay.ClassModelDecision), Operation: "claim_support", Verdicts: outcome.Verdicts,
+	})
+}
+
 type actionInputReplay struct {
 	replayPayloadHeader
 	ActionName      string          `json:"action_name"`

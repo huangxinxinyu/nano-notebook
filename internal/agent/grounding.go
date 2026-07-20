@@ -10,6 +10,9 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/instrumentation"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/semconv"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -58,59 +61,128 @@ func NewGroundingService(pool *pgxpool.Pool, verifier ClaimSupportVerifier, fall
 }
 
 func (s *GroundingService) Prepare(ctx context.Context, attempt Attempt, prefix CheckpointPrefix, draft models.FinalDraft) (models.FinalDraft, error) {
+	prepared, err := s.prepare(ctx, nil, nil, attempt, prefix, draft)
+	return prepared.draft, err
+}
+
+type groundingPreparation struct {
+	draft    models.FinalDraft
+	outcome  string
+	research researchState
+}
+
+func (s *GroundingService) PrepareTraced(ctx context.Context, tracer *agentobs.Tracer, stager ReplayStager, attempt Attempt, prefix CheckpointPrefix, draft models.FinalDraft) (models.FinalDraft, error) {
+	if tracer == nil {
+		return s.Prepare(ctx, attempt, prefix, draft)
+	}
+	identity := fmt.Sprintf("run/%s/attempt/%d/grounding", attempt.RunID, attempt.AttemptNo)
+	prepared, err := instrumentation.Invoke(ctx, tracer, agentobs.SpanStart{
+		IdentityKey: identity + "/start", Name: TraceSpanGrounding,
+		Attributes: []agentobs.Attribute{agentobs.Int64(TraceKeyVerifierClaimCount, int64(len(draft.Claims)))},
+	}, func(callContext context.Context) (groundingPreparation, error) {
+		return s.prepare(callContext, tracer, stager, attempt, prefix, draft)
+	}, func(result groundingPreparation, callErr error) agentobs.SpanEnd {
+		status := agentobs.StatusOK
+		attributes := []agentobs.Attribute{
+			agentobs.String(TraceKeyGroundingOutcome, result.outcome),
+			agentobs.Bool(TraceKeyGroundingResearchComplete, result.research.complete),
+			agentobs.Bool(TraceKeyGroundingResearchDegraded, result.research.degraded),
+			agentobs.Int64(TraceKeyVerifierSupportedCount, int64(len(result.draft.Claims))),
+		}
+		if callErr != nil {
+			status = agentobs.StatusError
+			if errors.Is(callErr, context.Canceled) {
+				status = agentobs.StatusCancelled
+			}
+			attributes = append(attributes, agentobs.String(semconv.ErrorKindKey, groundingErrorKind(callErr)))
+		}
+		return agentobs.SpanEnd{Name: TraceSpanGrounding, Status: status, Attributes: attributes}
+	})
+	return prepared.draft, err
+}
+
+func groundingErrorKind(err error) string {
+	switch {
+	case errors.Is(err, ErrGroundingInvalid):
+		return "grounding_invalid"
+	case errors.Is(err, ErrGroundingIncomplete):
+		return "grounding_incomplete"
+	case errors.Is(err, ErrClaimUnsupported):
+		return "claim_unsupported"
+	default:
+		return "grounding_failed"
+	}
+}
+
+func (s *GroundingService) prepare(ctx context.Context, tracer *agentobs.Tracer, stager ReplayStager, attempt Attempt, prefix CheckpointPrefix, draft models.FinalDraft) (groundingPreparation, error) {
+	result := groundingPreparation{draft: draft}
 	if s == nil || s.pool == nil || draft.Validate() != nil {
-		return models.FinalDraft{}, ErrGroundingInvalid
+		return groundingPreparation{}, ErrGroundingInvalid
 	}
 	selectedCount, err := s.selectedSourceCount(ctx, attempt)
 	if err != nil {
-		return models.FinalDraft{}, err
+		return groundingPreparation{}, err
 	}
 	if selectedCount == 0 {
 		if len(draft.Claims) != 0 {
-			return models.FinalDraft{}, ErrGroundingInvalid
+			return groundingPreparation{}, ErrGroundingInvalid
 		}
 		if err := s.persistPlan(ctx, attempt, draft, "source_less", false, false, nil, "", ""); err != nil {
-			return models.FinalDraft{}, err
+			return groundingPreparation{}, err
 		}
-		return draft, nil
+		result.outcome = "source_less"
+		return result, nil
 	}
 	research, err := parseResearchState(prefix)
 	if err != nil {
-		return models.FinalDraft{}, err
+		return groundingPreparation{}, err
 	}
+	result.research = research
 	if len(draft.Claims) == 0 {
 		if !research.performed || !research.complete || research.degraded || research.evidenceSeen {
-			return models.FinalDraft{}, ErrGroundingIncomplete
+			return result, ErrGroundingIncomplete
 		}
 		fallback, err := s.freshFallback(ctx, attempt)
 		if err != nil {
-			return models.FinalDraft{}, err
+			return result, err
 		}
 		if err := s.persistPlan(ctx, attempt, fallback, "zero_support", true, false, nil, "", ""); err != nil {
-			return models.FinalDraft{}, err
+			return result, err
 		}
-		return fallback, nil
+		result.draft = fallback
+		result.outcome = "zero_support"
+		return result, nil
 	}
 	if !research.evidenceSeen || s.verifier == nil || strings.TrimSpace(s.config.VerifierModel) == "" || strings.TrimSpace(s.config.VerifierPromptVersion) == "" {
-		return models.FinalDraft{}, ErrGroundingIncomplete
+		return result, ErrGroundingIncomplete
 	}
 	claims, notebookID, err := s.authoritativeClaims(ctx, attempt, draft, research)
 	if err != nil {
-		return models.FinalDraft{}, err
+		return result, err
 	}
-	verified, err := s.verifier.VerifyClaimSupport(ctx, models.ClaimSupportRequest{
+	request := models.ClaimSupportRequest{
 		Model: s.config.VerifierModel, PromptVersion: s.config.VerifierPromptVersion, Claims: claims,
-	})
+	}
+	var verified models.ClaimSupportOutcome
+	if tracer != nil {
+		identity := fmt.Sprintf("run/%s/attempt/%d/grounding/verifier", attempt.RunID, attempt.AttemptNo)
+		verified, err = InvokeClaimSupportVerifier(ctx, tracer, s.verifier, request, ClaimSupportTraceOptions{
+			StartIdentity: identity + "/start", RequestIdentity: identity + "/replay/request",
+			VerdictIdentity: identity + "/replay/verdict", ReplayStager: stager,
+		})
+	} else {
+		verified, err = s.verifier.VerifyClaimSupport(ctx, request)
+	}
 	if err != nil {
-		return models.FinalDraft{}, err
+		return result, err
 	}
 	if len(verified.Verdicts) != len(claims) {
-		return models.FinalDraft{}, ErrGroundingInvalid
+		return result, ErrGroundingInvalid
 	}
 	unsupported := make(map[int]struct{})
 	for ordinal, verdict := range verified.Verdicts {
 		if verdict.Ordinal != ordinal {
-			return models.FinalDraft{}, ErrGroundingInvalid
+			return result, ErrGroundingInvalid
 		}
 		if !verdict.Supported {
 			unsupported[ordinal] = struct{}{}
@@ -126,9 +198,11 @@ func (s *GroundingService) Prepare(ctx context.Context, attempt Attempt, prefix 
 		planNotebook = nil
 	}
 	if err := s.persistPlan(ctx, attempt, draft, groundingOutcome, research.complete, research.degraded, planNotebook, s.config.VerifierModel, s.config.VerifierPromptVersion); err != nil {
-		return models.FinalDraft{}, err
+		return result, err
 	}
-	return draft, nil
+	result.draft = draft
+	result.outcome = groundingOutcome
+	return result, nil
 }
 
 func removeUnsupportedClaims(draft models.FinalDraft, unsupported map[int]struct{}) models.FinalDraft {

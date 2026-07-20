@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 )
 
@@ -25,9 +26,10 @@ type ActionRequest struct {
 }
 
 type ActionResult struct {
-	Status    ActionResultStatus
-	Output    json.RawMessage
-	ErrorCode string
+	Status          ActionResultStatus
+	Output          json.RawMessage
+	ErrorCode       string
+	traceAttributes []agentobs.Attribute
 }
 
 func (r ActionResult) Validate() error {

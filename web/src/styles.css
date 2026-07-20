@@ -297,6 +297,16 @@ body {
 .trace-replay-content pre { margin: 0; color: #d7e3fc; font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
 
 .trace-analysis { margin-top: 16px; padding: 17px; }
+.trace-rag { margin-top: 16px; padding: 17px; border: 1px solid var(--border-subtle); border-radius: 12px; background: var(--card); }
+.trace-rag h2 { margin: 0; font-size: 14px; font-weight: 650; }
+.trace-rag-grid { display: grid; grid-template-columns: 1.4fr 0.8fr 0.8fr; gap: 14px; margin-top: 14px; }
+.trace-rag article { min-width: 0; border: 1px solid var(--border-subtle); border-radius: 9px; padding: 14px; }
+.trace-rag h3 { margin: 0 0 10px; color: var(--muted-foreground); font-size: 11px; }
+.trace-rag strong { overflow-wrap: anywhere; font-size: 12px; }
+.trace-rag dl { display: grid; grid-template-columns: minmax(100px, auto) 1fr; gap: 8px 12px; margin: 14px 0 0; font-size: 11px; }
+.trace-rag dl > div { display: contents; }
+.trace-rag dt { color: var(--muted-foreground); }
+.trace-rag dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .trace-analysis-grid { display: grid; grid-template-columns: 0.9fr 1.5fr 0.8fr; gap: 14px; margin-top: 14px; }
 .trace-analysis article { overflow: auto; min-height: 180px; border: 1px solid var(--border-subtle); border-radius: 9px; padding: 14px; }
 .trace-analysis h3 { margin: 0 0 14px; color: var(--secondary-foreground); font-size: 12px; }
@@ -318,6 +328,7 @@ body {
   .trace-filters { grid-template-columns: repeat(3, 1fr); }
   .trace-workspace { grid-template-columns: 1fr; }
   .trace-analysis-grid { grid-template-columns: 1fr; }
+  .trace-rag-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 700px) {
