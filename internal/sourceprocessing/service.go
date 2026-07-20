@@ -22,36 +22,66 @@ type Service struct {
 	processor         leaseProcessor
 	heartbeatInterval time.Duration
 	pollInterval      time.Duration
+	maxConcurrency    int
 }
 
 func NewService(queue leaseQueue, processor leaseProcessor, heartbeatInterval, pollInterval time.Duration) *Service {
-	return &Service{queue: queue, processor: processor, heartbeatInterval: heartbeatInterval, pollInterval: pollInterval}
+	return NewServiceWithConcurrency(queue, processor, heartbeatInterval, pollInterval, 1)
+}
+
+func NewServiceWithConcurrency(queue leaseQueue, processor leaseProcessor, heartbeatInterval, pollInterval time.Duration, maxConcurrency int) *Service {
+	return &Service{queue: queue, processor: processor, heartbeatInterval: heartbeatInterval, pollInterval: pollInterval, maxConcurrency: maxConcurrency}
 }
 
 func (s *Service) ProcessAvailable(ctx context.Context) (int, error) {
-	if s == nil || s.queue == nil || s.processor == nil || s.heartbeatInterval <= 0 || s.pollInterval <= 0 {
+	if s == nil || s.queue == nil || s.processor == nil || s.heartbeatInterval <= 0 || s.pollInterval <= 0 || s.maxConcurrency <= 0 {
 		return 0, errors.New("invalid Source processing Service")
 	}
+	type result struct{ err error }
 	processed := 0
 	var accumulated error
-	for ctx.Err() == nil {
-		lease, ok, err := s.queue.Claim(ctx)
-		if err != nil {
-			return processed, errors.Join(accumulated, err)
+	results := make(chan result, s.maxConcurrency)
+	inFlight := 0
+	claiming := true
+	for (claiming || inFlight > 0) && ctx.Err() == nil {
+		for claiming && inFlight < s.maxConcurrency {
+			lease, ok, err := s.queue.Claim(ctx)
+			if err != nil {
+				accumulated = errors.Join(accumulated, err)
+				claiming = false
+				break
+			}
+			if !ok {
+				claiming = false
+				break
+			}
+			processed++
+			inFlight++
+			go func() {
+				results <- result{err: s.processLease(ctx, lease)}
+			}()
 		}
-		if !ok {
-			return processed, accumulated
+		if inFlight == 0 {
+			break
 		}
-		processed++
-		if err := s.processLease(ctx, lease); err != nil {
-			accumulated = errors.Join(accumulated, err)
+		completed := <-results
+		inFlight--
+		if completed.err != nil {
+			accumulated = errors.Join(accumulated, completed.err)
+		}
+	}
+	if ctx.Err() != nil {
+		for inFlight > 0 {
+			completed := <-results
+			inFlight--
+			accumulated = errors.Join(accumulated, completed.err)
 		}
 	}
 	return processed, errors.Join(accumulated, ctx.Err())
 }
 
 func (s *Service) Run(ctx context.Context) error {
-	if s == nil || s.queue == nil || s.processor == nil || s.heartbeatInterval <= 0 || s.pollInterval <= 0 {
+	if s == nil || s.queue == nil || s.processor == nil || s.heartbeatInterval <= 0 || s.pollInterval <= 0 || s.maxConcurrency <= 0 {
 		return errors.New("invalid Source processing Service")
 	}
 	for ctx.Err() == nil {

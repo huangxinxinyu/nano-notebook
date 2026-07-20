@@ -29,40 +29,72 @@ type Service struct {
 	runTimeout        time.Duration
 	heartbeatInterval time.Duration
 	leaseDuration     time.Duration
+	maxConcurrency    int
 }
 
 func NewService(pool *pgxpool.Pool, queue JobQueue, executor Executor, scanInterval, runTimeout time.Duration) *Service {
+	return NewServiceWithConcurrency(pool, queue, executor, scanInterval, runTimeout, 1)
+}
+
+func NewServiceWithConcurrency(pool *pgxpool.Pool, queue JobQueue, executor Executor, scanInterval, runTimeout time.Duration, maxConcurrency int) *Service {
 	if scanInterval <= 0 {
 		scanInterval = 5 * time.Second
 	}
 	if runTimeout <= 0 {
 		runTimeout = 210 * time.Second
 	}
+	if maxConcurrency <= 0 {
+		maxConcurrency = 1
+	}
 	return &Service{
 		pool: pool, queue: queue, executor: executor,
 		scanInterval: scanInterval, runTimeout: runTimeout,
-		heartbeatInterval: 10 * time.Second, leaseDuration: jobs.DefaultLeaseDuration,
+		heartbeatInterval: 10 * time.Second, leaseDuration: jobs.DefaultLeaseDuration, maxConcurrency: maxConcurrency,
 	}
 }
 
 func (s *Service) ProcessAvailable(ctx context.Context) (int, error) {
+	type result struct {
+		job jobs.ClaimedJob
+		err error
+	}
 	processed := 0
 	var processErr error
-	for {
-		job, ok, err := s.queue.ClaimNext(ctx)
-		if err != nil {
-			return processed, errors.Join(processErr, err)
+	results := make(chan result, s.maxConcurrency)
+	inFlight := 0
+	claiming := true
+	for claiming || inFlight > 0 {
+		if ctx.Err() != nil {
+			claiming = false
 		}
-		if !ok {
-			return processed, processErr
+		for claiming && inFlight < s.maxConcurrency && ctx.Err() == nil {
+			job, ok, err := s.queue.ClaimNext(ctx)
+			if err != nil {
+				processErr = errors.Join(processErr, err)
+				claiming = false
+				break
+			}
+			if !ok {
+				claiming = false
+				break
+			}
+			processed++
+			inFlight++
+			go func() {
+				results <- result{job: job, err: s.executeClaim(ctx, job)}
+			}()
 		}
-		processed++
-		err = s.executeClaim(ctx, job)
-		if err != nil {
-			processErr = errors.Join(processErr, err)
-			slog.Error("agent run execution failed", "run_id", job.RunID, "job_id", job.ID, "error", err)
+		if inFlight == 0 {
+			break
+		}
+		completed := <-results
+		inFlight--
+		if completed.err != nil {
+			processErr = errors.Join(processErr, completed.err)
+			slog.Error("agent run execution failed", "run_id", completed.job.RunID, "job_id", completed.job.ID, "error", completed.err)
 		}
 	}
+	return processed, processErr
 }
 
 func (s *Service) executeClaim(ctx context.Context, job jobs.ClaimedJob) error {

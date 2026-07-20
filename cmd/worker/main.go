@@ -31,46 +31,49 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceprojection"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcepurge"
 	agentworker "github.com/huangxinxinyu/nano-notebook/internal/worker"
+	"github.com/huangxinxinyu/nano-notebook/internal/workload"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 )
 
 type workerConfig struct {
-	DatabaseURL               string
-	Addr                      string
-	CollectorEndpoint         string
-	CollectorServiceToken     string
-	ProducerID                string
-	BatchMaxRecords           int
-	BatchMaxEncodedBytes      int
-	BatchMaxDelay             time.Duration
-	HTTPTimeout               time.Duration
-	PurgeMaxCommands          int
-	PurgeLeaseDuration        time.Duration
-	PurgePollInterval         time.Duration
-	PurgeBaseBackoff          time.Duration
-	PurgeMaxBackoff           time.Duration
-	ReplayStagingS3           objectstore.S3Config
-	SourceS3                  objectstore.S3Config
-	SourcePurgeLease          time.Duration
-	SourcePurgePoll           time.Duration
-	QdrantURL                 string
-	QdrantAPIKey              string
-	QdrantCollection          string
-	QdrantDenseDimensions     int
-	SourceProcessingLease     time.Duration
-	SourceProcessingHeartbeat time.Duration
-	SourceProcessingPoll      time.Duration
-	SourceExtractionConfigID  string
-	SourceVisionModel         string
-	SourceTranscriptionModel  string
-	SourceVisionPromptVersion string
-	AgentVerifierModel        string
-	AgentVerifierPrompt       string
-	SourceProcessingMaxBytes  int64
-	SourceProcessingMaxRunes  int
-	ReplayKeyID               string
-	ReplayKEK                 []byte
+	DatabaseURL                 string
+	Addr                        string
+	CollectorEndpoint           string
+	CollectorServiceToken       string
+	ProducerID                  string
+	BatchMaxRecords             int
+	BatchMaxEncodedBytes        int
+	BatchMaxDelay               time.Duration
+	HTTPTimeout                 time.Duration
+	PurgeMaxCommands            int
+	PurgeLeaseDuration          time.Duration
+	PurgePollInterval           time.Duration
+	PurgeBaseBackoff            time.Duration
+	PurgeMaxBackoff             time.Duration
+	ReplayStagingS3             objectstore.S3Config
+	SourceS3                    objectstore.S3Config
+	SourcePurgeLease            time.Duration
+	SourcePurgePoll             time.Duration
+	QdrantURL                   string
+	QdrantAPIKey                string
+	QdrantCollection            string
+	QdrantDenseDimensions       int
+	SourceProcessingLease       time.Duration
+	SourceProcessingHeartbeat   time.Duration
+	SourceProcessingPoll        time.Duration
+	SourceExtractionConfigID    string
+	SourceVisionModel           string
+	SourceTranscriptionModel    string
+	SourceVisionPromptVersion   string
+	AgentVerifierModel          string
+	AgentVerifierPrompt         string
+	SourceProcessingMaxBytes    int64
+	SourceProcessingMaxRunes    int
+	AgentInteractiveConcurrency int
+	SourceProcessingConcurrency int
+	ReplayKeyID                 string
+	ReplayKEK                   []byte
 }
 
 type traceFlusher interface {
@@ -211,7 +214,7 @@ func main() {
 		os.Exit(1)
 	}
 	controller := agent.NewController(runtime, modelClient, registry)
-	workerService := agentworker.NewService(db.Pool(), jobs.NewQueueWithTraceSink(db.Pool(), traceExporter), controller, 5*time.Second, 210*time.Second)
+	workerService := agentworker.NewServiceWithConcurrency(db.Pool(), jobs.NewQueueWithTraceSink(db.Pool(), traceExporter), controller, 5*time.Second, 210*time.Second, config.AgentInteractiveConcurrency)
 	workerDone := make(chan error, 1)
 	go func() {
 		err := workerService.Run(ctx)
@@ -239,8 +242,8 @@ func main() {
 			MaxSourceBytes:     config.SourceProcessingMaxBytes, MaxNormalizedRunes: config.SourceProcessingMaxRunes,
 		},
 	)
-	sourceProcessingService := sourceprocessing.NewService(
-		sourceQueue, sourceProcessor, config.SourceProcessingHeartbeat, config.SourceProcessingPoll,
+	sourceProcessingService := sourceprocessing.NewServiceWithConcurrency(
+		sourceQueue, sourceProcessor, config.SourceProcessingHeartbeat, config.SourceProcessingPoll, config.SourceProcessingConcurrency,
 	)
 	sourceProcessingDone := make(chan error, 1)
 	go func() { sourceProcessingDone <- sourceProcessingService.Run(ctx) }()
@@ -411,6 +414,14 @@ func loadWorkerConfig() (workerConfig, error) {
 	if err != nil {
 		return workerConfig{}, err
 	}
+	agentInteractiveConcurrency, err := workerEnvInt("NANO_AGENT_INTERACTIVE_CONCURRENCY", workload.DefaultAgentConcurrency)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	sourceProcessingConcurrency, err := workerEnvInt("NANO_SOURCE_PROCESSING_CONCURRENCY", workload.DefaultSourceConcurrency)
+	if err != nil {
+		return workerConfig{}, err
+	}
 	replayKEK, err := base64.StdEncoding.DecodeString(env("NANO_REPLAY_KEK_BASE64", "bmFuby1sb2NhbC1kZXYta2VrLTAwMDAwMDAwMDAwMDA="))
 	if err != nil {
 		return workerConfig{}, fmt.Errorf("parse NANO_REPLAY_KEK_BASE64: %w", err)
@@ -453,6 +464,7 @@ func loadWorkerConfig() (workerConfig, error) {
 		AgentVerifierModel:        env("NANO_AGENT_VERIFIER_MODEL", "aliyun/qwen-flash"),
 		AgentVerifierPrompt:       env("NANO_AGENT_VERIFIER_PROMPT_VERSION", "claim-support-v1"),
 		SourceProcessingMaxBytes:  int64(sourceProcessingMaxBytes), SourceProcessingMaxRunes: sourceProcessingMaxRunes,
+		AgentInteractiveConcurrency: agentInteractiveConcurrency, SourceProcessingConcurrency: sourceProcessingConcurrency,
 		ReplayKeyID: env("NANO_REPLAY_KEY_ID", "nano-local-replay-key-v1"), ReplayKEK: replayKEK,
 	}
 	if strings.TrimSpace(config.DatabaseURL) == "" || strings.TrimSpace(config.Addr) == "" ||
@@ -472,6 +484,7 @@ func loadWorkerConfig() (workerConfig, error) {
 		strings.TrimSpace(config.SourceVisionPromptVersion) == "" ||
 		strings.TrimSpace(config.AgentVerifierModel) == "" || strings.TrimSpace(config.AgentVerifierPrompt) == "" ||
 		config.SourceProcessingMaxBytes <= 0 || config.SourceProcessingMaxBytes > 100*1024*1024 || config.SourceProcessingMaxRunes <= 0 ||
+		workload.ValidateInteractiveCapacity(config.AgentInteractiveConcurrency, config.SourceProcessingConcurrency) != nil ||
 		strings.TrimSpace(config.ReplayKeyID) == "" || len(config.ReplayKEK) != 32 {
 		return workerConfig{}, errors.New("worker configuration is incomplete or inconsistent")
 	}

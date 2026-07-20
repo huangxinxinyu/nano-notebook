@@ -3,6 +3,7 @@ package sourceprocessing
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -23,6 +24,37 @@ func TestServiceDrainsSourceLeasesAndRenewsLongWork(t *testing.T) {
 	}
 	if len(processor.processed) != 2 || queue.renewals == 0 {
 		t.Fatalf("processed=%v renewals=%d", processor.processed, queue.renewals)
+	}
+}
+
+func TestServiceRunsTheReservedSourceProcessingCapacityConcurrently(t *testing.T) {
+	const capacity = 4
+	leases := make([]sourcejobs.Lease, 0, capacity)
+	for index := 0; index < capacity; index++ {
+		leases = append(leases, sourcejobs.Lease{ID: fmt.Sprintf("job_%d", index), SourceID: fmt.Sprintf("src_%d", index), NotebookID: "nb", LeaseToken: fmt.Sprintf("token_%d", index)})
+	}
+	queue := &serviceQueue{leases: leases}
+	processor := &concurrentSourceProcessor{started: make(chan struct{}, capacity), release: make(chan struct{})}
+	service := NewServiceWithConcurrency(queue, processor, 5*time.Millisecond, 10*time.Millisecond, capacity)
+	done := make(chan error, 1)
+	go func() {
+		processed, err := service.ProcessAvailable(context.Background())
+		if processed != capacity {
+			done <- fmt.Errorf("processed=%d, want %d", processed, capacity)
+			return
+		}
+		done <- err
+	}()
+	for index := 0; index < capacity; index++ {
+		select {
+		case <-processor.started:
+		case <-time.After(time.Second):
+			t.Fatalf("only %d/%d Source jobs started concurrently", index, capacity)
+		}
+	}
+	close(processor.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -69,6 +101,21 @@ type serviceProcessor struct {
 	processed           []string
 	delay               time.Duration
 	waitForCancellation bool
+}
+
+type concurrentSourceProcessor struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *concurrentSourceProcessor) ProcessLease(ctx context.Context, _ sourcejobs.Lease) error {
+	p.started <- struct{}{}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-p.release:
+		return nil
+	}
 }
 
 func (p *serviceProcessor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) error {

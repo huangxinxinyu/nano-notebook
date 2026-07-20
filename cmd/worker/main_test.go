@@ -45,6 +45,8 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 	t.Setenv("NANO_SOURCE_VISION_PROMPT_VERSION", "vision-normalize-v1")
 	t.Setenv("NANO_SOURCE_PROCESSING_MAX_BYTES", "1048576")
 	t.Setenv("NANO_SOURCE_PROCESSING_MAX_RUNES", "200000")
+	t.Setenv("NANO_AGENT_INTERACTIVE_CONCURRENCY", "6")
+	t.Setenv("NANO_SOURCE_PROCESSING_CONCURRENCY", "4")
 	t.Setenv("NANO_REPLAY_KEY_ID", "replay-key-7")
 	t.Setenv("NANO_REPLAY_KEK_BASE64", "bmFuby1sb2NhbC1kZXYta2VrLTAwMDAwMDAwMDAwMDA=")
 
@@ -80,8 +82,17 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 		config.SourceProcessingPoll != 250*time.Millisecond || config.SourceExtractionConfigID != "extract-text-v1" ||
 		config.SourceVisionModel != "gemini/gemini-2.5-flash" || config.SourceTranscriptionModel != "openai/whisper-1" ||
 		config.SourceVisionPromptVersion != "vision-normalize-v1" ||
-		config.SourceProcessingMaxBytes != 1048576 || config.SourceProcessingMaxRunes != 200000 {
+		config.SourceProcessingMaxBytes != 1048576 || config.SourceProcessingMaxRunes != 200000 ||
+		config.AgentInteractiveConcurrency != 6 || config.SourceProcessingConcurrency != 4 {
 		t.Fatalf("Source processing config = %#v", config)
+	}
+}
+
+func TestLoadWorkerConfigRejectsWorkloadCapacityAboveTenInteractiveJobs(t *testing.T) {
+	t.Setenv("NANO_AGENT_INTERACTIVE_CONCURRENCY", "7")
+	t.Setenv("NANO_SOURCE_PROCESSING_CONCURRENCY", "4")
+	if _, err := loadWorkerConfig(); err == nil {
+		t.Fatal("loadWorkerConfig accepted more than ten interactive jobs")
 	}
 }
 
