@@ -19,6 +19,7 @@ var (
 	ErrRunNotRetryable     = errors.New("agent run not retryable")
 	ErrRetryNotLatest      = errors.New("agent run input is not latest")
 	ErrIdempotencyMismatch = errors.New("idempotency mismatch")
+	ErrEvidenceSetInvalid  = errors.New("selected Source evidence is not ready and verified")
 )
 
 type DBTX interface {
@@ -409,4 +410,94 @@ func (s *Store) CreateQueued(ctx context.Context, runID, userID, chatID, inputMe
 		config.ActionLimit, config.ActionBatchLimit, config.ActionResultByteLimit, config.ActionResultsByteLimit,
 	)
 	return err
+}
+
+// PinEvidenceSet resolves member-supplied Source identities to the exact
+// active Evidence Revision and verified active Retrieval Index Version. It
+// must run in the same transaction as CreateQueued.
+func (s *Store) PinEvidenceSet(ctx context.Context, runID, userID string, sourceIDs []string) error {
+	if s == nil || s.db == nil || runID == "" || userID == "" || len(sourceIDs) > 50 {
+		return ErrEvidenceSetInvalid
+	}
+	seen := make(map[string]struct{}, len(sourceIDs))
+	for _, sourceID := range sourceIDs {
+		if sourceID == "" {
+			return ErrEvidenceSetInvalid
+		}
+		if _, duplicate := seen[sourceID]; duplicate {
+			return ErrEvidenceSetInvalid
+		}
+		seen[sourceID] = struct{}{}
+	}
+	var notebookID string
+	if err := s.db.QueryRow(ctx, `
+		select c.notebook_id
+		from agent_runs r join chat_chats c on c.id=r.chat_id
+		where r.id=$1 and r.user_id=$2 and r.status='queued'
+	`, runID, userID).Scan(&notebookID); err != nil {
+		return ErrEvidenceSetInvalid
+	}
+	for ordinal, sourceID := range sourceIDs {
+		var revisionID, indexVersionID string
+		err := s.db.QueryRow(ctx, `
+			select r.id, b.index_version_id
+			from source_sources s
+			join source_evidence_revisions r on r.source_id=s.id and r.status='active'
+			join retrieval_source_index_builds b on b.revision_id=r.id and b.source_id=s.id
+				and b.notebook_id=s.notebook_id and b.status='verified'
+			join retrieval_index_versions v on v.id=b.index_version_id and v.status='active'
+			where s.id=$1 and s.notebook_id=$2 and s.state='ready'
+		`, sourceID, notebookID).Scan(&revisionID, &indexVersionID)
+		if err != nil {
+			return ErrEvidenceSetInvalid
+		}
+		if _, err := s.db.Exec(ctx, `
+			insert into agent_run_evidence_set(
+				run_id, ordinal, notebook_id, source_id, evidence_revision_id, index_version_id
+			) values($1,$2,$3,$4,$5,$6)
+		`, runID, ordinal, notebookID, sourceID, revisionID, indexVersionID); err != nil {
+			return err
+		}
+	}
+	tag, err := s.db.Exec(ctx, `
+		update agent_runs set selected_source_count=$3, updated_at=now()
+		where id=$1 and user_id=$2 and status='queued'
+	`, runID, userID, len(sourceIDs))
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrEvidenceSetInvalid
+	}
+	return nil
+}
+
+func (s *Store) EvidenceSetMatches(ctx context.Context, runID string, sourceIDs []string) (bool, error) {
+	rows, err := s.db.Query(ctx, `
+		select source_id from agent_run_evidence_set where run_id=$1 order by ordinal
+	`, runID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	pinned := make([]string, 0, len(sourceIDs))
+	for rows.Next() {
+		var sourceID string
+		if err := rows.Scan(&sourceID); err != nil {
+			return false, err
+		}
+		pinned = append(pinned, sourceID)
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	if len(pinned) != len(sourceIDs) {
+		return false, nil
+	}
+	for index := range pinned {
+		if pinned[index] != sourceIDs[index] {
+			return false, nil
+		}
+	}
+	return true, nil
 }

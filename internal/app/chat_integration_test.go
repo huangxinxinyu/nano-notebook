@@ -2,8 +2,11 @@ package app_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -132,6 +135,145 @@ func TestMessageAdmissionAtomicallyCreatesQueuedRunAndJob(t *testing.T) {
 	}
 	if messageCount != 1 || runCount != 1 || jobCount != 1 || runStatus != "queued" || jobStatus != "queued" || inputMessageID != messageID || jobRunID != admittedBody.RunID || timeZone != "Asia/Shanghai" {
 		t.Fatalf("durable admission message=%d run=%d/%s/%s/%s job=%d/%s/%s", messageCount, runCount, runStatus, inputMessageID, timeZone, jobCount, jobStatus, jobRunID)
+	}
+}
+
+func TestMessageAdmissionPinsAnImmutableVerifiedEvidenceSet(t *testing.T) {
+	api := newTestAPI(t)
+	sessionCookie, csrfCookie := api.registerWithCSRF(t, "evidence-set@example.com")
+	notebookID, chatID := createNotebookAndChatForEvidenceSet(t, api, sessionCookie, csrfCookie)
+	installReadyEvidenceSetFixture(t, api, notebookID, "src_pin_a", "evr_pin_a", "src_pin_b", "evr_pin_b")
+
+	const messageID = "0190cdd2-5f2d-7ad8-b3f5-1b588788c091"
+	admitted := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
+		"id": messageID, "content": "Compare the selected evidence.", "time_zone": "Asia/Shanghai",
+		"source_ids": []string{"src_pin_b", "src_pin_a"},
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if admitted.Code != http.StatusAccepted {
+		t.Fatalf("admit status=%d body=%s", admitted.Code, admitted.Body.String())
+	}
+	var body struct {
+		RunID string `json:"run_id"`
+	}
+	decodeBody(t, admitted, &body)
+
+	rows, err := api.db.Pool().Query(context.Background(), `
+		select ordinal, notebook_id, source_id, evidence_revision_id, index_version_id
+		from agent_run_evidence_set where run_id=$1 order by ordinal`, body.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var ordinal int
+		var pinnedNotebook, sourceID, revisionID, versionID string
+		if err := rows.Scan(&ordinal, &pinnedNotebook, &sourceID, &revisionID, &versionID); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, fmt.Sprintf("%d/%s/%s/%s/%s", ordinal, pinnedNotebook, sourceID, revisionID, versionID))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"0/" + notebookID + "/src_pin_b/evr_pin_b/riv_pin_active",
+		"1/" + notebookID + "/src_pin_a/evr_pin_a/riv_pin_active",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("pinned Evidence Set=%v want=%v", got, want)
+	}
+
+	replayedWithDifferentSources := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
+		"id": messageID, "content": "Compare the selected evidence.", "time_zone": "Asia/Shanghai",
+		"source_ids": []string{"src_pin_a"},
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if replayedWithDifferentSources.Code != http.StatusConflict {
+		t.Fatalf("changed Evidence Set replay status=%d body=%s", replayedWithDifferentSources.Code, replayedWithDifferentSources.Body.String())
+	}
+}
+
+func TestMessageAdmissionRejectsUnverifiedSelectedSourceWithoutCreatingMessageOrRun(t *testing.T) {
+	api := newTestAPI(t)
+	sessionCookie, csrfCookie := api.registerWithCSRF(t, "unverified-evidence-set@example.com")
+	notebookID, chatID := createNotebookAndChatForEvidenceSet(t, api, sessionCookie, csrfCookie)
+	installReadyEvidenceSetFixture(t, api, notebookID, "src_unverified", "evr_unverified", "", "")
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		update retrieval_source_index_builds set status='building', verified_at=null
+		where revision_id='evr_unverified' and index_version_id='riv_pin_active'`); err != nil {
+		t.Fatal(err)
+	}
+
+	const messageID = "0190cdd2-5f2d-7ad8-b3f5-1b588788c092"
+	response := api.postJSONWithCookieAndCSRF(t, "/api/v1/chats/"+chatID+"/messages", map[string]any{
+		"id": messageID, "content": "Use only this source.", "source_ids": []string{"src_unverified"},
+	}, sessionCookie, csrfCookie, csrfCookie.Value, "")
+	if response.Code != http.StatusConflict {
+		t.Fatalf("unverified admission status=%d body=%s", response.Code, response.Body.String())
+	}
+	var messages, runs int
+	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from chat_messages where id=$1`, messageID).Scan(&messages); err != nil {
+		t.Fatal(err)
+	}
+	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from agent_runs where input_message_id=$1`, messageID).Scan(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if messages != 0 || runs != 0 {
+		t.Fatalf("failed admission left messages=%d runs=%d", messages, runs)
+	}
+}
+
+func createNotebookAndChatForEvidenceSet(t *testing.T, api *testAPI, sessionCookie, csrfCookie *http.Cookie) (string, string) {
+	t.Helper()
+	notebook := api.postJSONWithCookieAndCSRF(t, "/api/v1/notebooks", map[string]any{"title": "Pinned Evidence"}, sessionCookie, csrfCookie, csrfCookie.Value, "pin-notebook")
+	var notebookBody struct {
+		Notebook struct {
+			ID string `json:"id"`
+		} `json:"notebook"`
+	}
+	decodeBody(t, notebook, &notebookBody)
+	createdChat := api.postJSONWithCookieAndCSRF(t, "/api/v1/notebooks/"+notebookBody.Notebook.ID+"/chats", map[string]any{}, sessionCookie, csrfCookie, csrfCookie.Value, "pin-chat")
+	var chatBody struct {
+		Chat struct {
+			ID string `json:"id"`
+		} `json:"chat"`
+	}
+	decodeBody(t, createdChat, &chatBody)
+	return notebookBody.Notebook.ID, chatBody.Chat.ID
+}
+
+func installReadyEvidenceSetFixture(t *testing.T, api *testAPI, notebookID, sourceA, revisionA, sourceB, revisionB string) {
+	t.Helper()
+	ctx := context.Background()
+	const indexConfig = `{"chunk":{"max_runes":512,"overlap_runes":64,"preserve_heading_context":true},"analyzer_id":"nano-mixed-v1","bm25_k1":1.2,"bm25_b":0.75,"bm25_average_document_length":128,"embedding_model":"embed-test","embedding_dimensions":3,"dense_candidates":8,"sparse_candidates":8,"rrf_k":60,"reranker_id":"rerank-test","rerank_candidates":8,"degradation_policy_id":"strict-v1"}`
+	if _, err := api.db.Pool().Exec(ctx, `update retrieval_index_versions set status='retired' where status='active'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `
+		insert into retrieval_index_versions(id, config_json, config_sha256, status, promoted_by_eval_run_id, promoted_at)
+		values('riv_pin_active',$1::jsonb,'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','active','eval_pin',now())
+		on conflict (id) do update set status='active', promoted_by_eval_run_id='eval_pin', promoted_at=now()`, indexConfig); err != nil {
+		t.Fatal(err)
+	}
+	for index, item := range [][2]string{{sourceA, revisionA}, {sourceB, revisionB}} {
+		if item[0] == "" {
+			continue
+		}
+		if _, err := api.db.Pool().Exec(ctx, `
+			insert into source_sources(id,notebook_id,input_kind,format,title,media_type,byte_size,content_sha256,original_object_key,state)
+			values($1,$2,'file','txt',$1,'text/plain',4,$3,'sources/'||$1||'/original','ready')`, item[0], notebookID, strings.Repeat(string(rune('b'+index)), 64)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := api.db.Pool().Exec(ctx, `
+			insert into source_evidence_revisions(id,source_id,notebook_id,revision_no,extraction_config_id,artifact_schema_version,artifact_object_key,artifact_sha256,status,activated_at)
+			values($1,$2,$3,1,'extract-v1','nano.normalized-source.v1','sources/'||$2||'/evidence/'||$1,$4,'active',now())`, item[1], item[0], notebookID, strings.Repeat("c", 64)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := api.db.Pool().Exec(ctx, `
+			insert into retrieval_source_index_builds(revision_id,index_version_id,source_id,notebook_id,expected_points,projection_sha256,status,verified_at)
+			values($1,'riv_pin_active',$2,$3,1,$4,'verified',now())`, item[1], item[0], notebookID, strings.Repeat("d", 64)); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

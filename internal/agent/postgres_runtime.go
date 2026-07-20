@@ -14,6 +14,8 @@ import (
 
 const BareSystemPrompt = `You are Nano Notebook's research assistant. Answer the user's question directly and in the user's language. This capability currently uses general model knowledge and has no Sources or web research. Never invent citations, claim to have read Notebook Sources, or claim to have searched the web. Do not block a useful answer because Sources are absent. When relevant material would materially improve accuracy, depth, recency, verification, or citation quality, briefly suggest what Sources the user could add. Do not repeat that suggestion mechanically. Do not expose hidden chain-of-thought; provide a concise explanation or reasoning summary when useful.`
 
+const GroundedSystemPrompt = `You are Nano Notebook's source-grounded research assistant. The Run has a fixed server-controlled set of selected Sources. Use search_evidence iteratively with focused queries before answering factual claims about those Sources. Treat Action evidence addresses and excerpts as the only Source evidence; never invent a Source, Evidence Unit, range, quotation, or web search. Do not blend unsupported model knowledge into claims presented as Source-supported. If complete retrieval finds no relevant evidence, still answer the user's question from general knowledge and begin by clearly saying the answer is not based on the selected Sources; do not cite those Sources. If retrieval is degraded, do not claim zero support. Do not expose hidden chain-of-thought; provide only the useful answer and concise disclosed limitations.`
+
 var ErrLeaseLost = errors.New("agent attempt lease lost")
 
 type PostgresRuntime struct {
@@ -110,6 +112,7 @@ func (r *PostgresRuntime) Load(ctx context.Context, attempt Attempt) (Execution,
 			r.action_decision_limit, r.final_decision_limit,
 			r.action_limit, r.action_batch_limit,
 			r.action_result_byte_limit, r.action_results_byte_limit,
+			r.selected_source_count,
 			r.deadline_at > now()
 		from agent_runs r
 		join agent_jobs j on j.run_id = r.id
@@ -124,6 +127,7 @@ func (r *PostgresRuntime) Load(ctx context.Context, attempt Attempt) (Execution,
 			&execution.ActionDecisionLimit, &execution.FinalDecisionLimit,
 			&execution.ActionLimit, &execution.ActionBatchLimit,
 			&execution.ActionResultByteLimit, &execution.ActionResultsByteLimit,
+			&execution.SelectedSourceCount,
 			&deadlineValid,
 		)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -169,7 +173,11 @@ func (r *PostgresRuntime) Build(ctx context.Context, execution Execution) (model
 	}
 	defer rows.Close()
 	messages := make([]models.ModelMessage, 0, 21)
-	messages = append(messages, models.ModelMessage{Role: models.RoleSystem, Content: r.systemPrompt})
+	systemPrompt := r.systemPrompt
+	if execution.SelectedSourceCount > 0 && systemPrompt == BareSystemPrompt {
+		systemPrompt = GroundedSystemPrompt
+	}
+	messages = append(messages, models.ModelMessage{Role: models.RoleSystem, Content: systemPrompt})
 	for rows.Next() {
 		var message models.ModelMessage
 		if err := rows.Scan(&message.Role, &message.Content); err != nil {

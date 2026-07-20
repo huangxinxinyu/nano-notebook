@@ -29,8 +29,12 @@ type SearchRequest struct {
 }
 
 type EvidenceCandidate struct {
-	ID      string
-	Preview string
+	ID          string
+	SourceID    string
+	RevisionID  string
+	SourceTitle string
+	Preview     string
+	UnitRefs    []UnitRef
 }
 
 type SearchResult struct {

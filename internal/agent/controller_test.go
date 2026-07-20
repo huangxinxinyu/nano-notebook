@@ -34,6 +34,9 @@ func TestControllerCheckpointsOrderedActionsThenFinalAndPublishesOnce(t *testing
 	if len(executionOrder) != 2 || executionOrder[0] != "first" || executionOrder[1] != "second" {
 		t.Fatalf("Action execution order = %v", executionOrder)
 	}
+	if len(action.attempts) != 2 || action.attempts[0] != runtime.execution.Attempt || action.attempts[1] != runtime.execution.Attempt {
+		t.Fatalf("Action attempt authority = %+v, want %+v", action.attempts, runtime.execution.Attempt)
+	}
 	wantKinds := []CheckpointKind{
 		CheckpointActionProposal,
 		CheckpointActionResult,
@@ -466,11 +469,12 @@ func (m *decisionModelStub) Decide(_ context.Context, request models.ModelReques
 }
 
 type recordingAction struct {
-	name    string
-	order   *[]string
-	calls   int
-	started chan<- struct{}
-	proceed <-chan struct{}
+	name     string
+	order    *[]string
+	calls    int
+	started  chan<- struct{}
+	proceed  <-chan struct{}
+	attempts []Attempt
 }
 
 func (a *recordingAction) Definition() models.ActionDefinition {
@@ -501,6 +505,7 @@ func (a *recordingAction) Execute(ctx context.Context, request ActionRequest) (A
 		return ActionResult{}, err
 	}
 	a.calls++
+	a.attempts = append(a.attempts, request.Attempt)
 	if a.started != nil {
 		select {
 		case a.started <- struct{}{}:

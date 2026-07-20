@@ -89,7 +89,7 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		actionCapable := !forceFinalDecision && len(prefix.Proposals) < execution.ActionDecisionLimit && remainingActions > 0
 		definitions := []models.ActionDefinition(nil)
 		if actionCapable {
-			definitions = c.registry.Definitions(ActionPolicy{RemainingActions: remainingActions})
+			definitions = c.registry.Definitions(ActionPolicy{RemainingActions: remainingActions, Execution: &execution})
 			if len(definitions) == 0 {
 				actionCapable = false
 			}
@@ -186,7 +186,7 @@ func (c *Controller) executeAction(
 	if !ok {
 		return c.fail(ctx, attempt, string(models.ErrorInvalidResponse), fmt.Errorf("accepted unknown Action %q", action.Name))
 	}
-	request := ActionRequest{Input: action.Input, DefaultTimeZone: execution.TimeZone}
+	request := ActionRequest{Input: action.Input, DefaultTimeZone: execution.TimeZone, Attempt: attempt}
 	var result ActionResult
 	var err error
 	if tracer != nil {

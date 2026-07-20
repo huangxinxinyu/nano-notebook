@@ -540,6 +540,27 @@ create table if not exists agent_runs (
 	updated_at timestamptz not null default now()
 );
 
+alter table agent_runs add column if not exists selected_source_count integer not null default 0
+	check (selected_source_count between 0 and 50);
+
+-- A Run pins the exact authoritative Evidence and Retrieval projection that
+-- existed at admission. Source identities intentionally are not foreign keys:
+-- deletion must invalidate publication without erasing what the Run selected.
+create table if not exists agent_run_evidence_set (
+	run_id text not null references agent_runs(id) on delete cascade,
+	ordinal integer not null check (ordinal between 0 and 49),
+	notebook_id text not null check (char_length(notebook_id) between 1 and 255),
+	source_id text not null check (char_length(source_id) between 1 and 255),
+	evidence_revision_id text not null check (char_length(evidence_revision_id) between 1 and 255),
+	index_version_id text not null check (char_length(index_version_id) between 1 and 255),
+	created_at timestamptz not null default now(),
+	primary key (run_id, ordinal),
+	unique (run_id, source_id)
+);
+
+create index if not exists agent_run_evidence_set_scope_idx
+	on agent_run_evidence_set(notebook_id, source_id, evidence_revision_id, index_version_id);
+
 create unique index if not exists agent_runs_one_active_per_user_idx
 	on agent_runs(user_id)
 	where status in ('queued', 'running');
@@ -1018,6 +1039,7 @@ alter table platform_idempotency_keys enable row level security;
 alter table chat_chats enable row level security;
 alter table chat_messages enable row level security;
 alter table agent_runs enable row level security;
+alter table agent_run_evidence_set enable row level security;
 alter table agent_run_checkpoints enable row level security;
 alter table agent_traces enable row level security;
 alter table agent_trace_records enable row level security;
@@ -1051,6 +1073,7 @@ grant select, insert, update, delete on
 	chat_chats,
 	chat_messages,
 	agent_runs,
+	agent_run_evidence_set,
 	agent_jobs
 to nano_app;
 grant select on retrieval_source_index_builds to nano_app;
@@ -1064,7 +1087,8 @@ grant select on
 	notebook_memberships,
 	chat_chats,
 	chat_messages,
-	agent_runs
+	agent_runs,
+	agent_run_evidence_set
 to nano_worker;
 grant select, update on source_sources to nano_worker;
 grant select, update on source_upload_intents to nano_worker;
@@ -1299,6 +1323,9 @@ create policy source_evidence_units_worker on source_evidence_units for all to n
 
 drop policy if exists retrieval_index_versions_worker on retrieval_index_versions;
 create policy retrieval_index_versions_worker on retrieval_index_versions for all to nano_worker using (true) with check (true);
+drop policy if exists retrieval_index_versions_app_active on retrieval_index_versions;
+create policy retrieval_index_versions_app_active on retrieval_index_versions
+	for select to nano_app using (status='active');
 drop policy if exists retrieval_eval_runs_worker on retrieval_eval_runs;
 create policy retrieval_eval_runs_worker on retrieval_eval_runs for all to nano_worker using (true) with check (true);
 drop policy if exists retrieval_source_index_builds_worker on retrieval_source_index_builds;
@@ -1376,6 +1403,28 @@ create policy agent_runs_worker on agent_runs
 	for all to nano_worker
 	using (true)
 	with check (true);
+
+drop policy if exists agent_run_evidence_set_app on agent_run_evidence_set;
+create policy agent_run_evidence_set_app on agent_run_evidence_set
+	for all to nano_app
+	using (
+		exists (
+			select 1 from agent_runs r
+			where r.id=agent_run_evidence_set.run_id
+			  and r.user_id=nullif(current_setting('app.principal_id', true), '')
+		)
+	)
+	with check (
+		exists (
+			select 1 from agent_runs r
+			where r.id=agent_run_evidence_set.run_id
+			  and r.user_id=nullif(current_setting('app.principal_id', true), '')
+		)
+	);
+
+drop policy if exists agent_run_evidence_set_worker on agent_run_evidence_set;
+create policy agent_run_evidence_set_worker on agent_run_evidence_set
+	for select to nano_worker using (true);
 
 drop policy if exists agent_run_checkpoints_worker_read on agent_run_checkpoints;
 create policy agent_run_checkpoints_worker_read on agent_run_checkpoints

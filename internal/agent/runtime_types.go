@@ -20,6 +20,7 @@ type Execution struct {
 	ActionBatchLimit       int
 	ActionResultByteLimit  int
 	ActionResultsByteLimit int
+	SelectedSourceCount    int
 }
 
 type Attempt struct {

@@ -9,6 +9,7 @@ import (
 )
 
 const BarePromptVersion = "agent-bare-v1"
+const GroundedPromptVersion = "agent-grounded-v1"
 
 // BuildDecisionRequest combines bounded durable Chat history with completed
 // Proposal/Result checkpoints. An incomplete Action batch must be resumed by
@@ -19,7 +20,7 @@ func (r *PostgresRuntime) BuildDecisionRequest(
 	prefix CheckpointPrefix,
 	definitions []models.ActionDefinition,
 ) (models.ModelRequest, error) {
-	if execution.PromptVersion != BarePromptVersion {
+	if execution.PromptVersion != BarePromptVersion && execution.PromptVersion != GroundedPromptVersion {
 		return models.ModelRequest{}, fmt.Errorf("unsupported prompt version %q", execution.PromptVersion)
 	}
 	if prefix.Final != nil {

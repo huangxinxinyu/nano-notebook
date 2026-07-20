@@ -953,16 +953,24 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		return
 	}
 	var req struct {
-		ID       string `json:"id"`
-		Content  string `json:"content"`
-		TimeZone string `json:"time_zone"`
+		ID        string   `json:"id"`
+		Content   string   `json:"content"`
+		TimeZone  string   `json:"time_zone"`
+		SourceIDs []string `json:"source_ids"`
 	}
 	if !readJSON(w, r, &req) {
 		return
 	}
-	if _, err := uuid.Parse(req.ID); err != nil || len(req.ID) != 36 || strings.TrimSpace(req.Content) == "" || len([]rune(req.Content)) > 8000 {
+	if _, err := uuid.Parse(req.ID); err != nil || len(req.ID) != 36 || strings.TrimSpace(req.Content) == "" || len([]rune(req.Content)) > 8000 || len(req.SourceIDs) > 50 {
 		writeError(w, r, http.StatusBadRequest, "validation_failed", "error.message_invalid")
 		return
+	}
+	for index := range req.SourceIDs {
+		req.SourceIDs[index] = strings.TrimSpace(req.SourceIDs[index])
+		if req.SourceIDs[index] == "" {
+			writeError(w, r, http.StatusBadRequest, "validation_failed", "error.message_invalid")
+			return
+		}
 	}
 	runID, err := newOpaqueID("run")
 	if err != nil {
@@ -975,6 +983,10 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		return
 	}
 	status := "queued"
+	promptVersion := agent.BarePromptVersion
+	if len(req.SourceIDs) > 0 {
+		promptVersion = agent.GroundedPromptVersion
+	}
 	err = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtextextended($1, 0))`, "admit_agent_run:"+userID); err != nil {
 			return err
@@ -995,6 +1007,13 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 			if err != nil {
 				return err
 			}
+			matches, err := agent.NewStore(tx).EvidenceSetMatches(r.Context(), run.ID, req.SourceIDs)
+			if err != nil {
+				return err
+			}
+			if !matches {
+				return chat.ErrMessageConflict
+			}
 			runID = run.ID
 			status = run.Status
 			return nil
@@ -1011,13 +1030,16 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 		if err := chatStore.InsertUserMessage(r.Context(), req.ID, chatID, req.Content); err != nil {
 			return err
 		}
-		if err := agentStore.CreateQueued(r.Context(), runID, userID, chatID, req.ID, s.cfg.DefaultModel, agent.BarePromptVersion, normalizeBrowserTimeZone(req.TimeZone), s.cfg.AgentRun); err != nil {
+		if err := agentStore.CreateQueued(r.Context(), runID, userID, chatID, req.ID, s.cfg.DefaultModel, promptVersion, normalizeBrowserTimeZone(req.TimeZone), s.cfg.AgentRun); err != nil {
+			return err
+		}
+		if err := agentStore.PinEvidenceSet(r.Context(), runID, userID, req.SourceIDs); err != nil {
 			return err
 		}
 		if err := jobs.NewStore(tx).CreateAgentRun(r.Context(), jobID, runID); err != nil {
 			return err
 		}
-		if err := agent.StartRunTraceInTx(r.Context(), tx, runID, s.cfg.DefaultModel, agent.BarePromptVersion, nil); err != nil {
+		if err := agent.StartRunTraceInTx(r.Context(), tx, runID, s.cfg.DefaultModel, promptVersion, nil); err != nil {
 			return err
 		}
 		_, err = tx.Exec(r.Context(), `select pg_notify('nano_agent_jobs', $1)`, jobID)
@@ -1033,6 +1055,10 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 	}
 	if errors.Is(err, agent.ErrActiveRun) || isUniqueViolation(err, "agent_runs_one_active_per_user_idx") {
 		writeError(w, r, http.StatusConflict, "active_run_conflict", "error.active_run_conflict")
+		return
+	}
+	if errors.Is(err, agent.ErrEvidenceSetInvalid) {
+		writeError(w, r, http.StatusConflict, "evidence_set_invalid", "error.evidence_set_invalid")
 		return
 	}
 	if err != nil {

@@ -196,7 +196,10 @@ func main() {
 	}
 	runtime := agent.NewPostgresRuntime(db.Pool(), agent.BareSystemPrompt, nil,
 		agent.WithTraceSink(traceExporter), agent.WithBestEffortTraceExporter(traceBridge), agent.WithReplayStager(replayStager))
-	registry, err := agent.NewActionRegistry(agent.NewCalculateAction(), agent.NewCurrentTimeAction(nil))
+	evidenceSearch := agent.NewEvidenceSearchService(db.Pool(), qdrant, modelClient)
+	registry, err := agent.NewActionRegistry(
+		agent.NewCalculateAction(), agent.NewCurrentTimeAction(nil), agent.NewSearchEvidenceAction(evidenceSearch),
+	)
 	if err != nil {
 		slog.Error("worker Action registry invalid", "error", err)
 		os.Exit(1)

@@ -21,6 +21,7 @@ const (
 type ActionRequest struct {
 	Input           json.RawMessage
 	DefaultTimeZone string
+	Attempt         Attempt
 }
 
 type ActionResult struct {
@@ -55,6 +56,11 @@ type Action interface {
 type ActionPolicy struct {
 	AllowedNames     map[string]bool
 	RemainingActions int
+	Execution        *Execution
+}
+
+type ActionAvailability interface {
+	Available(Execution) bool
 }
 
 type ActionRegistry struct {
@@ -107,6 +113,11 @@ func (r *ActionRegistry) Definitions(policy ActionPolicy) []models.ActionDefinit
 	definitions := make([]models.ActionDefinition, 0, len(r.actions))
 	for _, action := range r.actions {
 		definition := action.definition
+		if policy.Execution != nil {
+			if availability, ok := action.executor.(ActionAvailability); ok && !availability.Available(*policy.Execution) {
+				continue
+			}
+		}
 		if policy.AllowedNames != nil && !policy.AllowedNames[definition.Name] {
 			continue
 		}
