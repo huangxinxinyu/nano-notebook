@@ -310,9 +310,22 @@ test("opens a published Citation without exposing retrieval internals", async ()
   render(<App />);
   const user = userEvent.setup();
   const chat = await screen.findByRole("region", { name: "Chat" });
-  await user.click(await within(chat).findByRole("button", { name: "Citation 1 for KV caching avoids recomputing prior keys and values." }));
+  const citation = await within(chat).findByRole("button", { name: "Citation 1 for KV caching avoids recomputing prior keys and values." });
+  act(() => citation.focus());
+  expect(citation).toHaveFocus();
+  await waitFor(() => expect(screen.getByRole("tooltip")).toHaveTextContent("transformer-notes.pdf"));
+  act(() => citation.blur());
+  await waitFor(() => expect(screen.queryByRole("tooltip")).not.toBeInTheDocument());
+  await user.hover(citation);
+  const tooltip = await screen.findByRole("tooltip");
+  expect(within(tooltip).getByText("transformer-notes.pdf")).toBeInTheDocument();
+  expect(within(tooltip).getByText("The cache stores keys and values from all prior token positions.")).toBeInTheDocument();
+  expect(within(tooltip).getByText("Page 12")).toBeInTheDocument();
+  expect(screen.queryByRole("dialog", { name: "transformer-notes.pdf" })).not.toBeInTheDocument();
+  await user.click(citation);
 
   const dialog = await screen.findByRole("dialog", { name: "transformer-notes.pdf" });
+  expect(screen.queryByRole("tooltip")).not.toBeInTheDocument();
   expect(within(dialog).getByText("The cache stores keys and values from all prior token positions.")).toBeInTheDocument();
   expect(within(dialog).getByText("Page 12")).toBeInTheDocument();
   expect(within(dialog).queryByText(/rev_1|unit_1/)).not.toBeInTheDocument();

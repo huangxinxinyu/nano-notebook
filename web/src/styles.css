@@ -1757,6 +1757,37 @@ h2 {
   font-size: 11px;
 }
 
+.citation-hover-preview {
+  display: grid;
+  width: min(340px, calc(100vw - 32px));
+  gap: 4px;
+  padding: 12px 14px;
+  text-align: left;
+  white-space: normal;
+}
+
+.citation-hover-preview strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.citation-hover-preview span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.citation-hover-preview p {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 4px 0 0;
+  color: var(--primary-foreground);
+  font-size: 12px;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
+
 .citation-dialog blockquote {
   margin: 18px 0 0;
   border-left: 3px solid var(--border);

@@ -12,6 +12,7 @@ import { useEffect, useRef, useState } from "react";
 import { MaterialSymbol } from "../icons/material-symbol";
 import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../ui/dialog";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import { appendMessageText, type ChatController, type ChatMessage, type Citation } from "./private-chat";
 
 export type ChatPanelCopy = {
@@ -153,9 +154,10 @@ type CitationView = {
 
 function CitationButton({ citation, number, copy }: { citation: Citation; number: number; copy: ChatPanelCopy }) {
   const [open, setOpen] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
   const view = useQuery({
     queryKey: ["citation", citation.id],
-    enabled: open,
+    enabled: open || previewOpen,
     queryFn: async (): Promise<CitationView> => {
       const response = await fetch(`/api/v1/citations/${citation.id}`, { credentials: "include" });
       if (!response.ok) throw new Error(copy.citationUnavailableLabel);
@@ -165,7 +167,22 @@ function CitationButton({ citation, number, copy }: { citation: Citation; number
   });
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <Button className="citation-chip" variant="outline" size="sm" aria-label={`${copy.citationLabel} ${number} for ${citation.claim_text}`} onClick={() => setOpen(true)}>[{number}]</Button>
+      <Tooltip open={previewOpen} onOpenChange={setPreviewOpen}>
+        <TooltipTrigger asChild>
+          <Button className="citation-chip" variant="outline" size="sm" aria-label={`${copy.citationLabel} ${number} for ${citation.claim_text}`} onClick={() => setOpen(true)}>[{number}]</Button>
+        </TooltipTrigger>
+        <TooltipContent className="citation-hover-preview" side="top" sideOffset={8}>
+          {view.isError ? <span role="alert">{copy.citationUnavailableLabel}</span> : null}
+          {!view.data && !view.isError ? <span>{copy.citationPreviewLabel}</span> : null}
+          {view.data ? (
+            <>
+              <strong>{view.data.source_title}</strong>
+              <span>{citationLocation(view.data)}</span>
+              <p>{view.data.preview}</p>
+            </>
+          ) : null}
+        </TooltipContent>
+      </Tooltip>
       <DialogContent className="citation-dialog" closeLabel={copy.closeLabel}>
         <DialogTitle>{view.data?.source_title ?? copy.citationPreviewLabel}</DialogTitle>
         <DialogDescription>{view.data ? citationLocation(view.data) : copy.citationPreviewLabel}</DialogDescription>
