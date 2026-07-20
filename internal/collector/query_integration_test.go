@@ -86,6 +86,35 @@ func TestCollectorQueryHTTPUsesControlPlaneCredentialNotProducerCredential(t *te
 	}
 }
 
+func TestCollectorTraceDetailHTTPEncodesEmptyCollectionsAsArrays(t *testing.T) {
+	ctx := context.Background()
+	pool := openObservabilityTestPool(t, ctx)
+	t.Cleanup(pool.Close)
+	resetObservabilityTestSchema(t, ctx, pool)
+	seedQuerySummary(t, ctx, pool, "trace-empty-collections", "run-empty-collections", "chat-empty-collections", "agent-a", "model-a", "ok", false, 300)
+	queries, _ := collector.NewTraceQueryStore(pool, nil)
+	ingestor, _ := collector.NewIngestor(collector.IngestorConfig{ProducerID: "nano-worker", Store: collector.NewMemoryStore()})
+	handler, err := collector.NewHTTPHandler(collector.HTTPConfig{
+		Ingestor: ingestor, ServiceToken: "producer-secret", QueryStore: queries,
+		QueryToken: "control-plane-secret", MaxBodyBytes: 1024,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/internal/agent-observability/v1/traces/trace-empty-collections", nil)
+	request.Header.Set("Authorization", "Bearer control-plane-secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("Trace Detail status=%d body=%s", response.Code, response.Body.String())
+	}
+	for _, field := range []string{`"spans":[]`, `"events":[]`, `"links":[]`} {
+		if !bytes.Contains(response.Body.Bytes(), []byte(field)) {
+			t.Errorf("Trace Detail omitted empty array %s: %s", field, response.Body.String())
+		}
+	}
+}
+
 func seedQuerySummary(t *testing.T, ctx context.Context, pool *pgxpool.Pool, traceID, runID, chatID, agentName, modelName, status string, active bool, started int64) {
 	t.Helper()
 	if _, err := pool.Exec(ctx, `

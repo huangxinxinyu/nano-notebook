@@ -121,7 +121,7 @@ function TraceDetailView(props: TraceDashboardProps & { traceID: string }) {
   const [zoom, setZoom] = useState(1);
   const detail = useQuery({
     queryKey: ["admin-trace", props.traceID],
-    queryFn: () => adminJSON<TraceDetail>(`/api/admin/traces/${encodeURIComponent(props.traceID)}`),
+    queryFn: async () => normalizeTraceDetail(await adminJSON<TraceDetail>(`/api/admin/traces/${encodeURIComponent(props.traceID)}`)),
     retry: false,
     refetchInterval: (query) => tracePollingInterval(query.state.data)
   });
@@ -258,6 +258,28 @@ function spanKind(span: Span, t: TraceCopy) { if (span.name === "agent.execution
 function collectStrings(value: unknown): string[] { if (typeof value === "string") return [value]; if (Array.isArray(value)) return value.flatMap(collectStrings); if (value && typeof value === "object") return Object.values(value).flatMap(collectStrings); return []; }
 function timeRangeStart(value: string) { const hours = Number.parseInt(value, 10); return Number.isFinite(hours) && hours > 0 ? new Date(Date.now() - hours * 60 * 60 * 1000).toISOString() : ""; }
 function replayError(code: string | undefined, t: TraceCopy) { if (code === "replay_forbidden") return t.replayForbidden; if (code === "replay_expired") return t.replayExpired; if (code === "replay_corrupt") return t.replayCorrupt; return t.replayUnavailable; }
+
+function normalizeTraceDetail(detail: TraceDetail): TraceDetail {
+  const projection = detail.projection;
+  const spans = Array.isArray(projection.spans) ? projection.spans : [];
+  const events = Array.isArray(projection.events) ? projection.events : [];
+  const links = Array.isArray(projection.links) ? projection.links : [];
+  return {
+    ...detail,
+    projection: {
+      ...projection,
+      summary: { ...projection.summary, models: Array.isArray(projection.summary.models) ? projection.summary.models : [] },
+      spans: spans.map((span) => ({
+        ...span,
+        start_attributes: Array.isArray(span.start_attributes) ? span.start_attributes : [],
+        end_attributes: Array.isArray(span.end_attributes) ? span.end_attributes : [],
+        replay: Array.isArray(span.replay) ? span.replay : []
+      })),
+      events: events.map((event) => ({ ...event, attributes: Array.isArray(event.attributes) ? event.attributes : [] })),
+      links: links.map((link) => ({ ...link, attributes: Array.isArray(link.attributes) ? link.attributes : [] }))
+    }
+  };
+}
 
 class AdminAPIError extends Error {
   constructor(readonly code: string) { super(code); }

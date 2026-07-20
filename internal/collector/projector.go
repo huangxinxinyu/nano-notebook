@@ -320,6 +320,7 @@ func loadProjectedTrace(ctx context.Context, query postgresQuerier, traceID agen
 	if err := loadProjectedChildren(ctx, query, &result); err != nil {
 		return ProjectedTrace{}, err
 	}
+	normalizeProjectedTraceCollections(&result.Projection)
 	canonical, err := json.Marshal(struct {
 		Projection       TraceProjection
 		CommittedThrough int
@@ -330,6 +331,43 @@ func loadProjectedTrace(ctx context.Context, query postgresQuerier, traceID agen
 	}
 	result.CanonicalJSON = string(canonical)
 	return result, nil
+}
+
+func normalizeProjectedTraceCollections(projection *TraceProjection) {
+	if projection.Summary.Models == nil {
+		projection.Summary.Models = []string{}
+	}
+	if projection.Spans == nil {
+		projection.Spans = []SpanProjection{}
+	}
+	for index := range projection.Spans {
+		span := &projection.Spans[index]
+		if span.StartAttributes == nil {
+			span.StartAttributes = []agentobs.Attribute{}
+		}
+		if span.EndAttributes == nil {
+			span.EndAttributes = []agentobs.Attribute{}
+		}
+		if span.Replay == nil {
+			span.Replay = []ReplayReferenceProjection{}
+		}
+	}
+	if projection.Events == nil {
+		projection.Events = []EventProjection{}
+	}
+	for index := range projection.Events {
+		if projection.Events[index].Attributes == nil {
+			projection.Events[index].Attributes = []agentobs.Attribute{}
+		}
+	}
+	if projection.Links == nil {
+		projection.Links = []LinkProjection{}
+	}
+	for index := range projection.Links {
+		if projection.Links[index].Attributes == nil {
+			projection.Links[index].Attributes = []agentobs.Attribute{}
+		}
+	}
 }
 
 func loadProjectedChildren(ctx context.Context, query postgresQuerier, result *ProjectedTrace) error {

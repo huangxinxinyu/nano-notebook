@@ -871,6 +871,47 @@ test("explores a Trace with synchronized Tree, Timeline, and explicit Replay loa
   expect(within(linkedTree).getByRole("treeitem", { name: /agent.action/ })).toHaveAttribute("aria-selected", "true");
 });
 
+test("renders a real Trace Detail when empty repeated fields arrive as null", async () => {
+  window.history.pushState(null, "", "/admin/traces/trace-null-collections");
+  fetchHandler = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/api/v1/session")) return json({
+      user: { id: "usr_operator", email: "operator@example.com" },
+      platform_capabilities: ["platform.trace.read", "platform.trace.replay"]
+    });
+    if (url === "/api/admin/traces/trace-null-collections") return json({ schema_version: 1, data: {
+      committed_sequence: 2, projected_sequence: 2,
+      projection: {
+        summary: {
+          trace_id: "trace-null-collections", run_id: "run-null-collections", chat_id: "chat-null-collections", notebook_id: "notebook-null-collections",
+          root_span_id: "root-null-collections", agent_name: "nano-research-agent", started_at_unix_nano: 1700000000000000000,
+          last_observed_unix_nano: 1700000001000000000, ended_at_unix_nano: 1700000001000000000, duration_nanoseconds: 1000000000,
+          status: "ok", active: false, models: [], input_tokens: null, output_tokens: null,
+          total_tokens: null, cost: { known: false, amount: null, currency: "", source: "" }, attempt_count: 0
+        },
+        spans: [{
+          trace_id: "trace-null-collections", span_id: "root-null-collections", parent_span_id: "", name: "agent.execution",
+          start_sequence: 1, end_sequence: 2, started_at_unix_nano: 1700000000000000000, ended_at_unix_nano: 1700000001000000000,
+          duration_nanoseconds: 1000000000, status: "ok", start_attributes: null, end_attributes: null, replay: null, model: null
+        }],
+        events: null,
+        links: null
+      }
+    }});
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  const tree = await screen.findByRole("tree", { name: "Trace Tree" });
+  expect(within(tree).getByText("agent.execution")).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "Trace Timeline" })).toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "Attributes" }));
+  expect(within(screen.getByRole("region", { name: "Inspector" })).getByText("Unknown")).toBeInTheDocument();
+  await user.click(screen.getByRole("tab", { name: "Replay" }));
+  expect(screen.getByText("This Span has no Replay payload.")).toBeInTheDocument();
+});
+
 test("distinguishes expired Replay from a transient unavailable response", async () => {
   window.history.pushState(null, "", "/admin/traces/trace-expired?span=model-expired");
   fetchHandler = async (input) => {
