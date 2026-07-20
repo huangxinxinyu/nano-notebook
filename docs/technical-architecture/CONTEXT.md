@@ -70,6 +70,14 @@ _Avoid_: Source Module, Agent Sandbox
 The canonical, parser-independent representation of extracted Source content and its citation coordinates, produced before retrieval indexing.
 _Avoid_: Parsed file, parser output
 
+**Evidence Coverage**:
+The source-native regions that a Normalized Source Artifact successfully represents, together with any precisely bounded regions it omits. Unknown coverage or loss of the Source's primary content prevents publication, while bounded gaps remain visible on an otherwise usable ready Source.
+_Avoid_: Extraction log, success boolean, silent omission
+
+**Source Processing Budget**:
+The versioned server-side limits on one Source's format expansion and processing resources, including structural count, decoded size, media duration, pixels, time, memory, temporary storage, and external model calls. Exceeding a hard limit fails processing rather than publishing truncated evidence.
+_Avoid_: User quota, silent truncation, Worker capacity
+
 **Evidence Revision**:
 An immutable version of a Source's Normalized Source Artifact and its Evidence Unit address space. A Citation pins an Evidence Revision so later extraction, OCR, or transcription improvements cannot change the evidence originally cited.
 _Avoid_: Source version, index version
@@ -86,11 +94,31 @@ _Avoid_: Citation span, authoritative content
 An immutable, rebuildable retrieval projection of one or more Evidence Revisions under a specific chunking, dense, and sparse indexing configuration. It can be replaced or removed without changing Citation identity.
 _Avoid_: Evidence Revision, authoritative Source
 
+**Retrieval Index Promotion**:
+The authoritative switch that makes one fully built and verified Retrieval Index Version active only after its identified offline Eval Run satisfies the approved policy. Building or evaluating an index does not promote it by itself.
+_Avoid_: Reindex completion, deployment, automatic tuning
+
+**BM25 Retrieval Channel**:
+The versioned lexical candidate path that uses the same language-aware analyzer at indexing and query time to rank exact terms through classic BM25. In the first release, `sparse` means this channel rather than a learned sparse embedding model.
+_Avoid_: Learned sparse retrieval, semantic retrieval, full-text filtering
+
+**Evidence Search Action**:
+The typed, read-only Agent Action through which the Research Agent submits a bounded query and purpose under Retrieval Scope and receives authoritative Evidence candidates. It may be invoked iteratively within the Run Budget and never exposes vector-store records as evidence authority.
+_Avoid_: One-shot RAG prompt, Qdrant query tool, web search
+
+**Retrieval Degradation**:
+An explicit retrieval outcome in which a versioned fallback policy permits useful candidates after one configured candidate or ranking stage fails. It is neither successful execution of the full hybrid pipeline nor evidence that the selected Sources lack support, and it never relaxes Retrieval Scope or groundedness rules.
+_Avoid_: Silent fallback, successful hybrid retrieval, insufficient evidence
+
 ## Agent Execution
 
 **Run Evidence Set**:
 The fixed set of immutable Sources and their active Evidence Revisions selected when a question creates an Agent Run. The Run also pins the corresponding Retrieval Index Version; later Chat selection, Source processing, and new Sources do not enter it, while deletion of a member Source invalidates the active Run rather than silently changing its evidence.
 _Avoid_: Current Sources, live Notebook contents
+
+**Grounding Outcome**:
+The Run-owned classification of a published answer as Source-grounded or an explicitly disclosed whole Model-Knowledge Answer. It is determined from completed retrieval, accepted Evidence, verified Claim Support Records, and Citations rather than duplicated on the Assistant Message; degraded research cannot establish a zero-support fallback.
+_Avoid_: Message answer mode, mixed answer, UI toggle
 
 **Agent Controller**:
 The Go component that advances an Agent Run through its fixed outer stages while validating and bounding model-selected, read-only research actions.
@@ -140,6 +168,10 @@ _Avoid_: Transcript replay, memory store, model snapshot
 The final transactional authorization, Source-availability, and Citation-validity check that alone may turn an Agent draft into a durable Assistant Message. Late or incomplete work cannot bypass it.
 _Avoid_: Stream completion, model success
 
+**Claim Support Record**:
+A typed verification result that maps one factual or synthesized Final Draft claim to its cited Evidence handles and records whether that Evidence fully supports the claim. It contains no hidden model reasoning and cannot replace deterministic Citation identity and authorization checks.
+_Avoid_: Chain of thought, Citation marker, verifier prose
+
 **Retrieval Scope**:
 The server-constructed intersection of an authorized Notebook and a Run Evidence Set that every retrieval channel must enforce before returning candidates.
 _Avoid_: Client filter, vector-database tenant
@@ -159,7 +191,7 @@ _Avoid_: Archive, recycle bin
 ## Evaluation
 
 **Eval Case**:
-A versioned research question with its allowed evidence, expected evidence or answer rubric, and scoring metadata, used to compare retrieval and Agent configurations through production interfaces.
+A human-authored, versioned research question with fixed non-sensitive Source fixtures, allowed and expected Evidence or equivalent Evidence sets, an answer rubric, and scoring metadata. Model-generated judgments may supplement its results but cannot redefine its ground truth or authorize promotion alone.
 _Avoid_: Unit test, manually selected demo
 
 **Eval Run**:
@@ -177,8 +209,12 @@ Sampleable and retention-bounded traces, metrics, and logs used to diagnose the 
 _Avoid_: Agent state, product audit record
 
 **Durable Agent Trace**:
-The retained internal execution record with exactly one Trace and one root Trace Span per Agent Run, following that Run's lifecycle and reconstructing every started execution attempt independently of Operational Telemetry sampling or expiry, including work with no observed completion or accepted Checkpoint. It is not directly user-visible and is distinct from a future administrative projection, the user-facing Reasoning Trace, and any claim of access to hidden model cognition.
-_Avoid_: OpenTelemetry span set, admin dashboard, user-facing Reasoning Trace
+The retained internal execution record with exactly one Trace and one root Trace Span per Agent Run, following that Run's lifecycle and reconstructing every started execution attempt independently of Operational Telemetry sampling or expiry, including work with no observed completion or accepted Checkpoint. It is restricted developer data, remains distinct from its administrative projection, and never contains or claims access to model chain of thought.
+_Avoid_: OpenTelemetry span set, admin dashboard, Member-facing trace, chain of thought
+
+**Replay**:
+An encrypted, allow-listed, retention-bounded record of normalized content used to debug one observed Agent operation. It is loaded only through an explicit audited `platform.trace.replay` request, contains no raw Provider envelope or chain of thought, and never grants browsing access to the parent Source.
+_Avoid_: Full Source archive, raw Provider log, unbounded prompt history
 
 **Trace Span**:
 A duration-bearing node in a Durable Agent Trace that represents one execution operation, has at most one parent, and may remain without an observed terminal outcome after process loss.

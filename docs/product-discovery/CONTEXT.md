@@ -9,7 +9,7 @@ A persistent workspace for one research topic. It is the boundary that isolates 
 _Avoid_: Project, folder, knowledge base
 
 **Source**:
-An immutable snapshot of material intentionally added to a Notebook and used as the evidence base for understanding and producing work. It can be an uploaded document, pasted text, public web page, public YouTube video, uploaded audio, or uploaded image; its title can change, but its evidence content cannot.
+An immutable snapshot of material intentionally added to a Notebook and used as the evidence base for understanding and producing work. It can be an uploaded document, public web page, public YouTube video, uploaded audio, or uploaded image; its title can change, but its evidence content cannot.
 _Avoid_: File, document, reference
 
 **Chat**:
@@ -20,13 +20,13 @@ _Avoid_: Shared thread, discussion
 A Chat response whose factual claims are supported only by the Sources selected from the current Notebook. If the Sources are insufficient, the response states that limitation instead of silently adding model knowledge or web information.
 _Avoid_: General answer, best-effort answer
 
+**Model-Knowledge Answer**:
+A clearly disclosed Chat response based on the configured model rather than Notebook Sources. It carries no Citations and is allowed when no Source is selected or when completed research determines that the selected Sources contain no support at all; it never fills gaps inside a partially supported Grounded Answer.
+_Avoid_: Grounded Answer, hybrid answer, silent fallback
+
 **Research Agent**:
 The read-only assistant operating inside a Chat. It can perform multiple retrieval, comparison, synthesis, and verification steps over selected Sources, but cannot modify the Notebook or interact with external systems.
 _Avoid_: General agent, automation, chatbot
-
-**Reasoning Trace**:
-The user-visible, structured record of a Research Agent run, including its stages, retrievals, inspected evidence, concise selection rationale, comparisons, uncertainty, and conclusion summary. It explains observable research work without claiming to expose hidden model cognition.
-_Avoid_: Raw chain of thought, thinking tokens
 
 **Citation**:
 An inline link from a key factual claim or synthesized conclusion in a Grounded Answer to its supporting Source evidence. It previews the original passage on hover and opens the passage in context when selected; very short Sources may be cited as a whole.

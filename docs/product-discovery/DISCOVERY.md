@@ -20,9 +20,9 @@ The product accepts uploaded and external Sources. Search-based source discovery
 
 Keeping search in scope matters because the product may eventually support the full journey from finding material to understanding it. A Member adding a URL they already know is source ingestion, not search.
 
-The product scope includes uploaded PDF, TXT, Markdown, DOCX, and PPTX documents; pasted text; public web-page URLs; public YouTube URLs; uploaded audio; and uploaded images. Cloud-drive imports are excluded and are not currently a committed future capability because there is not yet enough user or product understanding to define them responsibly.
+The product scope includes uploaded PDF, TXT, Markdown, DOCX, and PPTX documents; public web-page URLs; public YouTube URLs; uploaded audio; and uploaded images. Pasted text and cloud-drive imports are excluded because there is not yet enough user or product value to define and maintain those entry paths responsibly.
 
-The initial release supports document upload, pasted text, public web-page URLs, public YouTube URLs with captions, uploaded audio, and uploaded images. YouTube contributes transcript evidence, audio is transcribed, and images contribute OCR and visual evidence.
+The initial release supports document upload, public web-page URLs, public YouTube URLs with captions, uploaded audio, and uploaded images. YouTube contributes transcript evidence, audio is transcribed, and images contribute OCR and visual evidence.
 
 A Notebook can contain at most 50 Sources in the initial product.
 
@@ -78,7 +78,7 @@ Immutability ensures that a historical Citation never silently points to evidenc
 
 ### Grounding Principle
 
-Chat produces Grounded Answers using only Sources selected from the current Notebook. It must not silently supplement an answer with model knowledge or internet information. When the available Sources do not support an answer, Chat explicitly reports that the evidence is insufficient.
+Chat produces Grounded Answers using only Sources selected from the current Notebook and never supplements a partially supported answer with model knowledge or internet information. When complete, non-degraded research finds no support at all, Chat may instead produce a wholly separate, clearly disclosed Model-Knowledge Answer with no Citations; otherwise it reports the unsupported portion as insufficient.
 
 Future search results must first be added to the Notebook as Sources before Chat can use them as evidence.
 
@@ -90,9 +90,7 @@ The Research Agent is read-only. It cannot add, edit, rename, or delete Sources;
 
 ### Agent Run Visibility
 
-The product shows both high-level execution stages and detailed reasoning visibility. It does not claim to expose a model's raw internal chain of thought because such data may not be available, is not a reliable audit record, and can include unverified intermediate content.
-
-The interface shows high-level stages plus an expandable, structured Reasoning Trace containing the Agent's retrieval queries, Sources and passages inspected, evidence selected or rejected with concise reasons, comparisons performed, uncertainty, and a conclusion summary. This trace describes observable research actions and generated rationale rather than claiming to reveal hidden model cognition.
+The Member-facing product shows only a basic active state, Stop, the final Answer, and Citations. It does not expose retrieval queries, candidate rankings, evidence-selection details, verification records, internal execution, or model chain of thought. Operationally useful research actions belong to the restricted developer Trace Dashboard and audited Replay rather than the private Chat interface.
 
 Users can stop an Agent run. A stopped or failed run preserves the user's question and offers retry only while it remains the latest unanswered question; once the Chat advances, historical retry and branching are unavailable. An incomplete response is not presented as a completed Grounded Answer.
 
@@ -135,7 +133,7 @@ Deleting a Notebook permanently deletes all Sources, pending invitations, member
 ## Scope Guardrails
 
 - This discovery session covers product shape and requirements only.
-- Search must remain visible in the future product scope even though initial Source entry is limited to direct uploads, pasted text, and known public URLs.
+- Search must remain visible in the future product scope even though initial Source entry is limited to direct uploads and known public URLs.
 - Technology, architecture, model, storage, deployment, and implementation choices are deferred to a separate grilling session.
 - Notes and saved chat outputs are excluded from the initial product.
 
@@ -247,11 +245,11 @@ The product baseline is consolidated in [REQUIREMENTS.md](./REQUIREMENTS.md). Re
 13. Initially limited Sources to uploaded PDF, TXT, Markdown, DOCX, and PPTX documents, then reopened URL-based and other external inputs for full product discovery.
 14. Limited each Notebook to 50 Sources.
 15. Limited each Source to 100 MB; no word-count limit is yet confirmed.
-16. Included pasted text, public web pages, public YouTube videos, uploaded audio, and uploaded images in the product Source scope; excluded cloud-drive imports.
+16. Included pasted text, public web pages, public YouTube videos, uploaded audio, and uploaded images in the product Source scope; excluded cloud-drive imports. The pasted-text portion was later superseded by decision 37.
 17. Initially set the Source inputs to document upload, pasted text, and public web pages; this was later superseded by decision 36.
 18. Limited each Source to 100 MB and 500,000 words or equivalent text, whichever limit is reached first.
 19. Limited each user to owning 100 Notebooks while excluding shared non-owned Notebooks from that quota.
-20. Required Chat to answer strictly from selected Notebook Sources and to disclose insufficient evidence rather than use ungrounded knowledge.
+20. Required Chat to answer strictly from selected Notebook Sources and to disclose insufficient evidence rather than use ungrounded knowledge. The zero-support case was later refined by decision 40.
 21. Required inline, passage-level Citations for key claims, with hover previews, source navigation, and a whole-Source fallback for very short material.
 22. Allowed each Member to create multiple independent private Chats within a Notebook.
 23. Added automatic Chat titles, manual renaming, and confirmed permanent deletion; excluded archive, favorite, and restore controls.
@@ -261,10 +259,16 @@ The product baseline is consolidated in [REQUIREMENTS.md](./REQUIREMENTS.md). Re
 27. Limited the initial release to Source management and Grounded Chat while committing to a future Output workspace and reserving its place in the product information architecture.
 28. Prioritized agent execution, grounded retrieval, permissions, and Chat lifecycle without selecting their implementation technologies.
 29. Defined the initial Research Agent as a read-only, multi-step Source research assistant with no Notebook mutation or external tools.
-30. Required high-level stages and an expandable structured Reasoning Trace while excluding a user-facing claim of raw chain-of-thought access.
+30. Required high-level stages and an expandable structured Reasoning Trace while excluding a user-facing claim of raw chain-of-thought access. This was superseded by decision 38.
 31. Limited initial Notebook sharing to Owner-issued email invitations for Viewer or Editor access and excluded public or anonymous links.
 32. Limited each Notebook to one Owner plus 50 additional Members, with pending invitations consuming capacity.
 33. Required immediate permanent deletion of a departing or removed Member's private Chats, with no recovery after rejoining.
 34. Set email invitations to expire after seven days, with Owner revocation and resend controls.
 35. Consolidated the confirmed product boundary, reference-derived defaults, non-goals, and acceptance journeys in `REQUIREMENTS.md`.
 36. Promoted YouTube, audio, and image Sources into the initial release; kept Outputs as committed scope while deferring their concrete roadmap to the technical grilling session.
+37. Removed pasted text from the initial release and uncommitted Source scope because no distinct user value justified maintaining a separate manual evidence-entry path; TXT and Markdown remain the lightweight text inputs.
+38. Removed the user-visible Reasoning Trace and detailed stages from the initial product. Members see only basic Run state, Stop, the final Answer, and Citations; restricted developer Trace and Replay retain observable RAG execution data, while model chain of thought is never captured.
+39. Removed generated Source overviews and suggested Chat questions from the initial release because they add non-essential generated content outside the Answer and Citation loop; both remain uncommitted future ideas.
+40. Allowed a whole-answer model-knowledge fallback only after complete, non-degraded research finds zero support in selected Sources. Partial support never mixes with model knowledge, fallback uses a fresh call without Source passages, carries no Citations, and discloses its basis in the Answer.
+41. Allowed multi-file selection for local uploads while keeping each accepted file an independent Source and processing lifecycle; one invalid or failed item does not roll back the others.
+42. Made the Citation-oriented Source Viewer directly accessible from the Sources list for inspecting ready content and Evidence Coverage, without adding Source summaries or original-file download.

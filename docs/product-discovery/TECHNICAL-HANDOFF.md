@@ -4,7 +4,7 @@ This file preserves implementation concerns raised during product discovery with
 
 ## Agent Run Persistence
 
-Persist the Agent's raw reasoning or run data internally. The exact available data, representation, purpose, access controls, retention, deletion behavior, and relationship to the user-visible Reasoning Trace are intentionally unresolved.
+Persist structured Agent execution observations needed for developer diagnostics, but never request, capture, or retain model chain of thought. Queries, candidate identities and rankings, selection outcomes, verification verdicts, and bounded normalized payloads follow the Durable Agent Trace and audited Replay boundaries and are not Member-facing product data.
 
 The technical implementation must provide a complete Trace chain for Agent execution. This is a mandatory technical constraint, but the meaning of completeness, Trace schema, payload semantics, storage layout, sampling, access, and retention belong to later detailed design rather than the overall architecture decision.
 

@@ -1,0 +1,3 @@
+# Fall back to model knowledge only for zero Source support
+
+A Run with selected Sources may publish a whole Model-Knowledge Answer only after complete, non-degraded retrieval and bounded refinement establish that no selected Evidence supports the question. Fallback performs a fresh model call without Source passages, Evidence content, or Citation handles; its Answer discloses that it is not based on the selected Sources and carries no Citations. Partial support remains strictly grounded and states its gaps, while retrieval failure or degradation, Source deletion, authorization loss, and cancellation never trigger fallback. The Run owns this Grounding Outcome so Assistant Messages do not regain a duplicate `answer_mode`.
