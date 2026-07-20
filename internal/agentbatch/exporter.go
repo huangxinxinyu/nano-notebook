@@ -382,10 +382,7 @@ func (e *Exporter) signal() {
 }
 
 func validateEnvelope(envelope Envelope) (int, error) {
-	if strings.TrimSpace(string(envelope.Trace.TraceID)) == "" || strings.TrimSpace(envelope.Trace.RunID) == "" ||
-		strings.TrimSpace(envelope.Trace.ChatID) == "" || strings.TrimSpace(envelope.Trace.NotebookID) == "" ||
-		strings.TrimSpace(string(envelope.Trace.RootSpanID)) == "" || strings.TrimSpace(envelope.Trace.AgentName) == "" ||
-		envelope.Trace.SchemaVersion < 1 || envelope.Trace.SemanticConventionVersion < 1 {
+	if _, err := collector.CanonicalTraceDescriptor(envelope.Trace); err != nil {
 		return 0, errors.New("Agent Trace envelope descriptor is invalid")
 	}
 	if err := envelope.Record.Validate(); err != nil {

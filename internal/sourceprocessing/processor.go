@@ -22,6 +22,7 @@ var ErrProjectionInvalid = errors.New("Source projection verification failed")
 
 type Config struct {
 	ExtractionConfigID string
+	ExtractorAdapterID string
 	MaxSourceBytes     int64
 	MaxNormalizedRunes int
 }
@@ -73,18 +74,28 @@ type Processor struct {
 	objects    objectReader
 	projection Projection
 	extractor  Extractor
+	traceSink  TraceSink
 	config     Config
 }
 
 func NewProcessor(pool *pgxpool.Pool, queue queue, publisher publisher, objects objectReader, projection Projection, config Config) *Processor {
+	if strings.TrimSpace(config.ExtractorAdapterID) == "" {
+		config.ExtractorAdapterID = "native-in-process"
+	}
 	return NewProcessorWithExtractor(pool, queue, publisher, objects, projection, NewNativeExtractor(nil, NativeExtractorConfig{}), config)
 }
 
 func NewProcessorWithExtractor(pool *pgxpool.Pool, queue queue, publisher publisher, objects objectReader, projection Projection, extractor Extractor, config Config) *Processor {
-	return &Processor{pool: pool, queue: queue, publisher: publisher, objects: objects, projection: projection, extractor: extractor, config: config}
+	return NewProcessorWithExtractorAndTrace(pool, queue, publisher, objects, projection, extractor, nil, config)
 }
 
-func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) error {
+func NewProcessorWithExtractorAndTrace(pool *pgxpool.Pool, queue queue, publisher publisher, objects objectReader, projection Projection, extractor Extractor, traceSink TraceSink, config Config) *Processor {
+	return &Processor{pool: pool, queue: queue, publisher: publisher, objects: objects, projection: projection, extractor: extractor, traceSink: traceSink, config: config}
+}
+
+func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) (resultErr error) {
+	trace := newSourceProcessingTrace(p.traceSink, lease, p.config)
+	defer func() { trace.finish(ctx, resultErr) }()
 	if err := p.validate(lease); err != nil {
 		return err
 	}
@@ -92,19 +103,20 @@ func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) er
 	if err != nil {
 		return err
 	}
+	trace.setFormat(string(item.Format))
 	payload, err := p.objects.Get(ctx, item.OriginalObjectKey, p.config.MaxSourceBytes)
 	if errors.Is(err, objectstore.ErrObjectTooLarge) {
-		return p.fail(ctx, lease, "processing_budget_exceeded")
+		return p.failTraced(ctx, lease, trace, "processing_budget_exceeded")
 	}
 	if errors.Is(err, objectstore.ErrNotFound) {
-		return p.fail(ctx, lease, "source_object_missing")
+		return p.failTraced(ctx, lease, trace, "source_object_missing")
 	}
 	if err != nil {
 		return err
 	}
 	digest := sha256.Sum256(payload)
 	if int64(len(payload)) != item.ByteSize || hex.EncodeToString(digest[:]) != item.ContentSHA256 {
-		return p.fail(ctx, lease, "source_integrity_mismatch")
+		return p.failTraced(ctx, lease, trace, "source_integrity_mismatch")
 	}
 
 	if item.State == source.StateUploaded {
@@ -120,17 +132,20 @@ func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) er
 		item.State = source.StateNormalizing
 	}
 
+	trace.moveStage("source.normalizing")
 	artifact, err := p.extractor.Extract(ctx, item, payload, p.config.ExtractionConfigID)
 	if errors.Is(err, normalize.ErrProcessingBudget) {
-		return p.fail(ctx, lease, "processing_budget_exceeded")
+		return p.failTraced(ctx, lease, trace, "processing_budget_exceeded")
 	}
 	if err != nil || normalize.Validate(artifact) != nil {
-		return p.fail(ctx, lease, "extraction_invalid")
+		return p.failTraced(ctx, lease, trace, "extraction_invalid")
 	}
+	trace.setCoverage(artifact)
 	if artifact.Coverage.TotalRunes > p.config.MaxNormalizedRunes {
-		return p.fail(ctx, lease, "processing_budget_exceeded")
+		return p.failTraced(ctx, lease, trace, "processing_budget_exceeded")
 	}
 	revisionID := stableRevisionID(item.ID, p.config.ExtractionConfigID)
+	trace.moveStage("source.segmenting")
 	if item.State == source.StateNormalizing {
 		if _, _, err := p.publisher.Publish(ctx, evidence.PublishCommand{
 			RevisionID: revisionID, JobID: lease.ID, LeaseToken: lease.LeaseToken, Artifact: artifact,
@@ -140,10 +155,11 @@ func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) er
 		item.State = source.StateSegmenting
 	}
 	command := ProjectionCommand{Lease: lease, RevisionID: revisionID, Artifact: artifact}
+	trace.moveStage("source.indexing")
 	if item.State == source.StateSegmenting {
 		if err := p.projection.Build(ctx, command); err != nil {
 			if errors.Is(err, ErrProjectionInvalid) {
-				return p.fail(ctx, lease, "projection_invalid")
+				return p.failTraced(ctx, lease, trace, "projection_invalid")
 			}
 			return err
 		}
@@ -152,10 +168,11 @@ func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) er
 		}
 		item.State = source.StateIndexing
 	}
+	trace.moveStage("source.verifying")
 	if item.State == source.StateIndexing {
 		if err := p.projection.Verify(ctx, command); err != nil {
 			if errors.Is(err, ErrProjectionInvalid) {
-				return p.fail(ctx, lease, "projection_invalid")
+				return p.failTraced(ctx, lease, trace, "projection_invalid")
 			}
 			return err
 		}
@@ -284,6 +301,11 @@ func (e *NativeExtractor) Extract(ctx context.Context, item source.Source, paylo
 
 func (p *Processor) fail(ctx context.Context, lease sourcejobs.Lease, code string) error {
 	return p.queue.Fail(ctx, lease.ID, lease.LeaseToken, code)
+}
+
+func (p *Processor) failTraced(ctx context.Context, lease sourcejobs.Lease, trace *sourceProcessingTrace, code string) error {
+	trace.markFailure(code)
+	return p.fail(ctx, lease, code)
 }
 
 func stableRevisionID(sourceID, extractionConfigID string) string {

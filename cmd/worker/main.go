@@ -230,15 +230,16 @@ func main() {
 	sourcePurgeProcessor := sourcepurge.NewProcessorWithProjectionPurger(db.Pool(), sourceObjects, qdrant, config.SourcePurgeLease)
 	go func() { sourcePurgeDone <- sourcePurgeProcessor.Run(ctx, config.SourcePurgePoll) }()
 	sourceQueue := sourcejobs.NewQueue(db.Pool(), config.SourceProcessingLease)
-	sourceProcessor := sourceprocessing.NewProcessorWithExtractor(
+	sourceProcessor := sourceprocessing.NewProcessorWithExtractorAndTrace(
 		db.Pool(), sourceQueue, evidence.NewPublisher(db.Pool(), sourceObjects), sourceObjects,
 		sourceprojection.New(db.Pool(), qdrant, modelClient),
 		sourceprocessing.NewNativeExtractor(modelClient, sourceprocessing.NativeExtractorConfig{
 			VisionModel: config.SourceVisionModel, TranscriptionModel: config.SourceTranscriptionModel,
 			VisionPromptVersion: config.SourceVisionPromptVersion,
-		}),
+		}), traceExporter,
 		sourceprocessing.Config{
 			ExtractionConfigID: config.SourceExtractionConfigID,
+			ExtractorAdapterID: "native-in-process",
 			MaxSourceBytes:     config.SourceProcessingMaxBytes, MaxNormalizedRunes: config.SourceProcessingMaxRunes,
 		},
 	)

@@ -62,6 +62,31 @@ func TestExporterCountsInflightRecordsAgainstPendingBound(t *testing.T) {
 	}
 }
 
+func TestExporterAcceptsSourceProcessingWorkloadWithoutRunOrChat(t *testing.T) {
+	sender := &immediateSender{batches: make(chan collector.Batch, 1)}
+	exporter, err := agentbatch.NewExporter(agentbatch.Config{
+		ProducerID: "nano-worker/source", Sender: sender,
+		MaxPendingRecords: 2, MaxPendingBytes: 1 << 20,
+		MaxBatchRecords: 1, MaxBatchBytes: 1 << 20, MaxDelay: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := traceEnvelope("source-record")
+	envelope.Trace.WorkloadKind = collector.WorkloadSourceProcessing
+	envelope.Trace.WorkloadID = "source-job/attempt-1"
+	envelope.Trace.RunID = ""
+	envelope.Trace.ChatID = ""
+	if err := exporter.Offer(context.Background(), envelope); err != nil {
+		t.Fatalf("Offer Source-processing Trace: %v", err)
+	}
+	batch := receiveBatch(t, sender.batches)
+	if batch.Chunks[0].Trace.WorkloadKind != collector.WorkloadSourceProcessing || batch.Chunks[0].Trace.RunID != "" {
+		t.Fatalf("Source-processing Batch=%#v", batch)
+	}
+	shutdownExporter(t, exporter)
+}
+
 func TestExporterRetriesTheSameBatchAfterUncertainTransportFailure(t *testing.T) {
 	sender := &retrySender{batches: make(chan collector.Batch, 2)}
 	exporter, err := agentbatch.NewExporter(agentbatch.Config{

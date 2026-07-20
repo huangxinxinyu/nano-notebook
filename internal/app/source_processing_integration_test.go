@@ -6,10 +6,15 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agentbatch"
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/collector"
 	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/normalize"
@@ -66,6 +71,70 @@ func TestTextSourceProcessorPublishesActiveEvidenceAndReadyAtomically(t *testing
 	}
 	if objects.Len() != 2 {
 		t.Fatalf("object count=%d, want original plus normalized artifact", objects.Len())
+	}
+}
+
+func TestSourceProcessorEmitsSafeWorkloadAndStageTraceMetadata(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "source-processing-trace@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-processing-trace")
+	ownerID := sourceTestUserID(t, api, "source-processing-trace@example.com")
+	payload := []byte("Trace-visible coverage, never Trace-visible body.")
+	objectKey := seedProcessableSource(t, api, ownerID, notebookID, "src_processing_trace", "srcjob_processing_trace", source.FormatTXT, payload)
+	objects := objectstore.NewMemoryStore()
+	if err := objects.Put(context.Background(), objectKey, payload); err != nil {
+		t.Fatal(err)
+	}
+	queue := sourcejobs.NewQueue(api.db.Pool(), time.Minute)
+	lease, ok, err := queue.Claim(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
+	}
+	sink := &recordingSourceTraceSink{err: errors.New("Collector unavailable")}
+	processor := sourceprocessing.NewProcessorWithExtractorAndTrace(
+		api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, newRecordingEvidenceProjection(t, api),
+		sourceprocessing.NewNativeExtractor(nil, sourceprocessing.NativeExtractorConfig{}), sink,
+		sourceprocessing.Config{ExtractionConfigID: "extract-trace-v1", ExtractorAdapterID: "native-in-process", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000},
+	)
+	if err := processor.ProcessLease(context.Background(), lease); err != nil {
+		t.Fatal(err)
+	}
+	envelopes := sink.snapshot()
+	if len(envelopes) != 12 {
+		t.Fatalf("Trace records=%d, want root plus five complete stages: %#v", len(envelopes), envelopes)
+	}
+	descriptor := envelopes[0].Trace
+	if descriptor.WorkloadKind != collector.WorkloadSourceProcessing || descriptor.WorkloadID != "srcjob_processing_trace/attempt-1" ||
+		descriptor.RunID != "" || descriptor.ChatID != "" || descriptor.NotebookID != notebookID {
+		t.Fatalf("Source Trace descriptor=%#v", descriptor)
+	}
+	names := make(map[string]int)
+	for _, envelope := range envelopes {
+		if err := envelope.Record.Validate(); err != nil {
+			t.Fatalf("invalid Source Trace record: %v (%#v)", err, envelope.Record)
+		}
+		names[envelope.Record.Name]++
+		if envelope.Trace != descriptor {
+			t.Fatal("Source Trace descriptor changed within one invocation")
+		}
+	}
+	for _, name := range []string{"source.processing", "source.validating", "source.normalizing", "source.segmenting", "source.indexing", "source.verifying"} {
+		if names[name] != 2 {
+			t.Fatalf("Span %q record count=%d; names=%v", name, names[name], names)
+		}
+	}
+	terminal := envelopes[len(envelopes)-1].Record
+	if terminal.Status != agentobs.StatusOK || traceAttribute(terminal, "source.format") != "txt" ||
+		traceAttribute(terminal, "source.extractor.adapter_id") != "native-in-process" ||
+		traceAttribute(terminal, "source.extraction_config_id") != "extract-trace-v1" ||
+		traceAttribute(terminal, "source.coverage.status") != "complete" || traceAttribute(terminal, "source.coverage.gap_count") != "0" {
+		t.Fatalf("Source Trace terminal=%#v", terminal)
+	}
+	encoded := fmt.Sprintf("%#v", envelopes)
+	for _, forbidden := range []string{string(payload), objectKey, "src_processing_trace.txt"} {
+		if strings.Contains(encoded, forbidden) {
+			t.Fatalf("Source Trace leaked %q", forbidden)
+		}
 	}
 }
 
@@ -392,15 +461,22 @@ func TestSourceProcessorClassifiesExtractorBudgetFailure(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
 	}
-	processor := sourceprocessing.NewProcessorWithExtractor(
+	sink := &recordingSourceTraceSink{}
+	processor := sourceprocessing.NewProcessorWithExtractorAndTrace(
 		api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, &recordingEvidenceProjection{},
-		fixedExtractor{err: normalize.ErrProcessingBudget},
+		fixedExtractor{err: normalize.ErrProcessingBudget}, sink,
 		sourceprocessing.Config{ExtractionConfigID: "extract-budget-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000},
 	)
 	if err := processor.ProcessLease(context.Background(), lease); err != nil {
 		t.Fatal(err)
 	}
 	assertSourceJobState(t, api, "src_processing_budget", "srcjob_processing_budget", source.StateFailed, "failed", "processing_budget_exceeded")
+	envelopes := sink.snapshot()
+	terminal := envelopes[len(envelopes)-1].Record
+	if terminal.Status != agentobs.StatusError || traceAttribute(terminal, "source.failure.code") != "processing_budget_exceeded" ||
+		traceAttribute(terminal, "source.format") != "docx" {
+		t.Fatalf("budget Trace terminal=%#v", terminal)
+	}
 }
 
 func TestTextSourceProcessorResumesFromPublishedEvidenceBoundary(t *testing.T) {
@@ -451,6 +527,42 @@ type recordingEvidenceProjection struct {
 type fixedExtractor struct {
 	artifact normalize.Artifact
 	err      error
+}
+
+type recordingSourceTraceSink struct {
+	mu        sync.Mutex
+	envelopes []agentbatch.Envelope
+	err       error
+}
+
+func (s *recordingSourceTraceSink) Offer(_ context.Context, envelope agentbatch.Envelope) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.envelopes = append(s.envelopes, envelope)
+	return s.err
+}
+
+func (s *recordingSourceTraceSink) snapshot() []agentbatch.Envelope {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]agentbatch.Envelope(nil), s.envelopes...)
+}
+
+func traceAttribute(record agentobs.Record, key string) string {
+	for _, attribute := range record.Attributes {
+		if attribute.Key != key {
+			continue
+		}
+		switch attribute.Value.Kind {
+		case agentobs.ValueString:
+			return attribute.Value.String
+		case agentobs.ValueInt64:
+			return fmt.Sprint(attribute.Value.Int64)
+		case agentobs.ValueBool:
+			return fmt.Sprint(attribute.Value.Bool)
+		}
+	}
+	return ""
 }
 
 type recordingMediaModels struct {
