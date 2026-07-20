@@ -72,7 +72,7 @@ func validateHTMLTree(root *xhtml.Node) error {
 		stack = stack[:last]
 		count++
 		if count > maxHTMLNodes || current.depth > maxHTMLDepth {
-			return errors.New("HTML DOM exceeds processing budget")
+			return fmt.Errorf("%w: HTML DOM", ErrProcessingBudget)
 		}
 		for child := current.node.FirstChild; child != nil; child = child.NextSibling {
 			stack = append(stack, frame{node: child, depth: current.depth + 1})

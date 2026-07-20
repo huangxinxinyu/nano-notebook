@@ -48,7 +48,7 @@ func ImageDimensions(format string, payload []byte) (int, int, error) {
 	}
 	if config.Width < 1 || config.Height < 1 || config.Width > maxImageDimension || config.Height > maxImageDimension ||
 		int64(config.Width)*int64(config.Height) > maxImagePixels {
-		return 0, 0, errors.New("image dimensions exceed processing budget")
+		return 0, 0, fmt.Errorf("%w: image dimensions", ErrProcessingBudget)
 	}
 	return config.Width, config.Height, nil
 }
@@ -59,7 +59,10 @@ func Image(input Input, regions []ImageRegion) (Artifact, error) {
 	input.SourceID = strings.TrimSpace(input.SourceID)
 	input.ExtractionConfigID = strings.TrimSpace(input.ExtractionConfigID)
 	input.Format = strings.TrimSpace(input.Format)
-	if input.SourceID == "" || input.ExtractionConfigID == "" || len(regions) == 0 || len(regions) > 256 {
+	if len(regions) > 256 {
+		return Artifact{}, fmt.Errorf("%w: image Evidence regions", ErrProcessingBudget)
+	}
+	if input.SourceID == "" || input.ExtractionConfigID == "" || len(regions) == 0 {
 		return Artifact{}, errors.New("invalid image normalization input")
 	}
 	width, height, err := ImageDimensions(input.Format, input.Payload)
@@ -101,9 +104,12 @@ func Transcript(input Input, segments []TranscriptSegment) (Artifact, error) {
 	input.SourceID = strings.TrimSpace(input.SourceID)
 	input.ExtractionConfigID = strings.TrimSpace(input.ExtractionConfigID)
 	input.Format = strings.TrimSpace(input.Format)
+	if len(segments) > 10_000 {
+		return Artifact{}, fmt.Errorf("%w: transcript segments", ErrProcessingBudget)
+	}
 	if input.SourceID == "" || input.ExtractionConfigID == "" || len(input.Payload) == 0 ||
 		(input.Format != "mp3" && input.Format != "wav" && input.Format != "m4a" && input.Format != "youtube") ||
-		len(segments) == 0 || len(segments) > 10_000 {
+		len(segments) == 0 {
 		return Artifact{}, errors.New("invalid transcript normalization input")
 	}
 	sourceBlocks := make([]officeBlock, 0, len(segments))

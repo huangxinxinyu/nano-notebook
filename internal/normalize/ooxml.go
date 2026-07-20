@@ -87,7 +87,7 @@ func OOXML(input Input) (Artifact, error) {
 
 func boundedOOXMLParts(files []*zip.File) (map[string]*zip.File, error) {
 	if len(files) == 0 || len(files) > maxOOXMLEntries {
-		return nil, errors.New("OOXML entry count exceeds processing budget")
+		return nil, fmt.Errorf("%w: OOXML entry count", ErrProcessingBudget)
 	}
 	parts := make(map[string]*zip.File, len(files))
 	var expanded uint64
@@ -98,7 +98,7 @@ func boundedOOXMLParts(files []*zip.File) (map[string]*zip.File, error) {
 		}
 		expanded += file.UncompressedSize64
 		if file.UncompressedSize64 > maxOOXMLPartBytes || expanded > maxOOXMLExpandedBytes {
-			return nil, errors.New("OOXML expansion exceeds processing budget")
+			return nil, fmt.Errorf("%w: OOXML expansion", ErrProcessingBudget)
 		}
 		if _, duplicate := parts[file.Name]; duplicate {
 			return nil, errors.New("OOXML package contains duplicate parts")
@@ -119,7 +119,7 @@ func readOOXMLPart(file *zip.File) ([]byte, error) {
 		return nil, err
 	}
 	if len(payload) > maxOOXMLPartBytes {
-		return nil, errors.New("OOXML part exceeds processing budget")
+		return nil, fmt.Errorf("%w: OOXML part", ErrProcessingBudget)
 	}
 	return payload, nil
 }
@@ -253,8 +253,11 @@ func parsePPTX(parts map[string]*zip.File) ([]officeBlock, error) {
 		}
 		slides = append(slides, slidePart{number: number, file: file})
 	}
-	if len(slides) == 0 || len(slides) > maxOOXMLSlides {
+	if len(slides) == 0 {
 		return nil, errors.New("PPTX slide count is outside supported range")
+	}
+	if len(slides) > maxOOXMLSlides {
+		return nil, fmt.Errorf("%w: PPTX slide count", ErrProcessingBudget)
 	}
 	sort.Slice(slides, func(left, right int) bool { return slides[left].number < slides[right].number })
 	blocks := make([]officeBlock, 0)

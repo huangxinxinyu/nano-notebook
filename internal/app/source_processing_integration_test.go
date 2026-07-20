@@ -376,6 +376,33 @@ func TestTextSourceProcessorTerminallyFailsIntegrityMismatch(t *testing.T) {
 	assertSourceJobState(t, api, "src_processing_bad", "srcjob_processing_bad", source.StateFailed, "failed", "source_integrity_mismatch")
 }
 
+func TestSourceProcessorClassifiesExtractorBudgetFailure(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "source-processing-budget@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-processing-budget")
+	ownerID := sourceTestUserID(t, api, "source-processing-budget@example.com")
+	payload := []byte("oversized expanded structure")
+	objectKey := seedProcessableSource(t, api, ownerID, notebookID, "src_processing_budget", "srcjob_processing_budget", source.FormatDOCX, payload)
+	objects := objectstore.NewMemoryStore()
+	if err := objects.Put(context.Background(), objectKey, payload); err != nil {
+		t.Fatal(err)
+	}
+	queue := sourcejobs.NewQueue(api.db.Pool(), time.Minute)
+	lease, ok, err := queue.Claim(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
+	}
+	processor := sourceprocessing.NewProcessorWithExtractor(
+		api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, &recordingEvidenceProjection{},
+		fixedExtractor{err: normalize.ErrProcessingBudget},
+		sourceprocessing.Config{ExtractionConfigID: "extract-budget-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000},
+	)
+	if err := processor.ProcessLease(context.Background(), lease); err != nil {
+		t.Fatal(err)
+	}
+	assertSourceJobState(t, api, "src_processing_budget", "srcjob_processing_budget", source.StateFailed, "failed", "processing_budget_exceeded")
+}
+
 func TestTextSourceProcessorResumesFromPublishedEvidenceBoundary(t *testing.T) {
 	api := newTestAPI(t)
 	owner := api.register(t, "source-processing-resume@example.com")
@@ -423,6 +450,7 @@ type recordingEvidenceProjection struct {
 
 type fixedExtractor struct {
 	artifact normalize.Artifact
+	err      error
 }
 
 type recordingMediaModels struct {
@@ -448,7 +476,7 @@ func mustDecodeBase64(value string) []byte {
 }
 
 func (f fixedExtractor) Extract(_ context.Context, _ source.Source, _ []byte, _ string) (normalize.Artifact, error) {
-	return f.artifact, nil
+	return f.artifact, f.err
 }
 
 func processingGapArtifact(t *testing.T, sourceID string) normalize.Artifact {

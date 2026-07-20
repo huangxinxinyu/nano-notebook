@@ -3,6 +3,7 @@ package normalize_test
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -90,18 +91,25 @@ func TestOOXMLAdapterEnforcesEntryAndExpansionBudgets(t *testing.T) {
 		manyParts[fmt.Sprintf("custom/item-%05d.xml", index)] = "x"
 	}
 	oversized := strings.Repeat("x", (16<<20)+1)
-	for name, payload := range map[string][]byte{
-		"entry count": ooxmlFixture(manyParts),
-		"part size": ooxmlFixture(map[string]string{
+	for name, test := range map[string]struct {
+		payload []byte
+		budget  bool
+	}{
+		"entry count": {payload: ooxmlFixture(manyParts), budget: true},
+		"part size": {payload: ooxmlFixture(map[string]string{
 			"[Content_Types].xml": `<Types><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`,
 			"word/document.xml":   oversized,
-		}),
-		"unsafe path": ooxmlFixture(map[string]string{"../word/document.xml": "x"}),
+		}), budget: true},
+		"unsafe path": {payload: ooxmlFixture(map[string]string{"../word/document.xml": "x"})},
 	} {
-		if _, err := normalize.OOXML(normalize.Input{
-			SourceID: "src_budget", ExtractionConfigID: "extract-ooxml-native-v1", Format: "docx", Payload: payload,
-		}); err == nil {
+		_, err := normalize.OOXML(normalize.Input{
+			SourceID: "src_budget", ExtractionConfigID: "extract-ooxml-native-v1", Format: "docx", Payload: test.payload,
+		})
+		if err == nil {
 			t.Fatalf("OOXML accepted %s violation", name)
+		}
+		if errors.Is(err, normalize.ErrProcessingBudget) != test.budget {
+			t.Fatalf("OOXML %s budget classification=%v err=%v", name, test.budget, err)
 		}
 	}
 }

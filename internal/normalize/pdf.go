@@ -35,8 +35,11 @@ func PDF(input Input) (Artifact, error) {
 		return Artifact{}, fmt.Errorf("open PDF: %w", err)
 	}
 	pageCount := reader.NumPage()
-	if pageCount < 1 || pageCount > maxNativePDFPages {
+	if pageCount < 1 {
 		return Artifact{}, fmt.Errorf("PDF page count %d is outside supported range", pageCount)
+	}
+	if pageCount > maxNativePDFPages {
+		return Artifact{}, fmt.Errorf("%w: PDF page count %d", ErrProcessingBudget, pageCount)
 	}
 
 	var text strings.Builder

@@ -2,6 +2,7 @@ package normalize_test
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 
@@ -71,5 +72,13 @@ func TestHTMLAdapterRejectsInvalidIdentityEncodingEmptyAndExcessiveDOM(t *testin
 		if _, err := normalize.HTML(input); err == nil {
 			t.Fatalf("HTML accepted invalid %s input", input.SourceID)
 		}
+	}
+}
+
+func TestHTMLAdapterClassifiesDOMBudgetSeparatelyFromMalformedContent(t *testing.T) {
+	payload := append([]byte("<html><body><main>"), bytes.Repeat([]byte("<span>x</span>"), 100_001)...)
+	_, err := normalize.HTML(normalize.Input{SourceID: "budget", ExtractionConfigID: "html-v1", Format: "html", Payload: payload})
+	if !errors.Is(err, normalize.ErrProcessingBudget) {
+		t.Fatalf("HTML budget error=%v", err)
 	}
 }

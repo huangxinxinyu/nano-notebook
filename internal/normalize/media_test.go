@@ -3,6 +3,7 @@ package normalize_test
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -89,6 +90,19 @@ func TestMediaAdaptersRejectOutOfBoundsRegionsAndInvalidIntervals(t *testing.T) 
 		{StartMS: 0, EndMS: 2000, Text: "first"}, {StartMS: 1500, EndMS: 3000, Text: "overlap"},
 	}); err == nil {
 		t.Fatal("Transcript accepted overlapping intervals")
+	}
+}
+
+func TestMediaAdaptersClassifyProviderOutputBudgets(t *testing.T) {
+	regions := make([]normalize.ImageRegion, 257)
+	_, err := normalize.Image(normalize.Input{SourceID: "image", ExtractionConfigID: "vision-v1", Format: "png", Payload: encodedPNG(t, 1, 1)}, regions)
+	if !errors.Is(err, normalize.ErrProcessingBudget) {
+		t.Fatalf("image region budget error=%v", err)
+	}
+	segments := make([]normalize.TranscriptSegment, 10_001)
+	_, err = normalize.Transcript(normalize.Input{SourceID: "audio", ExtractionConfigID: "audio-v1", Format: "wav", Payload: []byte("audio")}, segments)
+	if !errors.Is(err, normalize.ErrProcessingBudget) {
+		t.Fatalf("transcript budget error=%v", err)
 	}
 }
 

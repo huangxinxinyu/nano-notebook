@@ -121,6 +121,9 @@ func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) er
 	}
 
 	artifact, err := p.extractor.Extract(ctx, item, payload, p.config.ExtractionConfigID)
+	if errors.Is(err, normalize.ErrProcessingBudget) {
+		return p.fail(ctx, lease, "processing_budget_exceeded")
+	}
 	if err != nil || normalize.Validate(artifact) != nil {
 		return p.fail(ctx, lease, "extraction_invalid")
 	}
