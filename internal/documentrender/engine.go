@@ -95,7 +95,8 @@ func (e *Engine) Render(ctx context.Context, request Request, payload []byte) (R
 		return Result{}, ErrRequestInvalid
 	}
 	scale := strconv.FormatFloat(float64(request.DPI)/72, 'f', -1, 64)
-	if err := e.config.Runner.Run(renderContext, directory, e.config.PDFiumBinary, "--png", "--scale="+scale, pdfPath); err != nil {
+	maxPixels := strconv.FormatInt(request.MaxPixelsPerPage, 10)
+	if err := e.config.Runner.Run(renderContext, directory, e.config.PDFiumBinary, "--png", "--scale="+scale, "--max-pixels="+maxPixels, pdfPath); err != nil {
 		return Result{}, errors.New("PDF rasterization failed")
 	}
 	return e.collect(request, pdfPath, pageCount)

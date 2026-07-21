@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+docker compose -f infra/compose/compose.yaml build document-renderer
+docker compose -f infra/compose/compose.yaml up -d --wait document-renderer
+NANO_TEST_DOCUMENT_RENDERER_URL=http://127.0.0.1:8084 \
+  go test ./internal/documentrender -run TestContainerRendersFrozenPDFAndPPTXThroughHTTPContract -count=1

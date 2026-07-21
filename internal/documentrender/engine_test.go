@@ -39,7 +39,7 @@ func TestEngineInvokesPinnedPDFiumWithoutShellAndReturnsOrderedPages(t *testing.
 	pageOne := encodedPage(t, 612, 792)
 	pageTwo := encodedPage(t, 300, 400)
 	runner := &fakeCommandRunner{run: func(_ context.Context, dir, name string, args ...string) error {
-		if name != "/opt/pdfium/pdfium_test" || len(args) != 3 || args[0] != "--png" || args[1] != "--scale=2" || args[2] != filepath.Join(dir, "input.pdf") {
+		if name != "/opt/pdfium/pdfium_test" || len(args) != 4 || args[0] != "--png" || args[1] != "--scale=2" || args[2] != "--max-pixels=2000000" || args[3] != filepath.Join(dir, "input.pdf") {
 			return fmt.Errorf("unexpected command %q %q", name, args)
 		}
 		if err := os.WriteFile(filepath.Join(dir, "input.pdf.1.png"), pageTwo, 0o600); err != nil {
@@ -61,6 +61,25 @@ func TestEngineInvokesPinnedPDFiumWithoutShellAndReturnsOrderedPages(t *testing.
 	if len(runner.calls) != 1 || len(result.Assets) != 2 || result.Assets[0].Page.Filename != "page-000001.png" ||
 		result.Assets[1].Page.Filename != "page-000002.png" || !bytes.Equal(result.Assets[0].Payload, pageOne) || !bytes.Equal(result.Assets[1].Payload, pageTwo) {
 		t.Fatalf("calls=%+v result=%+v", runner.calls, result)
+	}
+}
+
+func TestEngineRejectsEncryptedOrMalformedPDFBeforeExecutingPDFium(t *testing.T) {
+	payload := rendererPDF("secret")
+	payload = bytes.Replace(payload, []byte("/Root 1 0 R"), []byte("/Root 1 0 R /Encrypt 3 0 R"), 1)
+	runner := &fakeCommandRunner{}
+	engine, err := documentrender.NewEngine(documentrender.EngineConfig{
+		RenderConfigID: "pdfium-v1", PDFiumBinary: "pdfium_render", LibreOfficeBinary: "soffice", ScratchRoot: t.TempDir(),
+		MaxRuntime: time.Second, MaxConvertedPDFBytes: 8 << 20, Runner: runner,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Render(context.Background(), renderRequest(payload, documentrender.FormatPDF, "pdfium-v1", 1), payload); err == nil {
+		t.Fatal("accepted encrypted or malformed PDF")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("executed PDFium before encrypted PDF rejection: %+v", runner.calls)
 	}
 }
 
