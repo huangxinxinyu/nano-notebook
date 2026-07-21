@@ -109,6 +109,13 @@ const strings = {
     acceptInvitation: "Accept invitation",
     invitationUnavailable: "This invitation is unavailable or has expired.",
     invitedAs: "Invited as",
+    removeMember: "Remove",
+    transferOwner: "Transfer ownership",
+    revokeInvitation: "Revoke",
+    resendInvitation: "Resend",
+    notebookSettings: "Notebook settings",
+    deleteNotebook: "Delete notebook permanently",
+    deleteNotebookConfirm: "Permanently delete this shared Notebook?",
     delete: "Delete",
     comingSoon: "This feature is coming soon.",
     featuredComingSoon: "Featured notebooks are coming soon.",
@@ -266,6 +273,13 @@ const strings = {
     acceptInvitation: "接受邀请",
     invitationUnavailable: "此邀请不可用或已过期。",
     invitedAs: "受邀角色",
+    removeMember: "移除",
+    transferOwner: "转让所有权",
+    revokeInvitation: "撤销",
+    resendInvitation: "重新发送",
+    notebookSettings: "笔记本设置",
+    deleteNotebook: "永久删除笔记本",
+    deleteNotebookConfirm: "确定永久删除这个共享笔记本吗？",
     delete: "删除",
     comingSoon: "该功能即将推出",
     featuredComingSoon: "精选笔记本功能即将推出",
@@ -734,7 +748,7 @@ function Workspace({ t, user, notebookID, onLocale, onLibrary, onOpen, onSignedO
   );
 
   const shareAction = notebook.data?.role === "owner" || !notebook.data?.role ? (
-    <ManageAccess notebookID={notebookID} t={t} />
+    <ManageAccess notebookID={notebookID} t={t} onAuthorityChanged={() => void notebook.refetch()} />
   ) : (
     <Button className="workspace-header-pill secondary-workspace-action" variant="outline" onClick={async () => {
       if (!window.confirm(t.leaveNotebook)) return;
@@ -742,6 +756,9 @@ function Workspace({ t, user, notebookID, onLocale, onLibrary, onOpen, onSignedO
       if (response.ok) onLibrary(); else toast.error(t.safeNotFound);
     }}><MaterialSymbol name="logout" size={19} />{t.leaveNotebook}</Button>
   );
+  const settingsAction = notebook.data?.role === "owner" || !notebook.data?.role ? (
+    <NotebookSettings notebookID={notebookID} title={notebook.data?.title ?? ""} t={t} onRenamed={() => void notebook.refetch()} onDeleted={onLibrary} />
+  ) : undefined;
 
   const workspaceCopy = {
     panelsLabel: t.notebookPanelsLabel,
@@ -830,7 +847,7 @@ function Workspace({ t, user, notebookID, onLocale, onLibrary, onOpen, onSignedO
       {notebook.isError ? <div className="workspace-system-state"><Button variant="ghost" onClick={onLibrary}><MaterialSymbol name="arrow_back" size={20} />{t.back}</Button><RetryableAlert message={notebook.error.message} retryLabel={t.retry} onRetry={() => void notebook.refetch()} /></div> : null}
       {notebook.data ? (
         <>
-          <WorkspaceHeader title={notebook.data.title} backLabel={t.back} createAction={createAction} analyzeLabel={t.analyze} shareLabel={t.share} shareAction={shareAction} settingsLabel={t.settings} appsLabel={t.apps} email={user.email} openUserMenuLabel={t.openUserMenu} languageLabel={t.languageSwitch} signOutLabel={t.signOut} signingOutLabel={t.signingOut} signingOut={signingOut} comingSoonMessage={t.comingSoon} onBack={onLibrary} onLanguage={onLocale} onSignOut={() => void signOut()} />
+          <WorkspaceHeader title={notebook.data.title} backLabel={t.back} createAction={createAction} analyzeLabel={t.analyze} shareLabel={t.share} shareAction={shareAction} settingsLabel={t.settings} settingsAction={settingsAction} appsLabel={t.apps} email={user.email} openUserMenuLabel={t.openUserMenu} languageLabel={t.languageSwitch} signOutLabel={t.signOut} signingOutLabel={t.signingOut} signingOut={signingOut} comingSoonMessage={t.comingSoon} onBack={onLibrary} onLanguage={onLocale} onSignOut={() => void signOut()} />
           <NotebookWorkspace notebookID={notebookID} copy={workspaceCopy} canMaintainSources={notebook.data.role !== "viewer"} />
         </>
       ) : null}
@@ -840,6 +857,34 @@ function Workspace({ t, user, notebookID, onLocale, onLibrary, onOpen, onSignedO
 
 type AccessMember = { user_id: string; display_email: string; role: "viewer" | "editor" | "owner" };
 type AccessInvitation = { id: string; display_email: string; role: "viewer" | "editor"; state: string };
+
+function NotebookSettings({ notebookID, title, t, onRenamed, onDeleted }: { notebookID: string; title: string; t: typeof strings.en; onRenamed: () => void; onDeleted: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [nextTitle, setNextTitle] = useState(title);
+  async function rename() {
+    const response = await api(`/api/v1/notebooks/${notebookID}`, { method: "PATCH", headers: { "X-CSRF-Token": csrfToken() }, body: JSON.stringify({ title: nextTitle.trim() }) });
+    if (!response.ok) return toast.error(t.safeNotFound);
+    setOpen(false);
+    onRenamed();
+  }
+  async function remove() {
+    if (!window.confirm(t.deleteNotebookConfirm)) return;
+    const locale = document.documentElement.lang === "zh-CN" ? "zh-CN" : "en";
+    const response = await api(`/api/v1/notebooks/${notebookID}?locale=${locale}`, { method: "DELETE", headers: { "X-CSRF-Token": csrfToken() } });
+    if (!response.ok) return toast.error(t.safeNotFound);
+    onDeleted();
+  }
+  return <Dialog open={open} onOpenChange={setOpen}>
+    <DialogTrigger asChild><Button className="workspace-header-pill secondary-workspace-action" variant="outline"><MaterialSymbol name="settings" size={19} />{t.settings}</Button></DialogTrigger>
+    <DialogContent className="dialog" closeLabel={t.close}>
+      <DialogTitle>{t.notebookSettings}</DialogTitle>
+      <Label htmlFor="rename-notebook">{t.titleLabel}</Label>
+      <Input id="rename-notebook" value={nextTitle} onChange={(event) => setNextTitle(event.target.value)} />
+      <div className="dialog-actions"><Button disabled={!nextTitle.trim()} onClick={() => void rename()}>{t.save}</Button></div>
+      <Button variant="destructive" onClick={() => void remove()}>{t.deleteNotebook}</Button>
+    </DialogContent>
+  </Dialog>;
+}
 
 function InvitationAcceptance({ t, onAccepted }: { t: typeof strings.en; onAccepted: (notebookID: string) => void }) {
   const token = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("token") ?? "";
@@ -875,7 +920,7 @@ function InvitationAcceptance({ t, onAccepted }: { t: typeof strings.en; onAccep
   );
 }
 
-function ManageAccess({ notebookID, t }: { notebookID: string; t: typeof strings.en }) {
+function ManageAccess({ notebookID, t, onAuthorityChanged }: { notebookID: string; t: typeof strings.en; onAuthorityChanged: () => void }) {
   const [open, setOpen] = useState(false);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<"viewer" | "editor">("viewer");
@@ -910,6 +955,20 @@ function ManageAccess({ notebookID, t }: { notebookID: string; t: typeof strings
     await access.refetch();
   }
 
+  async function command(path: string, method: "POST" | "PATCH" | "DELETE", body?: unknown) {
+    const response = await api(path, {
+      method,
+      headers: { "X-CSRF-Token": csrfToken() },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    if (!response.ok) {
+      toast.error(t.safeNotFound);
+      return;
+    }
+    await access.refetch();
+    onAuthorityChanged();
+  }
+
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild><Button className="workspace-header-pill secondary-workspace-action" variant="outline"><MaterialSymbol name="share" size={19} />{t.manageAccess}</Button></DialogTrigger>
@@ -924,9 +983,22 @@ function ManageAccess({ notebookID, t }: { notebookID: string; t: typeof strings
           <Button disabled={!email.trim()} onClick={() => void invite()}>{t.invite}</Button>
         </div>
         <h3>{t.members}</h3>
-        <div>{access.data?.members.map((member) => <p key={member.user_id}>{member.display_email} · {member.role}</p>)}</div>
+        <div>{access.data?.members.map((member) => <div className="dialog-actions" key={member.user_id}>
+          <span>{member.display_email}</span>
+          {member.role === "owner" ? <strong>{t.owner}</strong> : <>
+            <select aria-label={`${t.role} ${member.display_email}`} value={member.role} onChange={(event) => void command(`/api/v1/notebooks/${notebookID}/members/${member.user_id}`, "PATCH", { role: event.target.value })}>
+              <option value="viewer">{t.viewer}</option><option value="editor">{t.editor}</option>
+            </select>
+            <Button variant="outline" onClick={() => void command(`/api/v1/notebooks/${notebookID}/members/${member.user_id}`, "DELETE")}>{t.removeMember}</Button>
+            <Button variant="outline" onClick={() => void command(`/api/v1/notebooks/${notebookID}/members/${member.user_id}/transfer`, "POST")}>{t.transferOwner}</Button>
+          </>}
+        </div>)}</div>
         <h3>{t.pendingInvitations}</h3>
-        <div>{access.data?.invitations.filter((invitation) => invitation.state === "pending").map((invitation) => <p key={invitation.id}>{invitation.display_email} · {invitation.role}</p>)}</div>
+        <div>{access.data?.invitations.filter((invitation) => invitation.state !== "accepted").map((invitation) => <div className="dialog-actions" key={invitation.id}>
+          <span>{invitation.display_email} · {invitation.role} · {invitation.state}</span>
+          {invitation.state === "pending" ? <Button variant="outline" onClick={() => void command(`/api/v1/notebooks/${notebookID}/invitations/${invitation.id}`, "DELETE")}>{t.revokeInvitation}</Button> : null}
+          {invitation.state === "expired" ? <Button variant="outline" onClick={() => void command(`/api/v1/notebooks/${notebookID}/invitations/${invitation.id}/resend`, "POST", { locale: document.documentElement.lang === "zh-CN" ? "zh-CN" : "en" })}>{t.resendInvitation}</Button> : null}
+        </div>)}</div>
       </DialogContent>
     </Dialog>
   );
