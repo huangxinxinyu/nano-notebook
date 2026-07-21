@@ -361,6 +361,38 @@ func TestOwnerRevokesAndResendsExpiredInvitationWithRotatedToken(t *testing.T) {
 	}
 }
 
+func TestInvitationRecipientCannotRewritePendingAuthority(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "invite-rls-owner@example.com")
+	api.register(t, "invite-rls-viewer@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "invite-rls")
+	ownerID := sourceTestUserID(t, api, "invite-rls-owner@example.com")
+	viewerID := sourceTestUserID(t, api, "invite-rls-viewer@example.com")
+	now := time.Now().UTC()
+	if err := api.db.WithRequestPrincipal(context.Background(), ownerID, func(tx pgx.Tx) error {
+		_, _, err := notebook.NewStore(tx).CreateInvitation(context.Background(), notebook.CreateInvitationCommand{
+			ID: "inv_rls", NotebookID: notebookID, InvitedByUserID: ownerID,
+			CanonicalEmail: "invite-rls-viewer@example.com", DisplayEmail: "invite-rls-viewer@example.com", Role: "viewer",
+			TokenHash: strings.Repeat("a", 64), IdempotencyKey: "invite-rls", RequestHash: strings.Repeat("b", 64),
+			MailMessageID: "mail_inv_rls", MailLocale: "en", RawToken: "rls-token", Now: now, ExpiresAt: now.Add(7 * 24 * time.Hour),
+		})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = api.db.WithRequestPrincipal(context.Background(), viewerID, func(tx pgx.Tx) error {
+		_, err := tx.Exec(context.Background(), `update notebook_invitations set role='editor' where id='inv_rls'`)
+		return err
+	})
+	var role string
+	if err := api.db.Pool().QueryRow(context.Background(), `select role from notebook_invitations where id='inv_rls'`).Scan(&role); err != nil {
+		t.Fatal(err)
+	}
+	if role != "viewer" {
+		t.Fatalf("recipient rewrote pending Invitation role to %q", role)
+	}
+}
+
 func TestInvitationHTTPJourneyCreatesMailAndAcceptsMatchingUser(t *testing.T) {
 	api := newTestAPI(t)
 	owner, ownerCSRF := api.registerWithCSRF(t, "http-invite-owner@example.com")

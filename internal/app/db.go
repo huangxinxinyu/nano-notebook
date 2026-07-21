@@ -1624,22 +1624,25 @@ create policy notebook_invitations_owner_insert on notebook_invitations
 	));
 
 drop policy if exists notebook_invitations_participant_update on notebook_invitations;
-create policy notebook_invitations_participant_update on notebook_invitations
+drop policy if exists notebook_invitations_owner_update on notebook_invitations;
+create policy notebook_invitations_owner_update on notebook_invitations
+	for update to nano_app
+	using (nano_has_notebook_capability(notebook_id, 'notebook.manage'))
+	with check (nano_has_notebook_capability(notebook_id, 'notebook.manage'));
+
+drop policy if exists notebook_invitations_recipient_accept on notebook_invitations;
+create policy notebook_invitations_recipient_accept on notebook_invitations
 	for update to nano_app
 	using (
-		exists (
-			select 1 from notebook_memberships m
-			where m.notebook_id = notebook_invitations.notebook_id
-			  and m.user_id = nullif(current_setting('app.principal_id', true), '')
-			  and m.role = 'owner'
-		)
-		or exists (
-			select 1 from identity_users u
-			where u.id = nullif(current_setting('app.principal_id', true), '')
-			  and u.canonical_email = notebook_invitations.canonical_email
+		state='pending' and expires_at > now() and exists (
+			select 1 from identity_users u where u.id=nullif(current_setting('app.principal_id', true), '')
+			  and u.canonical_email=notebook_invitations.canonical_email
 		)
 	)
-	with check (true);
+	with check (
+		state='accepted' and accepted_by_user_id=nullif(current_setting('app.principal_id', true), '')
+		and accepted_at is not null and revoked_at is null
+	);
 
 drop policy if exists notebook_notebooks_owner on notebook_notebooks;
 drop policy if exists notebook_notebooks_read on notebook_notebooks;
