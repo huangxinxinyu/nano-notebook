@@ -43,7 +43,7 @@ func run(args []string, output io.Writer) error {
 	bifrostURL := flags.String("bifrost-url", "http://127.0.0.1:56666", "Bifrost model gateway URL for live product Eval")
 	qdrantURL := flags.String("qdrant-url", "http://127.0.0.1:56333", "Qdrant URL for live product Eval")
 	qdrantAPIKey := flags.String("qdrant-api-key", os.Getenv("NANO_QDRANT_API_KEY"), "Qdrant API key for live product Eval")
-	qdrantCollection := flags.String("qdrant-collection", "nano-source-evidence", "Qdrant collection for live product Eval")
+	qdrantCollection := flags.String("qdrant-collection", "nano-source-evidence-gemini-2-768-v1", "Qdrant collection for live product Eval")
 	databaseURL := flags.String("database-url", "", "PostgreSQL URL used to record and promote a passing candidate")
 	evalRunID := flags.String("eval-run-id", "", "durable Eval Run identity")
 	versionID := flags.String("index-version-id", "", "candidate Retrieval Index Version identity")

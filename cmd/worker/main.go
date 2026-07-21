@@ -424,7 +424,7 @@ func loadWorkerConfig() (workerConfig, error) {
 	if err != nil {
 		return workerConfig{}, err
 	}
-	qdrantDenseDimensions, err := workerEnvInt("NANO_QDRANT_DENSE_DIMENSIONS", 1024)
+	qdrantDenseDimensions, err := workerEnvInt("NANO_QDRANT_DENSE_DIMENSIONS", 768)
 	if err != nil {
 		return workerConfig{}, err
 	}
@@ -500,7 +500,7 @@ func loadWorkerConfig() (workerConfig, error) {
 		SourcePurgeLease: sourcePurgeLease, SourcePurgePoll: sourcePurgePoll,
 		QdrantURL:             env("NANO_QDRANT_URL", "http://127.0.0.1:56333"),
 		QdrantAPIKey:          strings.TrimSpace(os.Getenv("NANO_QDRANT_API_KEY")),
-		QdrantCollection:      env("NANO_QDRANT_COLLECTION", "nano-source-evidence"),
+		QdrantCollection:      env("NANO_QDRANT_COLLECTION", "nano-source-evidence-gemini-2-768-v1"),
 		QdrantDenseDimensions: qdrantDenseDimensions,
 		SourceProcessingLease: sourceProcessingLease, SourceProcessingHeartbeat: sourceProcessingHeartbeat,
 		SourceProcessingPoll: sourceProcessingPoll, SourceExtractionConfigID: env("NANO_SOURCE_EXTRACTION_CONFIG_ID", "extract-text-v1"),

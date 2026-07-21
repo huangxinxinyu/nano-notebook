@@ -177,7 +177,7 @@ type PinnedConfig struct {
 func (c PinnedConfig) Validate() error {
 	if strings.TrimSpace(c.ExtractionConfigID) == "" || c.EvidenceSchemaVersion < 1 || strings.TrimSpace(c.Index.AnalyzerID) == "" ||
 		c.Index.Chunk.MaxRunes <= 0 || c.Index.DenseCandidates <= 0 || c.Index.SparseCandidates <= 0 || c.Index.RRFK <= 0 || c.Index.RerankCandidates <= 0 ||
-		strings.TrimSpace(c.Index.EmbeddingModel) == "" || c.Index.EmbeddingDimensions <= 0 || strings.TrimSpace(c.Index.RerankerID) == "" ||
+		strings.TrimSpace(c.Index.EmbeddingModel) == "" || c.Index.EmbeddingDimensions <= 0 || !retrieval.IsEmbeddingProfileID(c.Index.EmbeddingProfileID) || strings.TrimSpace(c.Index.RerankerID) == "" ||
 		strings.TrimSpace(c.ComposerModel) == "" || strings.TrimSpace(c.VerifierModel) == "" || strings.TrimSpace(c.VerifierPromptVersion) == "" || strings.TrimSpace(c.PromptVersion) == "" || strings.TrimSpace(c.AgentConfigID) == "" {
 		return ErrConfigInvalid
 	}

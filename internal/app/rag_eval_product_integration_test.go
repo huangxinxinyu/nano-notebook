@@ -25,7 +25,7 @@ func TestProductRunExecutorDerivesObservationFromDurableProductFacts(t *testing.
 	ownerID := sourceTestUserID(t, api, "rag-product-observer@example.com")
 	config := retrieval.IndexConfig{
 		Chunk: retrieval.ChunkConfig{MaxRunes: 64, OverlapRunes: 8, PreserveHeadingContext: true}, AnalyzerID: "nano-mixed-v1",
-		BM25K1: 1.2, BM25B: .75, BM25AverageDocumentLength: 24, EmbeddingModel: "embed-eval", EmbeddingDimensions: 3,
+		BM25K1: 1.2, BM25B: .75, BM25AverageDocumentLength: 24, EmbeddingModel: "embed-eval", EmbeddingDimensions: 3, EmbeddingProfileID: retrieval.EmbeddingProfileGeminiRetrievalV1,
 		DenseCandidates: 8, SparseCandidates: 8, RRFK: 60, RerankerID: "rerank-eval", RerankCandidates: 8, DegradationPolicyID: "strict-v1",
 	}
 	version, err := retrieval.NewVersionStore(api.db.Pool()).CreateCandidate(ctx, "riv_product_observer", config)
@@ -98,7 +98,7 @@ func TestLiveProductExecutorRunsCandidateThroughProductionAgentAndCitations(t *t
 	ownerID := sourceTestUserID(t, api, "rag-live-product@example.com")
 	config := retrieval.IndexConfig{
 		Chunk: retrieval.ChunkConfig{MaxRunes: 64, OverlapRunes: 8, PreserveHeadingContext: true}, AnalyzerID: "nano-mixed-v1",
-		BM25K1: 1.2, BM25B: .75, BM25AverageDocumentLength: 24, EmbeddingModel: "embed-live", EmbeddingDimensions: 3,
+		BM25K1: 1.2, BM25B: .75, BM25AverageDocumentLength: 24, EmbeddingModel: "embed-live", EmbeddingDimensions: 3, EmbeddingProfileID: retrieval.EmbeddingProfileGeminiRetrievalV1,
 		DenseCandidates: 8, SparseCandidates: 8, RRFK: 60, RerankerID: "rerank-live", RerankCandidates: 8, DegradationPolicyID: "strict-v1",
 	}
 	version, err := retrieval.NewVersionStore(api.db.Pool()).CreateCandidate(ctx, "riv_live_product", config)

@@ -3,9 +3,33 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 )
+
+func TestLoadWorkerConfigDefaultsToGeminiEmbeddingCollection(t *testing.T) {
+	for _, name := range []string{"NANO_QDRANT_COLLECTION", "NANO_QDRANT_DENSE_DIMENSIONS"} {
+		value, existed := os.LookupEnv(name)
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if existed {
+				_ = os.Setenv(name, value)
+			} else {
+				_ = os.Unsetenv(name)
+			}
+		})
+	}
+	config, err := loadWorkerConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.QdrantCollection != "nano-source-evidence-gemini-2-768-v1" || config.QdrantDenseDimensions != 768 {
+		t.Fatalf("Qdrant embedding defaults=%q/%d", config.QdrantCollection, config.QdrantDenseDimensions)
+	}
+}
 
 func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 	t.Setenv("NANO_DATABASE_URL", "postgres://application")

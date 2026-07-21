@@ -15,6 +15,12 @@ func TestRunEvaluatesFrozenSuiteFromProductObservations(t *testing.T) {
 	configPath := filepath.Join("..", "..", "evals", "rag", "pinned-config-v1.json")
 	var suite rageval.Suite
 	decodeTestJSON(t, suitePath, &suite)
+	var config rageval.PinnedConfig
+	decodeTestJSON(t, configPath, &config)
+	if config.Index.EmbeddingModel != "gemini/gemini-embedding-2" || config.Index.EmbeddingDimensions != 768 ||
+		config.Index.EmbeddingProfileID != "gemini-retrieval-v1" {
+		t.Fatalf("pinned embedding config=%+v", config.Index)
+	}
 	observations := make([]rageval.Observation, 0, len(suite.Cases))
 	for _, evalCase := range suite.Cases {
 		retrieved := make([]string, 0, len(evalCase.ExpectedEvidenceSets))

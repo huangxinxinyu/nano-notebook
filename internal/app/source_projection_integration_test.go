@@ -27,7 +27,7 @@ func TestSourceProjectionBuildsAndVerifiesRealQdrantBeforeReady(t *testing.T) {
 	config := retrieval.IndexConfig{
 		Chunk:      retrieval.ChunkConfig{MaxRunes: 32, OverlapRunes: 4, PreserveHeadingContext: true},
 		AnalyzerID: "nano-mixed-v1", BM25K1: 1.2, BM25B: 0.75, BM25AverageDocumentLength: 24,
-		EmbeddingModel: "test/embed", EmbeddingDimensions: 3,
+		EmbeddingModel: "test/embed", EmbeddingDimensions: 3, EmbeddingProfileID: retrieval.EmbeddingProfileGeminiRetrievalV1,
 		DenseCandidates: 20, SparseCandidates: 20, RRFK: 60,
 		RerankerID: "test/rerank", RerankCandidates: 10, DegradationPolicyID: "hybrid-required-v1",
 	}
@@ -118,7 +118,7 @@ func TestCandidateReindexBuildsEveryActiveEvidenceRevisionBeforePromotion(t *tes
 	api := newTestAPI(t)
 	config := retrieval.IndexConfig{
 		Chunk: retrieval.ChunkConfig{MaxRunes: 32, OverlapRunes: 4, PreserveHeadingContext: true}, AnalyzerID: "nano-mixed-v1",
-		BM25K1: 1.2, BM25B: 0.75, BM25AverageDocumentLength: 24, EmbeddingModel: "test/embed", EmbeddingDimensions: 3,
+		BM25K1: 1.2, BM25B: 0.75, BM25AverageDocumentLength: 24, EmbeddingModel: "test/embed", EmbeddingDimensions: 3, EmbeddingProfileID: retrieval.EmbeddingProfileGeminiRetrievalV1,
 		DenseCandidates: 20, SparseCandidates: 20, RRFK: 60, RerankerID: "test/rerank", RerankCandidates: 10, DegradationPolicyID: "hybrid-required-v1",
 	}
 	versions := retrieval.NewVersionStore(api.db.Pool())

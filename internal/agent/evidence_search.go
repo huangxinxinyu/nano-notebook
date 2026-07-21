@@ -56,8 +56,12 @@ func (s *EvidenceSearchService) SearchEvidence(ctx context.Context, attempt Atte
 	if err != nil {
 		return retrieval.SearchResult{}, err
 	}
+	embeddingQuery, err := retrieval.FormatEmbeddingQuery(scope.Version.Config.EmbeddingProfileID, query)
+	if err != nil {
+		return retrieval.SearchResult{}, fmt.Errorf("%w: dense query profile: %v", retrieval.ErrRetrievalUnavailable, err)
+	}
 	embedded, err := s.models.Embed(ctx, models.EmbeddingRequest{
-		Model: scope.Version.Config.EmbeddingModel, Inputs: []string{query}, Dimensions: scope.Version.Config.EmbeddingDimensions,
+		Model: scope.Version.Config.EmbeddingModel, Inputs: []string{embeddingQuery}, Dimensions: scope.Version.Config.EmbeddingDimensions,
 	})
 	if err != nil || len(embedded.Vectors) != 1 {
 		if err == nil {
@@ -252,7 +256,7 @@ func (s *EvidenceSearchService) workerTx(ctx context.Context) (pgx.Tx, error) {
 func validSearchIndexConfig(config retrieval.IndexConfig) bool {
 	return config.Chunk.MaxRunes > 0 && config.Chunk.OverlapRunes >= 0 && config.Chunk.OverlapRunes < config.Chunk.MaxRunes &&
 		strings.TrimSpace(config.AnalyzerID) != "" && config.BM25K1 > 0 && config.BM25AverageDocumentLength > 0 &&
-		strings.TrimSpace(config.EmbeddingModel) != "" && config.EmbeddingDimensions > 0 &&
+		strings.TrimSpace(config.EmbeddingModel) != "" && config.EmbeddingDimensions > 0 && retrieval.IsEmbeddingProfileID(config.EmbeddingProfileID) &&
 		config.DenseCandidates > 0 && config.SparseCandidates > 0 && config.RRFK > 0 &&
 		strings.TrimSpace(config.RerankerID) != "" && config.RerankCandidates > 0
 }

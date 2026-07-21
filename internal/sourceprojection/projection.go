@@ -53,7 +53,7 @@ func (p *Projection) Build(ctx context.Context, command sourceprocessing.Project
 	if err != nil {
 		return err
 	}
-	sourceID, notebookID, units, err := p.loadUnits(ctx, command)
+	sourceID, notebookID, sourceTitle, units, err := p.loadUnits(ctx, command)
 	if err != nil {
 		return err
 	}
@@ -65,7 +65,7 @@ func (p *Projection) Build(ctx context.Context, command sourceprocessing.Project
 	for _, chunk := range chunks {
 		texts = append(texts, chunk.Text)
 	}
-	dense, err := p.embed(ctx, version, texts)
+	dense, err := p.embed(ctx, version, sourceTitle, texts)
 	if err != nil {
 		return err
 	}
@@ -149,57 +149,57 @@ func (p *Projection) validate(command sourceprocessing.ProjectionCommand) error 
 	return nil
 }
 
-func (p *Projection) loadUnits(ctx context.Context, command sourceprocessing.ProjectionCommand) (string, string, []retrieval.Unit, error) {
+func (p *Projection) loadUnits(ctx context.Context, command sourceprocessing.ProjectionCommand) (string, string, string, []retrieval.Unit, error) {
 	tx, err := p.workerTx(ctx)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", "", nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var sourceID, notebookID string
+	var sourceID, notebookID, sourceTitle string
 	err = tx.QueryRow(ctx, `
-		select r.source_id, r.notebook_id
+		select r.source_id, r.notebook_id, s.title
 		from source_evidence_revisions r
 		join source_sources s on s.id=r.source_id
 		join source_processing_jobs j on j.source_id=s.id
 		where r.id=$1 and r.status='building' and s.state='segmenting'
 			and j.id=$2 and j.status='running' and j.lease_token=$3::uuid and j.lease_expires_at > now()
-	`, command.RevisionID, command.Lease.ID, command.Lease.LeaseToken).Scan(&sourceID, &notebookID)
+	`, command.RevisionID, command.Lease.ID, command.Lease.LeaseToken).Scan(&sourceID, &notebookID, &sourceTitle)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", nil, sourceprocessing.ErrProjectionInvalid
+		return "", "", "", nil, sourceprocessing.ErrProjectionInvalid
 	}
 	if err != nil {
-		return "", "", nil, err
+		return "", "", "", nil, err
 	}
 	if sourceID != command.Lease.SourceID || notebookID != command.Lease.NotebookID {
-		return "", "", nil, sourceprocessing.ErrProjectionInvalid
+		return "", "", "", nil, sourceprocessing.ErrProjectionInvalid
 	}
 	rows, err := tx.Query(ctx, `
 		select id, ordinal, kind, text_content
 		from source_evidence_units where revision_id=$1 order by ordinal
 	`, command.RevisionID)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", "", nil, err
 	}
 	defer rows.Close()
 	units := make([]retrieval.Unit, 0)
 	for rows.Next() {
 		var unit retrieval.Unit
 		if err := rows.Scan(&unit.ID, &unit.Ordinal, &unit.Kind, &unit.Text); err != nil {
-			return "", "", nil, err
+			return "", "", "", nil, err
 		}
 		units = append(units, unit)
 	}
 	if err := rows.Err(); err != nil {
-		return "", "", nil, err
+		return "", "", "", nil, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return "", "", nil, err
+		return "", "", "", nil, err
 	}
-	return sourceID, notebookID, units, nil
+	return sourceID, notebookID, sourceTitle, units, nil
 }
 
-func (p *Projection) embed(ctx context.Context, version retrieval.IndexVersion, texts []string) ([][]float32, error) {
-	vectors, err := embedTexts(ctx, p.embedder, version, texts)
+func (p *Projection) embed(ctx context.Context, version retrieval.IndexVersion, sourceTitle string, texts []string) ([][]float32, error) {
+	vectors, err := embedTexts(ctx, p.embedder, version, sourceTitle, texts)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", sourceprocessing.ErrProjectionInvalid, err)
 	}

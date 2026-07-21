@@ -117,7 +117,7 @@ func completeSuite() rageval.Suite {
 func pinnedConfig() rageval.PinnedConfig {
 	return rageval.PinnedConfig{
 		ExtractionConfigID: "extract-v1", EvidenceSchemaVersion: 1,
-		Index:         retrieval.IndexConfig{Chunk: retrieval.ChunkConfig{MaxRunes: 800, OverlapRunes: 120}, AnalyzerID: "nano-mixed-v1", BM25K1: 1.2, BM25B: .75, BM25AverageDocumentLength: 240, EmbeddingModel: "embedding-v1", EmbeddingDimensions: 1024, DenseCandidates: 40, SparseCandidates: 40, RRFK: 60, RerankerID: "rerank-v1", RerankCandidates: 20, DegradationPolicyID: "hybrid-v1"},
+		Index:         retrieval.IndexConfig{Chunk: retrieval.ChunkConfig{MaxRunes: 800, OverlapRunes: 120}, AnalyzerID: "nano-mixed-v1", BM25K1: 1.2, BM25B: .75, BM25AverageDocumentLength: 240, EmbeddingModel: "embedding-v1", EmbeddingDimensions: 1024, EmbeddingProfileID: retrieval.EmbeddingProfileGeminiRetrievalV1, DenseCandidates: 40, SparseCandidates: 40, RRFK: 60, RerankerID: "rerank-v1", RerankCandidates: 20, DegradationPolicyID: "hybrid-v1"},
 		ComposerModel: "composer-v1", VerifierModel: "verifier-v1", VerifierPromptVersion: "verifier-prompt-v1", PromptVersion: "prompt-v1", AgentConfigID: "agent-v1",
 	}
 }

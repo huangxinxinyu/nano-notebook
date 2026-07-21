@@ -27,6 +27,7 @@ type IndexConfig struct {
 	BM25AverageDocumentLength float64     `json:"bm25_average_document_length"`
 	EmbeddingModel            string      `json:"embedding_model"`
 	EmbeddingDimensions       int         `json:"embedding_dimensions"`
+	EmbeddingProfileID        string      `json:"embedding_profile_id"`
 	DenseCandidates           int         `json:"dense_candidates"`
 	SparseCandidates          int         `json:"sparse_candidates"`
 	RRFK                      int         `json:"rrf_k"`
@@ -267,7 +268,7 @@ func validIndexConfig(config IndexConfig) bool {
 		strings.TrimSpace(config.AnalyzerID) != "" && config.BM25K1 > 0 && !math.IsNaN(config.BM25K1) &&
 		config.BM25B >= 0 && config.BM25B <= 1 && !math.IsNaN(config.BM25B) &&
 		config.BM25AverageDocumentLength > 0 && !math.IsNaN(config.BM25AverageDocumentLength) && !math.IsInf(config.BM25AverageDocumentLength, 0) &&
-		strings.TrimSpace(config.EmbeddingModel) != "" && config.EmbeddingDimensions > 0 &&
+		strings.TrimSpace(config.EmbeddingModel) != "" && config.EmbeddingDimensions > 0 && IsEmbeddingProfileID(config.EmbeddingProfileID) &&
 		config.DenseCandidates > 0 && config.SparseCandidates > 0 && config.RRFK > 0 &&
 		strings.TrimSpace(config.RerankerID) != "" && config.RerankCandidates > 0 &&
 		config.RerankCandidates <= config.DenseCandidates+config.SparseCandidates &&

@@ -31,6 +31,7 @@ type activeRevision struct {
 	id         string
 	sourceID   string
 	notebookID string
+	title      string
 	units      []retrieval.Unit
 }
 
@@ -95,7 +96,7 @@ func (r *Reindexer) loadActiveRevisions(ctx context.Context) ([]activeRevision, 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	rows, err := tx.Query(ctx, `
-		select r.id, r.source_id, r.notebook_id
+		select r.id, r.source_id, r.notebook_id, s.title
 		from source_evidence_revisions r
 		join source_sources s on s.id=r.source_id
 		where r.status='active' and s.state='ready'
@@ -107,7 +108,7 @@ func (r *Reindexer) loadActiveRevisions(ctx context.Context) ([]activeRevision, 
 	revisions := make([]activeRevision, 0)
 	for rows.Next() {
 		var revision activeRevision
-		if err := rows.Scan(&revision.id, &revision.sourceID, &revision.notebookID); err != nil {
+		if err := rows.Scan(&revision.id, &revision.sourceID, &revision.notebookID, &revision.title); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -155,7 +156,7 @@ func (r *Reindexer) buildPoints(ctx context.Context, version retrieval.IndexVers
 	for _, chunk := range chunks {
 		texts = append(texts, chunk.Text)
 	}
-	dense, err := embedTexts(ctx, r.embedder, version, texts)
+	dense, err := embedTexts(ctx, r.embedder, version, revision.title, texts)
 	if err != nil {
 		return nil, "", err
 	}
@@ -245,20 +246,24 @@ func (r *Reindexer) workerTx(ctx context.Context) (pgx.Tx, error) {
 	return tx, nil
 }
 
-func embedTexts(ctx context.Context, client embedder, version retrieval.IndexVersion, texts []string) ([][]float32, error) {
-	vectors := make([][]float32, 0, len(texts))
-	for start := 0; start < len(texts); start += 64 {
-		end := start + 64
-		if end > len(texts) {
-			end = len(texts)
+func embedTexts(ctx context.Context, client embedder, version retrieval.IndexVersion, title string, texts []string) ([][]float32, error) {
+	formatted := make([]string, 0, len(texts))
+	for _, sourceText := range texts {
+		input, err := retrieval.FormatEmbeddingDocument(version.Config.EmbeddingProfileID, title, sourceText)
+		if err != nil {
+			return nil, err
 		}
+		formatted = append(formatted, input)
+	}
+	vectors := make([][]float32, 0, len(texts))
+	for _, input := range formatted {
 		outcome, err := client.Embed(ctx, models.EmbeddingRequest{
-			Model: version.Config.EmbeddingModel, Inputs: texts[start:end], Dimensions: version.Config.EmbeddingDimensions,
+			Model: version.Config.EmbeddingModel, Inputs: []string{input}, Dimensions: version.Config.EmbeddingDimensions,
 		})
 		if err != nil {
 			return nil, err
 		}
-		if len(outcome.Vectors) != end-start {
+		if len(outcome.Vectors) != 1 {
 			return nil, errors.New("Embedding response count does not match Retrieval Chunks")
 		}
 		for _, vector := range outcome.Vectors {

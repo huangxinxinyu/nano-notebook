@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"net/http"
+	"reflect"
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
@@ -27,13 +28,16 @@ func (s *evidenceVectorSearchStub) SearchSparse(_ context.Context, _ retrieval.S
 	return []retrieval.Candidate{{ID: s.candidateID, Score: 4.2}}, nil
 }
 
-type evidenceModelsStub struct{}
+type evidenceModelsStub struct {
+	embeddingRequests []models.EmbeddingRequest
+}
 
-func (evidenceModelsStub) Embed(_ context.Context, request models.EmbeddingRequest) (models.EmbeddingOutcome, error) {
+func (s *evidenceModelsStub) Embed(_ context.Context, request models.EmbeddingRequest) (models.EmbeddingOutcome, error) {
+	s.embeddingRequests = append(s.embeddingRequests, request)
 	return models.EmbeddingOutcome{Vectors: [][]float32{{0.1, 0.2, 0.3}}}, nil
 }
 
-func (evidenceModelsStub) Rerank(_ context.Context, request models.RerankRequest) (models.RerankOutcome, error) {
+func (*evidenceModelsStub) Rerank(_ context.Context, request models.RerankRequest) (models.RerankOutcome, error) {
 	ids := make([]string, 0, len(request.Candidates))
 	for _, candidate := range request.Candidates {
 		ids = append(ids, candidate.ID)
@@ -71,13 +75,17 @@ func TestSearchEvidenceTraversesPinnedScopeAndReloadsAuthoritativeEvidenceRanges
 		t.Fatal(err)
 	}
 	vectors := &evidenceVectorSearchStub{candidateID: chunks[0].ID}
-	service := agent.NewEvidenceSearchService(api.db.Pool(), vectors, evidenceModelsStub{})
+	model := &evidenceModelsStub{}
+	service := agent.NewEvidenceSearchService(api.db.Pool(), vectors, model)
 	result, err := service.SearchEvidence(context.Background(), attemptFromClaim(claimed), "launch date", "answer the user's date question")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.Degraded || result.CompleteEmpty || len(result.Candidates) != 1 {
 		t.Fatalf("search result=%+v", result)
+	}
+	if len(model.embeddingRequests) != 1 || !reflect.DeepEqual(model.embeddingRequests[0].Inputs, []string{"task: search result | query: launch date"}) {
+		t.Fatalf("embedding requests=%+v", model.embeddingRequests)
 	}
 	candidate := result.Candidates[0]
 	if candidate.ID != chunks[0].ID || candidate.SourceID != "src_search" || candidate.RevisionID != "evr_search" ||

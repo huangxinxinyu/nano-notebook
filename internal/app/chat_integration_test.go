@@ -245,7 +245,7 @@ func createNotebookAndChatForEvidenceSet(t *testing.T, api *testAPI, sessionCook
 func installReadyEvidenceSetFixture(t *testing.T, api *testAPI, notebookID, sourceA, revisionA, sourceB, revisionB string) {
 	t.Helper()
 	ctx := context.Background()
-	const indexConfig = `{"chunk":{"max_runes":512,"overlap_runes":64,"preserve_heading_context":true},"analyzer_id":"nano-mixed-v1","bm25_k1":1.2,"bm25_b":0.75,"bm25_average_document_length":128,"embedding_model":"embed-test","embedding_dimensions":3,"dense_candidates":8,"sparse_candidates":8,"rrf_k":60,"reranker_id":"rerank-test","rerank_candidates":8,"degradation_policy_id":"strict-v1"}`
+	const indexConfig = `{"chunk":{"max_runes":512,"overlap_runes":64,"preserve_heading_context":true},"analyzer_id":"nano-mixed-v1","bm25_k1":1.2,"bm25_b":0.75,"bm25_average_document_length":128,"embedding_model":"embed-test","embedding_dimensions":3,"embedding_profile_id":"gemini-retrieval-v1","dense_candidates":8,"sparse_candidates":8,"rrf_k":60,"reranker_id":"rerank-test","rerank_candidates":8,"degradation_policy_id":"strict-v1"}`
 	if _, err := api.db.Pool().Exec(ctx, `update retrieval_index_versions set status='retired' where status='active'`); err != nil {
 		t.Fatal(err)
 	}
