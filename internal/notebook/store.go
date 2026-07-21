@@ -47,8 +47,16 @@ func (s *Store) ListOwned(ctx context.Context, userID string, query string) ([]N
 }
 
 func (s *Store) ListVisible(ctx context.Context, userID, query, scope string) ([]Notebook, error) {
+	items, _, err := s.ListVisiblePage(ctx, userID, query, scope, 100, time.Time{}, "")
+	return items, err
+}
+
+func (s *Store) ListVisiblePage(ctx context.Context, userID, query, scope string, pageSize int, beforeRecent time.Time, beforeID string) ([]Notebook, bool, error) {
 	if scope != "all" && scope != "owned" && scope != "shared" {
-		return nil, errors.New("invalid notebook scope")
+		return nil, false, errors.New("invalid notebook scope")
+	}
+	if pageSize < 1 || pageSize > 100 || (beforeID == "") != beforeRecent.IsZero() {
+		return nil, false, errors.New("invalid notebook page")
 	}
 	rows, err := s.db.Query(ctx, `
 		select n.id, n.title, m.role, n.recent_at
@@ -57,21 +65,29 @@ func (s *Store) ListVisible(ctx context.Context, userID, query, scope string) ([
 		where m.user_id = $1
 		  and ($2 = '' or lower(n.title) like '%' || lower($2) || '%')
 		  and ($3 = 'all' or ($3 = 'owned' and m.role = 'owner') or ($3 = 'shared' and m.role <> 'owner'))
-		order by n.recent_at desc
-		limit 100`, userID, query, scope)
+		  and ($5 = '' or (n.recent_at,n.id) < ($4,$5))
+		order by n.recent_at desc,n.id desc
+		limit $6`, userID, query, scope, beforeRecent, beforeID, pageSize+1)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	notebooks := make([]Notebook, 0)
 	for rows.Next() {
 		var notebook Notebook
 		if err := rows.Scan(&notebook.ID, &notebook.Title, &notebook.Role, &notebook.RecentAt); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		notebooks = append(notebooks, notebook)
 	}
-	return notebooks, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	hasMore := len(notebooks) > pageSize
+	if hasMore {
+		notebooks = notebooks[:pageSize]
+	}
+	return notebooks, hasMore, nil
 }
 
 func (s *Store) CreateOwned(ctx context.Context, userID, key, requestHash, notebookID, title string) (Notebook, bool, error) {

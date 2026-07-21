@@ -2,12 +2,14 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -348,17 +350,45 @@ func (s *Server) listNotebooks(w http.ResponseWriter, r *http.Request, userID st
 		writeError(w, r, http.StatusBadRequest, "validation_failed", "error.notebook_scope")
 		return
 	}
+	pageSize := 50
+	if raw := strings.TrimSpace(r.URL.Query().Get("page_size")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 100 {
+			writeError(w, r, http.StatusBadRequest, "validation_failed", "error.notebook_page")
+			return
+		}
+		pageSize = parsed
+	}
+	type notebookCursor struct {
+		RecentAt time.Time `json:"recent_at"`
+		ID       string    `json:"id"`
+	}
+	var cursor notebookCursor
+	if raw := strings.TrimSpace(r.URL.Query().Get("cursor")); raw != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(raw)
+		if err != nil || json.Unmarshal(decoded, &cursor) != nil || cursor.ID == "" || cursor.RecentAt.IsZero() {
+			writeError(w, r, http.StatusBadRequest, "validation_failed", "error.notebook_page")
+			return
+		}
+	}
 	var notebooks []notebook.Notebook
+	var hasMore bool
 	err := s.withRequestPrincipal(r.Context(), userID, func(_ *identity.Store, notebookStore *notebook.Store) error {
 		var err error
-		notebooks, err = notebookStore.ListVisible(r.Context(), userID, query, scope)
+		notebooks, hasMore, err = notebookStore.ListVisiblePage(r.Context(), userID, query, scope, pageSize, cursor.RecentAt, cursor.ID)
 		return err
 	})
 	if err != nil {
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"notebooks": notebooks})
+	nextCursor := ""
+	if hasMore && len(notebooks) > 0 {
+		last := notebooks[len(notebooks)-1]
+		encoded, _ := json.Marshal(notebookCursor{RecentAt: last.RecentAt, ID: last.ID})
+		nextCursor = base64.RawURLEncoding.EncodeToString(encoded)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"notebooks": notebooks, "next_cursor": nextCursor})
 }
 
 func (s *Server) createNotebook(w http.ResponseWriter, r *http.Request, userID string) {

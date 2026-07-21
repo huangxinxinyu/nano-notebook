@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -168,6 +169,40 @@ func TestSharedMembersListAndOpenNotebookWithTheirRole(t *testing.T) {
 	decodeBody(t, opened, &payload)
 	if payload.Notebook.ID != notebookID || payload.Notebook.Role != "viewer" {
 		t.Fatalf("shared notebook=%+v", payload.Notebook)
+	}
+}
+
+func TestSharedLibraryUsesStableCursorPagination(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "cursor-owner@example.com")
+	viewer := api.register(t, "cursor-viewer@example.com")
+	viewerID := sourceTestUserID(t, api, "cursor-viewer@example.com")
+	firstID := createSourceTestNotebook(t, api, owner, "cursor-first")
+	secondID := createSourceTestNotebook(t, api, owner, "cursor-second")
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		insert into notebook_memberships(notebook_id,user_id,role) values($1,$3,'viewer'),($2,$3,'viewer')`, firstID, secondID, viewerID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.db.Pool().Exec(context.Background(), `
+		update notebook_notebooks set recent_at=case id when $1 then now() else now()-interval '1 minute' end where id in ($1,$2)`, firstID, secondID); err != nil {
+		t.Fatal(err)
+	}
+	pageOne := api.getWithCookie(t, "/api/v1/notebooks?scope=shared&page_size=1", viewer)
+	var firstPage struct {
+		Notebooks  []notebook.Notebook `json:"notebooks"`
+		NextCursor string              `json:"next_cursor"`
+	}
+	decodeBody(t, pageOne, &firstPage)
+	if len(firstPage.Notebooks) != 1 || firstPage.NextCursor == "" {
+		t.Fatalf("first page=%+v", firstPage)
+	}
+	pageTwo := api.getWithCookie(t, "/api/v1/notebooks?scope=shared&page_size=1&cursor="+url.QueryEscape(firstPage.NextCursor), viewer)
+	var secondPage struct {
+		Notebooks []notebook.Notebook `json:"notebooks"`
+	}
+	decodeBody(t, pageTwo, &secondPage)
+	if len(secondPage.Notebooks) != 1 || secondPage.Notebooks[0].ID == firstPage.Notebooks[0].ID {
+		t.Fatalf("second page=%+v after %+v", secondPage, firstPage)
 	}
 }
 
