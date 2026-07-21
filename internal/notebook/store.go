@@ -34,6 +34,7 @@ type beginner interface {
 type Notebook struct {
 	ID       string    `json:"id"`
 	Title    string    `json:"title"`
+	Role     string    `json:"role"`
 	RecentAt time.Time `json:"recent_at,omitempty"`
 }
 
@@ -42,15 +43,22 @@ func NewStore(db DBTX) *Store {
 }
 
 func (s *Store) ListOwned(ctx context.Context, userID string, query string) ([]Notebook, error) {
+	return s.ListVisible(ctx, userID, query, "owned")
+}
+
+func (s *Store) ListVisible(ctx context.Context, userID, query, scope string) ([]Notebook, error) {
+	if scope != "all" && scope != "owned" && scope != "shared" {
+		return nil, errors.New("invalid notebook scope")
+	}
 	rows, err := s.db.Query(ctx, `
-		select n.id, n.title, n.recent_at
+		select n.id, n.title, m.role, n.recent_at
 		from notebook_notebooks n
 		join notebook_memberships m on m.notebook_id = n.id
 		where m.user_id = $1
-		  and m.role = 'owner'
 		  and ($2 = '' or lower(n.title) like '%' || lower($2) || '%')
+		  and ($3 = 'all' or ($3 = 'owned' and m.role = 'owner') or ($3 = 'shared' and m.role <> 'owner'))
 		order by n.recent_at desc
-		limit 100`, userID, query)
+		limit 100`, userID, query, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +66,7 @@ func (s *Store) ListOwned(ctx context.Context, userID string, query string) ([]N
 	notebooks := make([]Notebook, 0)
 	for rows.Next() {
 		var notebook Notebook
-		if err := rows.Scan(&notebook.ID, &notebook.Title, &notebook.RecentAt); err != nil {
+		if err := rows.Scan(&notebook.ID, &notebook.Title, &notebook.Role, &notebook.RecentAt); err != nil {
 			return nil, err
 		}
 		notebooks = append(notebooks, notebook)
@@ -144,12 +152,20 @@ func createOwnedInTx(ctx context.Context, tx pgx.Tx, userID, key, requestHash, n
 }
 
 func (s *Store) GetOwned(ctx context.Context, userID, notebookID string) (Notebook, error) {
+	item, err := s.GetVisible(ctx, userID, notebookID)
+	if err != nil || item.Role != "owner" {
+		return Notebook{}, ErrNotFound
+	}
+	return item, nil
+}
+
+func (s *Store) GetVisible(ctx context.Context, userID, notebookID string) (Notebook, error) {
 	var notebook Notebook
 	err := s.db.QueryRow(ctx, `
-		select n.id, n.title, n.recent_at
+		select n.id, n.title, m.role, n.recent_at
 		from notebook_notebooks n
 		join notebook_memberships m on m.notebook_id = n.id
-		where n.id = $1 and m.user_id = $2 and m.role = 'owner'`, notebookID, userID).Scan(&notebook.ID, &notebook.Title, &notebook.RecentAt)
+		where n.id = $1 and m.user_id = $2`, notebookID, userID).Scan(&notebook.ID, &notebook.Title, &notebook.Role, &notebook.RecentAt)
 	if err != nil {
 		return Notebook{}, ErrNotFound
 	}

@@ -338,10 +338,18 @@ func (s *Server) notebooks(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listNotebooks(w http.ResponseWriter, r *http.Request, userID string) {
 	query := strings.TrimSpace(r.URL.Query().Get("query"))
+	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
+	if scope == "" {
+		scope = "all"
+	}
+	if scope != "all" && scope != "owned" && scope != "shared" {
+		writeError(w, r, http.StatusBadRequest, "validation_failed", "error.notebook_scope")
+		return
+	}
 	var notebooks []notebook.Notebook
 	err := s.withRequestPrincipal(r.Context(), userID, func(_ *identity.Store, notebookStore *notebook.Store) error {
 		var err error
-		notebooks, err = notebookStore.ListOwned(r.Context(), userID, query)
+		notebooks, err = notebookStore.ListVisible(r.Context(), userID, query, scope)
 		return err
 	})
 	if err != nil {
@@ -445,7 +453,7 @@ func (s *Server) notebookByID(w http.ResponseWriter, r *http.Request) {
 	var notebookResult notebook.Notebook
 	err := s.withRequestPrincipal(r.Context(), user.ID, func(_ *identity.Store, notebookStore *notebook.Store) error {
 		var err error
-		notebookResult, err = notebookStore.GetOwned(r.Context(), user.ID, id)
+		notebookResult, err = notebookStore.GetVisible(r.Context(), user.ID, id)
 		return err
 	})
 	if err != nil {

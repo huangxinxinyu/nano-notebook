@@ -174,10 +174,14 @@ create table if not exists notebook_notebooks (
 create table if not exists notebook_memberships (
 	notebook_id text not null references notebook_notebooks(id) on delete cascade,
 	user_id text not null references identity_users(id) on delete cascade,
-	role text not null check (role = 'owner'),
+	role text not null constraint notebook_memberships_role_check check (role in ('viewer', 'editor', 'owner')),
 	created_at timestamptz not null default now(),
 	primary key (notebook_id, user_id)
 );
+
+alter table notebook_memberships drop constraint if exists notebook_memberships_role_check;
+alter table notebook_memberships add constraint notebook_memberships_role_check
+	check (role in ('viewer', 'editor', 'owner'));
 
 create unique index if not exists notebook_single_owner_idx
 	on notebook_memberships(notebook_id)
@@ -1259,18 +1263,45 @@ create policy notebook_memberships_worker on notebook_memberships
 	using (true);
 
 drop policy if exists notebook_notebooks_owner on notebook_notebooks;
-create policy notebook_notebooks_owner on notebook_notebooks
-	for all to nano_app
-	using (
-		exists (
-			select 1
-			from notebook_memberships m
-			where m.notebook_id = notebook_notebooks.id
-			  and m.user_id = nullif(current_setting('app.principal_id', true), '')
-			  and m.role = 'owner'
-		)
-	)
+drop policy if exists notebook_notebooks_read on notebook_notebooks;
+create policy notebook_notebooks_read on notebook_notebooks
+	for select to nano_app
+	using (exists (
+		select 1 from notebook_memberships m
+		where m.notebook_id = notebook_notebooks.id
+		  and m.user_id = nullif(current_setting('app.principal_id', true), '')
+	));
+
+drop policy if exists notebook_notebooks_insert on notebook_notebooks;
+create policy notebook_notebooks_insert on notebook_notebooks
+	for insert to nano_app
 	with check (true);
+
+drop policy if exists notebook_notebooks_update on notebook_notebooks;
+create policy notebook_notebooks_update on notebook_notebooks
+	for update to nano_app
+	using (exists (
+		select 1 from notebook_memberships m
+		where m.notebook_id = notebook_notebooks.id
+		  and m.user_id = nullif(current_setting('app.principal_id', true), '')
+		  and m.role = 'owner'
+	))
+	with check (exists (
+		select 1 from notebook_memberships m
+		where m.notebook_id = notebook_notebooks.id
+		  and m.user_id = nullif(current_setting('app.principal_id', true), '')
+		  and m.role = 'owner'
+	));
+
+drop policy if exists notebook_notebooks_delete on notebook_notebooks;
+create policy notebook_notebooks_delete on notebook_notebooks
+	for delete to nano_app
+	using (exists (
+		select 1 from notebook_memberships m
+		where m.notebook_id = notebook_notebooks.id
+		  and m.user_id = nullif(current_setting('app.principal_id', true), '')
+		  and m.role = 'owner'
+	));
 
 drop policy if exists notebook_notebooks_worker on notebook_notebooks;
 create policy notebook_notebooks_worker on notebook_notebooks
@@ -1289,8 +1320,13 @@ as $$
 		from public.notebook_memberships m
 		where m.notebook_id = candidate_notebook_id
 		  and m.user_id = nullif(current_setting('app.principal_id', true), '')
-		  and m.role = 'owner'
-		  and candidate_capability in ('source.read', 'source.maintain')
+		  and case candidate_capability
+			when 'notebook.read' then m.role in ('viewer', 'editor', 'owner')
+			when 'source.read' then m.role in ('viewer', 'editor', 'owner')
+			when 'source.maintain' then m.role in ('editor', 'owner')
+			when 'notebook.manage' then m.role = 'owner'
+			else false
+		  end
 	)
 $$;
 revoke all on function nano_has_notebook_capability(text, text) from public;
