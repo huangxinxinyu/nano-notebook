@@ -11,6 +11,7 @@ import (
 	"context"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/normalize"
+	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/rageval"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceprocessing"
@@ -56,8 +57,48 @@ func TestSprint6SuiteIsStrictValidAndDigestPinned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if digest != "bf7f7e3e558ef5bb1bddc516375d0a13b93edf910902bce90881f1d9e8c65b4d" {
+	if digest != "f48f765dfbb70ad1debdc5ca83879d8029dcc561ec1aa5ddc32b253bceb1977c" {
 		t.Fatalf("suite SHA-256 = %s", digest)
+	}
+}
+
+func TestModelMediaFixturesContainEncodedVisualOrSpokenEvidence(t *testing.T) {
+	for _, testCase := range []struct {
+		uri, format, fact string
+		image             bool
+	}{
+		{uri: "fixture://sprint6/mp3-en-v1", format: "mp3", fact: "interactive queue is reserved"},
+		{uri: "fixture://sprint6/wav-en-v1", format: "wav", fact: "reranker unavailable"},
+		{uri: "fixture://sprint6/m4a-en-v1", format: "m4a", fact: "PostgreSQL is authority"},
+		{uri: "fixture://sprint6/png-en-v1", format: "png", fact: "publication barrier", image: true},
+		{uri: "fixture://sprint6/jpeg-en-v1", format: "jpeg", fact: "verifier", image: true},
+		{uri: "fixture://sprint6/webp-en-v1", format: "webp", fact: "Ready", image: true},
+	} {
+		t.Run(testCase.format, func(t *testing.T) {
+			fixture, err := rageval.ResolveFixture(testCase.uri)
+			if err != nil {
+				t.Fatal(err)
+			}
+			minimumBytes := 4 << 10
+			if testCase.image {
+				minimumBytes = 1 << 10
+			}
+			if len(fixture.Payload) < minimumBytes {
+				t.Fatalf("fixture is only a structural stub: %d bytes", len(fixture.Payload))
+			}
+			if bytes.Contains(bytes.ToLower(fixture.Payload), bytes.ToLower([]byte(testCase.fact))) {
+				t.Fatal("required fact is hidden as plaintext metadata instead of encoded media")
+			}
+			if err := objectstore.ValidateSourceContent(testCase.format, bytes.NewReader(fixture.Payload), int64(len(fixture.Payload))); err != nil {
+				t.Fatalf("content sniff: %v", err)
+			}
+			if testCase.image {
+				width, height, err := normalize.ImageDimensions(testCase.format, fixture.Payload)
+				if err != nil || width < 600 || height < 300 {
+					t.Fatalf("model-readable image geometry = %dx%d, %v", width, height, err)
+				}
+			}
+		})
 	}
 }
 

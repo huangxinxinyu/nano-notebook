@@ -48,7 +48,7 @@ func TestRunEvaluatesFrozenSuiteFromProductObservations(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.Status != "passed" || report.FixtureSuiteSHA256 != "bf7f7e3e558ef5bb1bddc516375d0a13b93edf910902bce90881f1d9e8c65b4d" {
+	if report.Status != "passed" || report.FixtureSuiteSHA256 != "f48f765dfbb70ad1debdc5ca83879d8029dcc561ec1aa5ddc32b253bceb1977c" {
 		t.Fatalf("report = %+v", report)
 	}
 	if err := run([]string{

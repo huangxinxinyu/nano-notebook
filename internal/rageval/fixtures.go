@@ -3,14 +3,8 @@ package rageval
 import (
 	"archive/zip"
 	"bytes"
-	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"image"
-	"image/color"
-	"image/jpeg"
-	"image/png"
 	"sort"
 	"strings"
 	"time"
@@ -52,17 +46,23 @@ func ResolveFixture(uri string) (ResolvedFixture, error) {
 		return ResolvedFixture{Family: FamilyDOCX, Filename: "owner.docx", MediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", Payload: payload}, err
 	case "pptx-en-v1":
 		payload, err := fixtureOOXML(map[string]string{
-			"[Content_Types].xml":   `<Types><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/><Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>`,
-			"ppt/slides/slide1.xml": fixtureSlide("Baseline", 914400, 914400, 3657600, 914400),
-			"ppt/slides/slide2.xml": fixtureSlide("Recall target is 95 percent", 914400, 1828800, 3657600, 914400),
+			"[Content_Types].xml":             `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/><Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>`,
+			"_rels/.rels":                     `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>`,
+			"ppt/presentation.xml":            `<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldIdLst><p:sldId id="256" r:id="rId1"/><p:sldId id="257" r:id="rId2"/></p:sldIdLst><p:sldSz cx="9144000" cy="5143500" type="screen16x9"/></p:presentation>`,
+			"ppt/_rels/presentation.xml.rels": `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/></Relationships>`,
+			"ppt/slides/slide1.xml":           fixtureSlide("Baseline", 914400, 914400, 3657600, 914400),
+			"ppt/slides/slide2.xml":           fixtureSlide("Recall target is 95 percent", 914400, 1828800, 3657600, 914400),
 		})
 		return ResolvedFixture{Family: FamilyPPTX, Filename: "metrics.pptx", MediaType: "application/vnd.openxmlformats-officedocument.presentationml.presentation", Payload: payload}, err
 	case "mp3-en-v1":
-		return ResolvedFixture{Family: FamilyMP3, Filename: "capacity.mp3", MediaType: "audio/mpeg", Payload: append([]byte("ID3\x04\x00\x00\x00\x00\x00\x00"), []byte("interactive queue is reserved")...)}, nil
+		payload, err := decodeFixtureAsset(fixtureMP3Base64, false)
+		return ResolvedFixture{Family: FamilyMP3, Filename: "capacity.mp3", MediaType: "audio/mpeg", Payload: payload}, err
 	case "wav-en-v1":
-		return ResolvedFixture{Family: FamilyWAV, Filename: "degradation.wav", MediaType: "audio/wav", Payload: fixtureWAV([]byte("reranker unavailable"))}, nil
+		payload, err := decodeFixtureAsset(fixtureWAVGzipBase64, true)
+		return ResolvedFixture{Family: FamilyWAV, Filename: "degradation.wav", MediaType: "audio/wav", Payload: payload}, err
 	case "m4a-en-v1":
-		return ResolvedFixture{Family: FamilyM4A, Filename: "authority.m4a", MediaType: "audio/mp4", Payload: fixtureM4A("PostgreSQL is authority")}, nil
+		payload, err := decodeFixtureAsset(fixtureM4ABase64, false)
+		return ResolvedFixture{Family: FamilyM4A, Filename: "authority.m4a", MediaType: "audio/mp4", Payload: payload}, err
 	case "png-en-v1":
 		payload, err := fixturePNG()
 		return ResolvedFixture{Family: FamilyPNG, Filename: "barrier.png", MediaType: "image/png", Payload: payload}, err
@@ -70,7 +70,7 @@ func ResolveFixture(uri string) (ResolvedFixture, error) {
 		payload, err := fixtureJPEG()
 		return ResolvedFixture{Family: FamilyJPEG, Filename: "verifier.jpg", MediaType: "image/jpeg", Payload: payload}, err
 	case "webp-en-v1":
-		payload, err := base64.StdEncoding.DecodeString("UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAA==")
+		payload, err := fixtureWebP()
 		return ResolvedFixture{Family: FamilyWebP, Filename: "ready.webp", MediaType: "image/webp", Payload: payload}, err
 	default:
 		return ResolvedFixture{}, errors.New("unknown RAG Eval fixture")
@@ -139,47 +139,5 @@ func fixtureOOXML(files map[string]string) ([]byte, error) {
 }
 
 func fixtureSlide(text string, x, y, width, height int) string {
-	return fmt.Sprintf(`<p:sld xmlns:p="p" xmlns:a="a"><p:cSld><p:spTree><p:sp><p:spPr><a:xfrm><a:off x="%d" y="%d"/><a:ext cx="%d" cy="%d"/></a:xfrm></p:spPr><p:txBody><a:p><a:r><a:t>%s</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>`, x, y, width, height, text)
-}
-
-func fixtureWAV(content []byte) []byte {
-	payload := make([]byte, 44+len(content))
-	copy(payload, "RIFF")
-	binary.LittleEndian.PutUint32(payload[4:8], uint32(len(payload)-8))
-	copy(payload[8:], "WAVEfmt ")
-	binary.LittleEndian.PutUint32(payload[16:20], 16)
-	binary.LittleEndian.PutUint16(payload[20:22], 1)
-	binary.LittleEndian.PutUint16(payload[22:24], 1)
-	binary.LittleEndian.PutUint32(payload[24:28], 8000)
-	binary.LittleEndian.PutUint32(payload[28:32], 8000)
-	binary.LittleEndian.PutUint16(payload[32:34], 1)
-	binary.LittleEndian.PutUint16(payload[34:36], 8)
-	copy(payload[36:], "data")
-	binary.LittleEndian.PutUint32(payload[40:44], uint32(len(content)))
-	copy(payload[44:], content)
-	return payload
-}
-
-func fixtureM4A(content string) []byte {
-	payload := make([]byte, 24+len(content))
-	binary.BigEndian.PutUint32(payload[0:4], uint32(len(payload)))
-	copy(payload[4:], "ftypM4A \x00\x00\x00\x00M4A ")
-	copy(payload[24:], content)
-	return payload
-}
-
-func fixturePNG() ([]byte, error) {
-	value := image.NewRGBA(image.Rect(0, 0, 3, 2))
-	value.Set(0, 0, color.RGBA{R: 255, A: 255})
-	var payload bytes.Buffer
-	err := png.Encode(&payload, value)
-	return payload.Bytes(), err
-}
-
-func fixtureJPEG() ([]byte, error) {
-	value := image.NewRGBA(image.Rect(0, 0, 3, 2))
-	value.Set(0, 0, color.RGBA{R: 255, A: 255})
-	var payload bytes.Buffer
-	err := jpeg.Encode(&payload, value, &jpeg.Options{Quality: 90})
-	return payload.Bytes(), err
+	return fmt.Sprintf(`<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr><p:sp><p:nvSpPr><p:cNvPr id="2" name="Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="%d" y="%d"/><a:ext cx="%d" cy="%d"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US" sz="2400"/><a:t>%s</a:t></a:r><a:endParaRPr lang="en-US"/></a:p></p:txBody></p:sp></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>`, x, y, width, height, text)
 }
