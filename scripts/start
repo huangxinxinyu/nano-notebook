@@ -13,6 +13,9 @@ export NANO_COLLECTOR_SERVICE_TOKEN="${NANO_COLLECTOR_SERVICE_TOKEN:-nano-local-
 export NANO_COLLECTOR_QUERY_TOKEN="${NANO_COLLECTOR_QUERY_TOKEN:-nano-local-collector-query-token}"
 export NANO_CHAT_MODEL="${NANO_CHAT_MODEL:-aliyun/qwen-flash}"
 export NANO_BIFROST_URL="${NANO_BIFROST_URL:-http://127.0.0.1:56666}"
+export NANO_WEB_BASE_URL="${NANO_WEB_BASE_URL:-http://localhost:5173}"
+export NANO_MAIL_SMTP_ADDR="${NANO_MAIL_SMTP_ADDR:-127.0.0.1:51025}"
+export NANO_MAIL_FROM="${NANO_MAIL_FROM:-nano@localhost}"
 
 docker compose -f infra/compose/compose.yaml up -d
 docker compose -f infra/compose/compose.yaml wait minio-init >/dev/null
