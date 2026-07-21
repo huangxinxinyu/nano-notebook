@@ -292,11 +292,11 @@ The initial capability portfolio is:
 | --- | --- |
 | Text generation | OpenAI, Gemini, and Qwen |
 | Vision normalization | Gemini default, OpenAI second implementation |
-| Embedding | Multiple adapters; one model per Retrieval Index Version; model change requires reindex |
+| Embedding | Gemini Embedding 2 candidate at 768 dimensions; one model and input profile per Retrieval Index Version; either change requires reindex |
 | Reranking | Qwen `qwen3-rerank` participates in evaluation |
 | Transcription | One accepted OpenAI implementation initially because timestamp quality is part of Citation correctness |
 
-Bifrost UI, persistent configuration database, semantic cache, and Agent features are excluded. The default embedding model remains an evaluation result.
+Bifrost UI, persistent configuration database, semantic cache, and Agent features are excluded. The current candidate pins `gemini/gemini-embedding-2`, 768 dimensions, and asymmetric `gemini-retrieval-v1` query/document formatting; it becomes active only through the existing offline Eval promotion gate.
 
 ## 12. Observability And Evaluation
 

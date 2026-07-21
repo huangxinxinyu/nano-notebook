@@ -94,6 +94,10 @@ _Avoid_: Citation span, authoritative content
 An immutable, rebuildable retrieval projection of one or more Evidence Revisions under a specific chunking, dense, and sparse indexing configuration. It can be replaced or removed without changing Citation identity.
 _Avoid_: Evidence Revision, authoritative Source
 
+**Embedding Input Profile**:
+The versioned, deterministic formatting contract that maps a Retrieval query or Source title plus Retrieval Chunk into Provider input. Query and document forms may be asymmetric, but both are pinned by the Retrieval Index Version rather than inferred from a mutable Provider default.
+_Avoid_: Hidden prompt prefix, unversioned task type, Agent prompt
+
 **Retrieval Index Promotion**:
 The authoritative switch that makes one fully built and verified Retrieval Index Version active only after its identified offline Eval Run satisfies the approved policy. Building or evaluating an index does not promote it by itself.
 _Avoid_: Reindex completion, deployment, automatic tuning

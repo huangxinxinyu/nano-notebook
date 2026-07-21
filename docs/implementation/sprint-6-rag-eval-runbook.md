@@ -7,6 +7,7 @@ Precomputed `-observations` remain useful for evaluator development, but the CLI
 ## Prerequisites
 
 - PostgreSQL, Qdrant, Bifrost, Source workers, object storage, and the document renderer are ready.
+- `GEMINI_API_KEY` is configured in ignored `infra/compose/.env`, and Bifrost has compliant network egress from a Gemini API supported region.
 - Every Suite fixture has been admitted through the normal Source API and reached `ready`.
 - The admitted Source `content_sha256` equals the SHA frozen in `evals/rag/sprint6-v1.json`.
 - The Eval principal is a member of the fixture Notebook.
@@ -52,11 +53,13 @@ go run ./cmd/rag-eval \
   -create-candidate \
   -eval-run-id eval_sprint6_candidate_001 \
   -qdrant-url http://127.0.0.1:56333 \
-  -qdrant-collection nano-source-evidence \
+  -qdrant-collection nano-source-evidence-gemini-2-768-v1 \
   -bifrost-url http://127.0.0.1:56666
 ```
 
 The live path executes sequentially as a background workload. Before the Cases run, it builds and verifies the candidate projection for every ready Source with an active Evidence Revision. Each Case then creates an isolated Eval chat and Run, pins the explicit candidate through the internal worker-only admission path, and executes the existing production Agent.
+
+The pinned dense path uses `gemini/gemini-embedding-2` at 768 dimensions with embedding profile `gemini-retrieval-v1`. Projection sends one document per embedding request until the locked Bifrost batch mapping is independently accepted. The versioned `nano-source-evidence-gemini-2-768-v1` collection is created and dimension-checked without deleting the previous collection.
 
 The resulting Observation is derived rather than supplied:
 
@@ -77,3 +80,4 @@ The Eval report is recorded before promotion. Promotion additionally checks that
 - Missing expected retrieval, incorrect Citation aliases, uncited claims, unsupported claims, forbidden claims, latency, or cost failures keep the candidate unpromoted.
 - Failed live Runs remain durable for developer inspection. They are Eval artifacts, not user-visible Notebook output.
 - Retrying uses a new Eval Run identity. Do not edit a recorded report or mutate an existing Retrieval Index Version configuration.
+- `User location is not supported for the API use` is a Provider egress/billing prerequisite failure. Do not treat it as a retrieval-quality result or promote a candidate from precomputed observations.
