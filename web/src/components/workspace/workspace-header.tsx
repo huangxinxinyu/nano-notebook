@@ -11,6 +11,7 @@ type WorkspaceHeaderProps = {
   createAction: ReactNode;
   analyzeLabel: string;
   shareLabel: string;
+  shareAction?: ReactNode;
   settingsLabel: string;
   appsLabel: string;
   email: string;
@@ -39,7 +40,7 @@ export function WorkspaceHeader(props: WorkspaceHeaderProps) {
       <div className="workspace-header-actions">
         {props.createAction}
         <Button className="workspace-header-pill secondary-workspace-action" variant="outline" onClick={comingSoon}><MaterialSymbol name="monitoring" size={19} />{props.analyzeLabel}</Button>
-        <Button className="workspace-header-pill secondary-workspace-action" variant="outline" onClick={comingSoon}><MaterialSymbol name="share" size={19} />{props.shareLabel}</Button>
+        {props.shareAction ?? <Button className="workspace-header-pill secondary-workspace-action" variant="outline" onClick={comingSoon}><MaterialSymbol name="share" size={19} />{props.shareLabel}</Button>}
         <Button className="workspace-header-pill secondary-workspace-action" variant="outline" onClick={comingSoon}><MaterialSymbol name="settings" size={19} />{props.settingsLabel}</Button>
         <IconButton icon="apps" label={props.appsLabel} onClick={comingSoon} />
         <UserMenu email={props.email} openLabel={props.openUserMenuLabel} languageLabel={props.languageLabel} signOutLabel={props.signOutLabel} signingOutLabel={props.signingOutLabel} signingOut={props.signingOut} onLanguage={props.onLanguage} onSignOut={props.onSignOut} />

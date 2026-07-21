@@ -122,6 +122,33 @@ test("restores the private Chat and enables the composer", async () => {
   expect(fetch).toHaveBeenCalledWith("/api/v1/chats/chat_test", expect.anything());
 });
 
+test("opens Owner access management and queues a local invitation", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  let invitation: Record<string, unknown> | undefined;
+  const workspace = authenticatedWorkspaceHandler();
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic", role: "owner" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/members")) return json({ members: [{ user_id: "usr_test", display_email: "learner@example.com", role: "owner" }] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/invitations") && method === "GET") return json({ invitations: [] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/invitations") && method === "POST") {
+      invitation = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return json({ invitation: { id: "inv_test", ...invitation, state: "pending" } }, 201);
+    }
+    return workspace(input, init);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "Manage access" }));
+  const dialog = await screen.findByRole("dialog", { name: "Manage access" });
+  await user.type(within(dialog).getByLabelText("Invite by email"), "viewer@example.com");
+  await user.click(within(dialog).getByRole("button", { name: "Send invitation" }));
+  await waitFor(() => expect(invitation).toEqual({ email: "viewer@example.com", role: "viewer", locale: "en" }));
+  expect(await screen.findByText("Invitation queued in the local mailbox.")).toBeInTheDocument();
+});
+
 test("selects only ready Sources and pins them when admitting a Message", async () => {
   window.history.pushState(null, "", "/notebooks/nb_test");
   let admittedBody: Record<string, unknown> | undefined;
@@ -922,7 +949,7 @@ test("expands and closes notebook search while querying the backend", async () =
   const input = screen.getByPlaceholderText("Search notebooks");
   await user.type(input, "Alpha");
 
-  await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/v1/notebooks?query=Alpha", expect.anything()));
+  await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/v1/notebooks?scope=all&query=Alpha", expect.anything()));
   await user.click(screen.getByRole("button", { name: "Close search" }));
   expect(screen.queryByPlaceholderText("Search notebooks")).not.toBeInTheDocument();
 });

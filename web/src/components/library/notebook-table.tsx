@@ -8,7 +8,7 @@ import { Skeleton } from "../ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
 import type { NotebookSort } from "./library-toolbar";
 
-export type LibraryNotebook = { id: string; title: string; recent_at?: string };
+export type LibraryNotebook = { id: string; title: string; role?: "viewer" | "editor" | "owner"; recent_at?: string };
 
 type NotebookTableProps = {
   notebooks: LibraryNotebook[];
@@ -51,7 +51,7 @@ export function NotebookTable(props: NotebookTableProps) {
     { id: "source", header: props.sourceLabel, cell: () => props.zeroSourcesLabel },
     { id: "created", header: props.creationDateLabel, cell: () => props.missingDateLabel },
     { id: "visibility", header: "", cell: () => null },
-    { id: "role", header: props.roleLabel, cell: () => props.ownerLabel },
+    { id: "role", header: props.roleLabel, cell: ({ row }) => row.original.role ? row.original.role[0].toUpperCase() + row.original.role.slice(1) : props.ownerLabel },
     {
       id: "actions",
       header: "",

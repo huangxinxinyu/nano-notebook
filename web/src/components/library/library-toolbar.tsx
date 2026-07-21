@@ -9,6 +9,7 @@ import { ToggleGroup, ToggleGroupItem } from "../ui/toggle-group";
 
 export type LibraryView = "grid" | "list";
 export type NotebookSort = "recent" | "title";
+export type LibraryScope = "all" | "owned" | "shared";
 
 type LibraryToolbarProps = {
   allLabel: string;
@@ -25,21 +26,23 @@ type LibraryToolbarProps = {
   query: string;
   view: LibraryView;
   sort: NotebookSort;
+  scope: LibraryScope;
   createAction: ReactNode;
   onSearchOpen: () => void;
   onSearchClose: () => void;
   onQueryChange: (value: string) => void;
   onViewChange: (view: LibraryView) => void;
   onSortChange: (sort: NotebookSort) => void;
+  onScopeChange: (scope: LibraryScope) => void;
 };
 
 export function LibraryToolbar(props: LibraryToolbarProps) {
   return (
     <div className="library-toolbar">
-      <Tabs defaultValue="all" className="library-filter-tabs">
+      <Tabs value={props.scope} onValueChange={(value) => props.onScopeChange(value as LibraryScope)} className="library-filter-tabs">
         <TabsList aria-label={props.allLabel}>
           <TabsTrigger value="all">{props.allLabel}</TabsTrigger>
-          <TabsTrigger value="featured">{props.featuredLabel}</TabsTrigger>
+          <TabsTrigger value="owned">{props.featuredLabel}</TabsTrigger>
           <TabsTrigger value="shared">{props.sharedLabel}</TabsTrigger>
         </TabsList>
       </Tabs>

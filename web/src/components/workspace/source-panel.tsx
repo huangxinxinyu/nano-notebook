@@ -66,10 +66,11 @@ export type SourcePanelCopy = {
   failureReasonLabels: Record<NonNullable<MemberSource["failure_reason"]>, string>;
 };
 
-export function SourcePanelContent({ copy, notebookID, controller }: {
+export function SourcePanelContent({ copy, notebookID, controller, canMaintain = true }: {
   copy: SourcePanelCopy;
   notebookID: string;
   controller: SourcesController;
+  canMaintain?: boolean;
 }) {
   const fileInput = useRef<HTMLInputElement>(null);
   const [addOpen, setAddOpen] = useState(false);
@@ -155,12 +156,12 @@ export function SourcePanelContent({ copy, notebookID, controller }: {
         <h2>{copy.title}</h2>
         <IconButton icon="right_panel_close" label={copy.collapseLabel} symbolSize={19} onClick={() => toast(copy.comingSoonMessage)} />
       </div>
-      <div className="source-panel-controls">
+      {canMaintain ? <div className="source-panel-controls">
         <Button className="add-sources-action" variant="outline" onClick={() => setAddOpen(true)}>
           <MaterialSymbol name="add" size={20} />
           {copy.addSourcesLabel}
         </Button>
-      </div>
+      </div> : null}
       {controller.error ? <p className="source-panel-error" role="alert">{controller.error}</p> : null}
       {!controller.isLoading && controller.sources.length === 0 ? (
         <div className="panel-empty-state">
@@ -182,9 +183,9 @@ export function SourcePanelContent({ copy, notebookID, controller }: {
               ) : <MaterialSymbol name={source.state === "failed" ? "error" : "hourglass_top"} size={18} />}
               <button className="source-list-title" type="button" disabled={source.state !== "ready"} onClick={() => setViewSourceID(source.id)}>{source.title}</button>
               <span className={`source-state source-state--${source.state}`}>{statusLabels[source.state]}</span>
-              {source.state === "failed" ? <IconButton icon="refresh" label={`${copy.retryLabel} ${source.title}`} onClick={() => void sourceAction(source.id, "retry")} /> : null}
-              <IconButton icon="edit" label={`${copy.renameLabel} ${source.title}`} onClick={() => { setEditingSource(source); setEditTitle(source.title); }} />
-              <IconButton icon="delete" label={`${copy.deleteLabel} ${source.title}`} onClick={() => setRemovingSource(source)} />
+              {canMaintain && source.state === "failed" ? <IconButton icon="refresh" label={`${copy.retryLabel} ${source.title}`} onClick={() => void sourceAction(source.id, "retry")} /> : null}
+              {canMaintain ? <IconButton icon="edit" label={`${copy.renameLabel} ${source.title}`} onClick={() => { setEditingSource(source); setEditTitle(source.title); }} /> : null}
+              {canMaintain ? <IconButton icon="delete" label={`${copy.deleteLabel} ${source.title}`} onClick={() => setRemovingSource(source)} /> : null}
               {source.state === "failed" && source.failure_reason ? <p className="source-failure-reason">{copy.failureReasonLabels[source.failure_reason]}</p> : null}
             </article>
           ))}

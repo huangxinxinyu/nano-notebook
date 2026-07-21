@@ -12,7 +12,7 @@ import { Toaster } from "../components/ui/sonner";
 import { Tabs, TabsList, TabsTrigger } from "../components/ui/tabs";
 import { MaterialSymbol } from "../components/icons/material-symbol";
 import { FeaturedNotebooks } from "../components/library/featured-notebooks";
-import { LibraryToolbar, type LibraryView, type NotebookSort } from "../components/library/library-toolbar";
+import { LibraryToolbar, type LibraryScope, type LibraryView, type NotebookSort } from "../components/library/library-toolbar";
 import { NotebookTable } from "../components/library/notebook-table";
 import { LibraryHeader } from "../components/layout/app-header";
 import { NotebookWorkspace } from "../components/workspace/notebook-workspace";
@@ -22,7 +22,7 @@ import { queryClient } from "./queryClient";
 
 type Locale = "en" | "zh";
 type User = { id: string; email: string };
-type Notebook = { id: string; title: string; recent_at?: string };
+type Notebook = { id: string; title: string; role?: "viewer" | "editor" | "owner"; recent_at?: string };
 type SessionState = { status: "anonymous" | "expired" } | { status: "authenticated"; user: User; capabilities: string[] };
 
 const strings = {
@@ -76,6 +76,7 @@ const strings = {
     openUserMenu: "Open user menu",
     allNotebooks: "All",
     featuredNotebooks: "Featured notebooks",
+    ownedNotebooks: "Owned by me",
     sharedWithMe: "Shared with me",
     closeSearch: "Close search",
     gridView: "Grid view",
@@ -96,6 +97,18 @@ const strings = {
     moreActions: "More actions for",
     rename: "Rename",
     share: "Share",
+    manageAccess: "Manage access",
+    inviteEmail: "Invite by email",
+    invite: "Send invitation",
+    viewer: "Viewer",
+    editor: "Editor",
+    members: "Members",
+    pendingInvitations: "Pending invitations",
+    leaveNotebook: "Leave notebook",
+    invitationSent: "Invitation queued in the local mailbox.",
+    acceptInvitation: "Accept invitation",
+    invitationUnavailable: "This invitation is unavailable or has expired.",
+    invitedAs: "Invited as",
     delete: "Delete",
     comingSoon: "This feature is coming soon.",
     featuredComingSoon: "Featured notebooks are coming soon.",
@@ -220,6 +233,7 @@ const strings = {
     openUserMenu: "打开用户菜单",
     allNotebooks: "全部",
     featuredNotebooks: "精选笔记本",
+    ownedNotebooks: "我拥有的",
     sharedWithMe: "与我共享",
     closeSearch: "关闭搜索",
     gridView: "网格视图",
@@ -240,6 +254,18 @@ const strings = {
     moreActions: "更多操作：",
     rename: "重命名",
     share: "分享",
+    manageAccess: "管理访问权限",
+    inviteEmail: "通过邮箱邀请",
+    invite: "发送邀请",
+    viewer: "查看者",
+    editor: "编辑者",
+    members: "成员",
+    pendingInvitations: "待接受邀请",
+    leaveNotebook: "退出笔记本",
+    invitationSent: "邀请已进入本地邮箱队列。",
+    acceptInvitation: "接受邀请",
+    invitationUnavailable: "此邀请不可用或已过期。",
+    invitedAs: "受邀角色",
     delete: "删除",
     comingSoon: "该功能即将推出",
     featuredComingSoon: "精选笔记本功能即将推出",
@@ -351,6 +377,7 @@ function AppShell() {
   const [route, setRoute] = useState(() => window.location.pathname);
   const notebookID = route.startsWith("/notebooks/") ? route.replace("/notebooks/", "") : "";
   const traceRoute = route === "/admin/traces" || route.startsWith("/admin/traces/");
+  const invitationRoute = route === "/invitations/accept";
 
   useLayoutEffect(() => {
     document.documentElement.lang = documentLanguage(locale);
@@ -403,6 +430,8 @@ function AppShell() {
       setUser(authenticatedUser);
       void session.refetch();
     }} />;
+  } else if (invitationRoute) {
+    shell = <InvitationAcceptance t={t} onAccepted={(id) => navigate(`/notebooks/${id}`)} />;
   } else if (traceRoute) {
     shell = <TraceDashboard locale={locale} routePath={route} canRead={capabilities.includes("platform.trace.read")} canReplay={capabilities.includes("platform.trace.replay")} onNavigate={navigate} onLibrary={() => navigate("/")} />;
   } else if (notebookID) {
@@ -509,13 +538,14 @@ function LibraryScreen({ t, locale, user, canTrace, onTraces, onLocale, onOpen, 
   const [searchOpen, setSearchOpen] = useState(false);
   const [view, setView] = useState<LibraryView>("list");
   const [sort, setSort] = useState<NotebookSort>("recent");
+  const [scope, setScope] = useState<LibraryScope>("all");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
   const notebooks = useQuery({
-    queryKey: ["notebooks", query],
+    queryKey: ["notebooks", query, scope],
     queryFn: async () => {
-      const response = await api(`/api/v1/notebooks?query=${encodeURIComponent(query)}`);
+      const response = await api(`/api/v1/notebooks?scope=${scope}&query=${encodeURIComponent(query)}`);
       if (!response.ok) throw new Error(t.unreachable);
       return ((await response.json()) as { notebooks: Notebook[] }).notebooks;
     }
@@ -553,7 +583,7 @@ function LibraryScreen({ t, locale, user, canTrace, onTraces, onLocale, onOpen, 
         {signOutError ? <Alert variant="destructive"><AlertDescription>{signOutError}</AlertDescription></Alert> : null}
         <LibraryToolbar
           allLabel={t.allNotebooks}
-          featuredLabel={t.featuredNotebooks}
+          featuredLabel={t.ownedNotebooks}
           sharedLabel={t.sharedWithMe}
           searchLabel={t.search}
           closeSearchLabel={t.closeSearch}
@@ -566,12 +596,14 @@ function LibraryScreen({ t, locale, user, canTrace, onTraces, onLocale, onOpen, 
           query={query}
           view={view}
           sort={sort}
+          scope={scope}
           createAction={createAction}
           onSearchOpen={() => setSearchOpen(true)}
           onSearchClose={() => { setQuery(""); setSearchOpen(false); }}
           onQueryChange={setQuery}
           onViewChange={setView}
           onSortChange={setSort}
+          onScopeChange={setScope}
         />
         <section className="library-section" aria-labelledby="recent-notebooks-heading">
           <h2 id="recent-notebooks-heading">{t.recentlyOpened}</h2>
@@ -701,6 +733,16 @@ function Workspace({ t, user, notebookID, onLocale, onLibrary, onOpen, onSignedO
     </Dialog>
   );
 
+  const shareAction = notebook.data?.role === "owner" || !notebook.data?.role ? (
+    <ManageAccess notebookID={notebookID} t={t} />
+  ) : (
+    <Button className="workspace-header-pill secondary-workspace-action" variant="outline" onClick={async () => {
+      if (!window.confirm(t.leaveNotebook)) return;
+      const response = await api(`/api/v1/notebooks/${notebookID}/leave`, { method: "POST", headers: { "X-CSRF-Token": csrfToken() } });
+      if (response.ok) onLibrary(); else toast.error(t.safeNotFound);
+    }}><MaterialSymbol name="logout" size={19} />{t.leaveNotebook}</Button>
+  );
+
   const workspaceCopy = {
     panelsLabel: t.notebookPanelsLabel,
     sources: t.sources,
@@ -788,11 +830,105 @@ function Workspace({ t, user, notebookID, onLocale, onLibrary, onOpen, onSignedO
       {notebook.isError ? <div className="workspace-system-state"><Button variant="ghost" onClick={onLibrary}><MaterialSymbol name="arrow_back" size={20} />{t.back}</Button><RetryableAlert message={notebook.error.message} retryLabel={t.retry} onRetry={() => void notebook.refetch()} /></div> : null}
       {notebook.data ? (
         <>
-          <WorkspaceHeader title={notebook.data.title} backLabel={t.back} createAction={createAction} analyzeLabel={t.analyze} shareLabel={t.share} settingsLabel={t.settings} appsLabel={t.apps} email={user.email} openUserMenuLabel={t.openUserMenu} languageLabel={t.languageSwitch} signOutLabel={t.signOut} signingOutLabel={t.signingOut} signingOut={signingOut} comingSoonMessage={t.comingSoon} onBack={onLibrary} onLanguage={onLocale} onSignOut={() => void signOut()} />
-          <NotebookWorkspace notebookID={notebookID} copy={workspaceCopy} />
+          <WorkspaceHeader title={notebook.data.title} backLabel={t.back} createAction={createAction} analyzeLabel={t.analyze} shareLabel={t.share} shareAction={shareAction} settingsLabel={t.settings} appsLabel={t.apps} email={user.email} openUserMenuLabel={t.openUserMenu} languageLabel={t.languageSwitch} signOutLabel={t.signOut} signingOutLabel={t.signingOut} signingOut={signingOut} comingSoonMessage={t.comingSoon} onBack={onLibrary} onLanguage={onLocale} onSignOut={() => void signOut()} />
+          <NotebookWorkspace notebookID={notebookID} copy={workspaceCopy} canMaintainSources={notebook.data.role !== "viewer"} />
         </>
       ) : null}
     </main>
+  );
+}
+
+type AccessMember = { user_id: string; display_email: string; role: "viewer" | "editor" | "owner" };
+type AccessInvitation = { id: string; display_email: string; role: "viewer" | "editor"; state: string };
+
+function InvitationAcceptance({ t, onAccepted }: { t: typeof strings.en; onAccepted: (notebookID: string) => void }) {
+  const token = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("token") ?? "";
+  const preview = useQuery({
+    queryKey: ["invitation-preview", token],
+    enabled: Boolean(token),
+    retry: false,
+    queryFn: async () => {
+      const response = await api(`/api/v1/invitations/resolve?token=${encodeURIComponent(token)}`);
+      if (!response.ok) throw new Error(t.invitationUnavailable);
+      return ((await response.json()) as { invitation: { notebook_title: string; role: string; masked_email: string } }).invitation;
+    }
+  });
+  async function accept() {
+    const response = await api("/api/v1/invitations/accept", {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID(), "X-CSRF-Token": csrfToken() },
+      body: JSON.stringify({ token })
+    });
+    if (!response.ok) {
+      toast.error(t.invitationUnavailable);
+      return;
+    }
+    const payload = (await response.json()) as { membership: { notebook_id: string } };
+    onAccepted(payload.membership.notebook_id);
+  }
+  return (
+    <main className="auth-layout"><section className="auth-panel">
+      <h1>{preview.data?.notebook_title ?? t.acceptInvitation}</h1>
+      {preview.isError || !token ? <Alert variant="destructive"><AlertDescription>{t.invitationUnavailable}</AlertDescription></Alert> : null}
+      {preview.data ? <><p>{t.invitedAs}: {preview.data.role}</p><p>{preview.data.masked_email}</p><Button onClick={() => void accept()}>{t.acceptInvitation}</Button></> : null}
+    </section></main>
+  );
+}
+
+function ManageAccess({ notebookID, t }: { notebookID: string; t: typeof strings.en }) {
+  const [open, setOpen] = useState(false);
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<"viewer" | "editor">("viewer");
+  const access = useQuery({
+    queryKey: ["notebook-access", notebookID],
+    enabled: open,
+    queryFn: async () => {
+      const [membersResponse, invitationsResponse] = await Promise.all([
+        api(`/api/v1/notebooks/${notebookID}/members`), api(`/api/v1/notebooks/${notebookID}/invitations`)
+      ]);
+      if (!membersResponse.ok || !invitationsResponse.ok) throw new Error(t.unreachable);
+      return {
+        members: ((await membersResponse.json()) as { members: AccessMember[] }).members,
+        invitations: ((await invitationsResponse.json()) as { invitations: AccessInvitation[] }).invitations
+      };
+    }
+  });
+
+  async function invite() {
+    if (!email.trim()) return;
+    const response = await api(`/api/v1/notebooks/${notebookID}/invitations`, {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID(), "X-CSRF-Token": csrfToken() },
+      body: JSON.stringify({ email: email.trim(), role, locale: document.documentElement.lang === "zh-CN" ? "zh-CN" : "en" })
+    });
+    if (!response.ok) {
+      toast.error(t.safeNotFound);
+      return;
+    }
+    setEmail("");
+    toast.success(t.invitationSent);
+    await access.refetch();
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild><Button className="workspace-header-pill secondary-workspace-action" variant="outline"><MaterialSymbol name="share" size={19} />{t.manageAccess}</Button></DialogTrigger>
+      <DialogContent className="dialog" closeLabel={t.close}>
+        <DialogTitle>{t.manageAccess}</DialogTitle>
+        <Label htmlFor="invite-email">{t.inviteEmail}</Label>
+        <Input id="invite-email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
+        <div className="dialog-actions">
+          <select aria-label={t.role} value={role} onChange={(event) => setRole(event.target.value as "viewer" | "editor")}>
+            <option value="viewer">{t.viewer}</option><option value="editor">{t.editor}</option>
+          </select>
+          <Button disabled={!email.trim()} onClick={() => void invite()}>{t.invite}</Button>
+        </div>
+        <h3>{t.members}</h3>
+        <div>{access.data?.members.map((member) => <p key={member.user_id}>{member.display_email} · {member.role}</p>)}</div>
+        <h3>{t.pendingInvitations}</h3>
+        <div>{access.data?.invitations.filter((invitation) => invitation.state === "pending").map((invitation) => <p key={invitation.id}>{invitation.display_email} · {invitation.role}</p>)}</div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
