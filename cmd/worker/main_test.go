@@ -82,6 +82,12 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 	t.Setenv("NANO_SOURCE_PROCESSING_CONCURRENCY", "4")
 	t.Setenv("NANO_REPLAY_KEY_ID", "replay-key-7")
 	t.Setenv("NANO_REPLAY_KEK_BASE64", "bmFuby1sb2NhbC1kZXYta2VrLTAwMDAwMDAwMDAwMDA=")
+	t.Setenv("NANO_MAIL_SMTP_ADDR", "mailpit.internal:1025")
+	t.Setenv("NANO_MAIL_FROM", "nano@example.test")
+	t.Setenv("NANO_WEB_BASE_URL", "http://web.internal:5173/")
+	t.Setenv("NANO_MAIL_LEASE_DURATION", "25s")
+	t.Setenv("NANO_MAIL_POLL_INTERVAL", "175ms")
+	t.Setenv("NANO_MAIL_SMTP_TIMEOUT", "4s")
 
 	config, err := loadWorkerConfig()
 	if err != nil {
@@ -122,6 +128,11 @@ func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {
 		config.SourceProcessingMaxBytes != 1048576 || config.SourceProcessingMaxRunes != 200000 ||
 		config.AgentInteractiveConcurrency != 6 || config.SourceProcessingConcurrency != 4 {
 		t.Fatalf("Source processing config = %#v", config)
+	}
+	if config.MailSMTPAddr != "mailpit.internal:1025" || config.MailFrom != "nano@example.test" ||
+		config.WebBaseURL != "http://web.internal:5173" || config.MailLeaseDuration != 25*time.Second ||
+		config.MailPollInterval != 175*time.Millisecond || config.MailSMTPTimeout != 4*time.Second {
+		t.Fatalf("mail config = %#v", config)
 	}
 }
 

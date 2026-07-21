@@ -22,6 +22,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/documentrender"
 	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
+	"github.com/huangxinxinyu/nano-notebook/internal/mailoutbox"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/telemetry"
@@ -84,6 +85,12 @@ type workerConfig struct {
 	SourceProcessingConcurrency    int
 	ReplayKeyID                    string
 	ReplayKEK                      []byte
+	MailSMTPAddr                   string
+	MailFrom                       string
+	WebBaseURL                     string
+	MailLeaseDuration              time.Duration
+	MailPollInterval               time.Duration
+	MailSMTPTimeout                time.Duration
 }
 
 type traceFlusher interface {
@@ -224,6 +231,13 @@ func main() {
 		os.Exit(1)
 	}
 	controller := agent.NewController(runtime, modelClient, registry)
+	mailSender := mailoutbox.NewSender(
+		mailoutbox.NewQueue(db.Pool(), config.MailLeaseDuration),
+		mailoutbox.NewSMTPMailer(config.MailSMTPAddr, config.MailFrom, config.MailSMTPTimeout),
+		config.WebBaseURL,
+	)
+	mailDone := make(chan error, 1)
+	go func() { mailDone <- mailSender.Run(ctx, config.MailPollInterval) }()
 	workerService := agentworker.NewServiceWithConcurrency(db.Pool(), jobs.NewQueueWithTraceSink(db.Pool(), traceExporter), controller, 5*time.Second, 210*time.Second, config.AgentInteractiveConcurrency)
 	workerDone := make(chan error, 1)
 	go func() {
@@ -298,6 +312,16 @@ func main() {
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		slog.Error("worker shutdown failed", "error", err)
+		os.Exit(1)
+	}
+	select {
+	case err := <-mailDone:
+		if err != nil {
+			slog.Error("mail Sender shutdown failed", "error", err)
+			os.Exit(1)
+		}
+	case <-shutdownCtx.Done():
+		slog.Error("mail Sender did not stop before shutdown", "error", shutdownCtx.Err())
 		os.Exit(1)
 	}
 	select {
@@ -468,6 +492,18 @@ func loadWorkerConfig() (workerConfig, error) {
 	if err != nil {
 		return workerConfig{}, err
 	}
+	mailLeaseDuration, err := workerEnvDuration("NANO_MAIL_LEASE_DURATION", 30*time.Second)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	mailPollInterval, err := workerEnvDuration("NANO_MAIL_POLL_INTERVAL", time.Second)
+	if err != nil {
+		return workerConfig{}, err
+	}
+	mailSMTPTimeout, err := workerEnvDuration("NANO_MAIL_SMTP_TIMEOUT", 10*time.Second)
+	if err != nil {
+		return workerConfig{}, err
+	}
 	replayKEK, err := base64.StdEncoding.DecodeString(env("NANO_REPLAY_KEK_BASE64", "bmFuby1sb2NhbC1kZXYta2VrLTAwMDAwMDAwMDAwMDA="))
 	if err != nil {
 		return workerConfig{}, fmt.Errorf("parse NANO_REPLAY_KEK_BASE64: %w", err)
@@ -519,6 +555,10 @@ func loadWorkerConfig() (workerConfig, error) {
 		SourceProcessingMaxBytes:     int64(sourceProcessingMaxBytes), SourceProcessingMaxRunes: sourceProcessingMaxRunes,
 		AgentInteractiveConcurrency: agentInteractiveConcurrency, SourceProcessingConcurrency: sourceProcessingConcurrency,
 		ReplayKeyID: env("NANO_REPLAY_KEY_ID", "nano-local-replay-key-v1"), ReplayKEK: replayKEK,
+		MailSMTPAddr:      env("NANO_MAIL_SMTP_ADDR", "127.0.0.1:51025"),
+		MailFrom:          env("NANO_MAIL_FROM", "nano@localhost"),
+		WebBaseURL:        strings.TrimRight(env("NANO_WEB_BASE_URL", "http://localhost:5173"), "/"),
+		MailLeaseDuration: mailLeaseDuration, MailPollInterval: mailPollInterval, MailSMTPTimeout: mailSMTPTimeout,
 	}
 	if strings.TrimSpace(config.DatabaseURL) == "" || strings.TrimSpace(config.Addr) == "" ||
 		strings.TrimSpace(collectorURL) == "" || strings.TrimSpace(config.CollectorServiceToken) == "" ||
@@ -543,7 +583,9 @@ func loadWorkerConfig() (workerConfig, error) {
 		strings.TrimSpace(config.AgentVerifierModel) == "" || strings.TrimSpace(config.AgentVerifierPrompt) == "" ||
 		config.SourceProcessingMaxBytes <= 0 || config.SourceProcessingMaxBytes > 100*1024*1024 || config.SourceProcessingMaxRunes <= 0 ||
 		workload.ValidateInteractiveCapacity(config.AgentInteractiveConcurrency, config.SourceProcessingConcurrency) != nil ||
-		strings.TrimSpace(config.ReplayKeyID) == "" || len(config.ReplayKEK) != 32 {
+		strings.TrimSpace(config.ReplayKeyID) == "" || len(config.ReplayKEK) != 32 ||
+		strings.TrimSpace(config.MailSMTPAddr) == "" || strings.TrimSpace(config.MailFrom) == "" || strings.TrimSpace(config.WebBaseURL) == "" ||
+		config.MailLeaseDuration <= 0 || config.MailPollInterval <= 0 || config.MailSMTPTimeout <= 0 {
 		return workerConfig{}, errors.New("worker configuration is incomplete or inconsistent")
 	}
 	return config, nil

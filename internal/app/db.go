@@ -187,8 +187,162 @@ create unique index if not exists notebook_single_owner_idx
 	on notebook_memberships(notebook_id)
 	where role = 'owner';
 
+create or replace function nano_enforce_notebook_owner()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+	candidate_notebook_id text;
+begin
+	if tg_table_name = 'notebook_notebooks' then
+		candidate_notebook_id := coalesce(new.id, old.id);
+	else
+		candidate_notebook_id := coalesce(new.notebook_id, old.notebook_id);
+	end if;
+	if exists(select 1 from public.notebook_notebooks where id=candidate_notebook_id)
+		and (select count(*) from public.notebook_memberships where notebook_id=candidate_notebook_id and role='owner') <> 1 then
+		raise exception 'notebook % must have exactly one owner', candidate_notebook_id using errcode='23514';
+	end if;
+	return null;
+end
+$$;
+
+drop trigger if exists notebook_owner_membership_guard on notebook_memberships;
+create constraint trigger notebook_owner_membership_guard
+	after insert or update or delete on notebook_memberships
+	deferrable initially deferred for each row execute function nano_enforce_notebook_owner();
+
+drop trigger if exists notebook_owner_notebook_guard on notebook_notebooks;
+create constraint trigger notebook_owner_notebook_guard
+	after insert on notebook_notebooks
+	deferrable initially deferred for each row execute function nano_enforce_notebook_owner();
+
 create index if not exists notebook_owned_recent_idx
 	on notebook_memberships(user_id, role, notebook_id);
+
+create table if not exists notebook_invitations (
+	id text primary key,
+	notebook_id text not null references notebook_notebooks(id) on delete cascade,
+	canonical_email text not null check (char_length(canonical_email) between 3 and 320),
+	display_email text not null check (char_length(display_email) between 3 and 320),
+	role text not null check (role in ('viewer', 'editor')),
+	token_hash text not null unique check (token_hash ~ '^[0-9a-f]{64}$'),
+	token_generation integer not null default 1 check (token_generation > 0),
+	state text not null check (state in ('pending', 'accepted', 'revoked', 'expired')),
+	invited_by_user_id text not null references identity_users(id) on delete restrict,
+	accepted_by_user_id text references identity_users(id) on delete restrict,
+	expires_at timestamptz not null,
+	accepted_at timestamptz,
+	revoked_at timestamptz,
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now(),
+	constraint notebook_invitations_lifecycle_check check (
+		(state = 'pending' and accepted_by_user_id is null and accepted_at is null and revoked_at is null)
+		or (state = 'accepted' and accepted_by_user_id is not null and accepted_at is not null and revoked_at is null)
+		or (state = 'revoked' and accepted_by_user_id is null and accepted_at is null and revoked_at is not null)
+		or (state = 'expired' and accepted_by_user_id is null and accepted_at is null and revoked_at is null)
+	)
+);
+
+create unique index if not exists notebook_invitations_pending_email_idx
+	on notebook_invitations(notebook_id, canonical_email)
+	where state = 'pending';
+
+create index if not exists notebook_invitations_management_idx
+	on notebook_invitations(notebook_id, state, created_at desc, id);
+
+create index if not exists notebook_invitations_expiry_idx
+	on notebook_invitations(expires_at, id)
+	where state = 'pending';
+
+create table if not exists platform_mail_outbox (
+	id text primary key,
+	kind text not null check (kind in ('notebook_invitation', 'notebook_deleted')),
+	invitation_id text,
+	actor_user_id text not null references identity_users(id) on delete restrict,
+	recipient_email text not null check (char_length(recipient_email) between 3 and 320),
+	locale text not null check (locale in ('en', 'zh-CN')),
+	payload jsonb not null check (jsonb_typeof(payload) = 'object'),
+	state text not null check (state in ('pending', 'leased', 'sent', 'failed')),
+	attempt_no integer not null default 0 check (attempt_no between 0 and 10),
+	available_at timestamptz not null,
+	lease_token uuid,
+	lease_expires_at timestamptz,
+	last_error_code text,
+	created_at timestamptz not null default now(),
+	updated_at timestamptz not null default now(),
+	sent_at timestamptz,
+	constraint platform_mail_outbox_lease_check check (
+		(state = 'pending' and lease_token is null and lease_expires_at is null and sent_at is null)
+		or (state = 'leased' and lease_token is not null and lease_expires_at is not null and sent_at is null)
+		or (state = 'sent' and lease_token is null and lease_expires_at is null and sent_at is not null)
+		or (state = 'failed' and lease_token is null and lease_expires_at is null and sent_at is null)
+	)
+);
+
+create index if not exists platform_mail_outbox_claim_idx
+	on platform_mail_outbox(available_at, created_at, id)
+	where state = 'pending';
+
+create or replace function nano_notebook_reserved_member_slots(candidate_notebook_id text, observed_at timestamptz)
+returns integer
+language sql
+stable
+security definer
+set search_path = pg_catalog, public
+as $$
+	select case when exists (
+		select 1 from public.notebook_memberships owner_membership
+		where owner_membership.notebook_id = candidate_notebook_id
+		  and owner_membership.user_id = nullif(current_setting('app.principal_id', true), '')
+		  and owner_membership.role = 'owner'
+	) then (
+		select
+			(select count(*) from public.notebook_memberships m where m.notebook_id=candidate_notebook_id and m.role <> 'owner') +
+			(select count(*) from public.notebook_invitations i where i.notebook_id=candidate_notebook_id and i.state='pending' and i.expires_at > observed_at)
+	)::integer else -1 end
+$$;
+revoke all on function nano_notebook_reserved_member_slots(text, timestamptz) from public;
+grant execute on function nano_notebook_reserved_member_slots(text, timestamptz) to nano_app;
+
+create or replace function nano_notebook_email_is_member(candidate_notebook_id text, candidate_email text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = pg_catalog, public
+as $$
+	select exists (
+		select 1
+		from public.notebook_memberships owner_membership
+		where owner_membership.notebook_id = candidate_notebook_id
+		  and owner_membership.user_id = nullif(current_setting('app.principal_id', true), '')
+		  and owner_membership.role = 'owner'
+	) and exists (
+		select 1
+		from public.notebook_memberships m
+		join public.identity_users u on u.id=m.user_id
+		where m.notebook_id=candidate_notebook_id and u.canonical_email=candidate_email
+	)
+$$;
+revoke all on function nano_notebook_email_is_member(text, text) from public;
+grant execute on function nano_notebook_email_is_member(text, text) to nano_app;
+
+create or replace function nano_resolve_notebook_invitation(candidate_token_hash text)
+returns table(notebook_title text, invited_role text, canonical_email text, expires_at timestamptz)
+language sql
+stable
+security definer
+set search_path = pg_catalog, public
+as $$
+	select n.title,i.role,i.canonical_email,i.expires_at
+	from public.notebook_invitations i join public.notebook_notebooks n on n.id=i.notebook_id
+	where i.token_hash=candidate_token_hash and i.state='pending' and i.expires_at > now()
+$$;
+revoke all on function nano_resolve_notebook_invitation(text) from public;
+grant execute on function nano_resolve_notebook_invitation(text) to nano_app;
 
 create table if not exists source_sources (
 	id text primary key,
@@ -1121,8 +1275,10 @@ alter table identity_sessions enable row level security;
 alter table identity_auth_attempts enable row level security;
 alter table platform_capability_grants enable row level security;
 alter table platform_replay_access_audit enable row level security;
+alter table platform_mail_outbox enable row level security;
 alter table notebook_notebooks enable row level security;
 alter table notebook_memberships enable row level security;
+alter table notebook_invitations enable row level security;
 alter table source_sources enable row level security;
 alter table source_upload_intents enable row level security;
 alter table source_url_admissions enable row level security;
@@ -1161,8 +1317,10 @@ grant select, insert, update, delete on
 	identity_auth_attempts,
 	platform_capability_grants,
 	platform_replay_access_audit,
+	platform_mail_outbox,
 	notebook_notebooks,
 	notebook_memberships,
+	notebook_invitations,
 	source_sources,
 	source_upload_intents,
 	source_url_admissions,
@@ -1228,6 +1386,7 @@ grant insert on agent_trace_refs to nano_app;
 grant select, insert, update, delete on agent_trace_refs to nano_worker;
 revoke all on agentobs_outbox_commands, agentobs_outbox_command_objects from nano_app, nano_worker;
 grant select, insert, update, delete on agentobs_outbox_commands, agentobs_outbox_command_objects to nano_worker;
+grant select, insert, update, delete on platform_mail_outbox to nano_worker;
 
 drop policy if exists identity_users_owner on identity_users;
 create policy identity_users_owner on identity_users
@@ -1251,16 +1410,236 @@ create policy platform_replay_access_audit_append on platform_replay_access_audi
 	for insert to nano_app
 	with check (operator_user_id = nullif(current_setting('app.principal_id', true), ''));
 
-drop policy if exists notebook_memberships_owner on notebook_memberships;
-create policy notebook_memberships_owner on notebook_memberships
+drop policy if exists platform_mail_outbox_actor on platform_mail_outbox;
+create policy platform_mail_outbox_actor on platform_mail_outbox
 	for all to nano_app
-	using (user_id = nullif(current_setting('app.principal_id', true), ''))
-	with check (user_id = nullif(current_setting('app.principal_id', true), ''));
+	using (actor_user_id = nullif(current_setting('app.principal_id', true), ''))
+	with check (actor_user_id = nullif(current_setting('app.principal_id', true), ''));
+
+drop policy if exists platform_mail_outbox_worker on platform_mail_outbox;
+create policy platform_mail_outbox_worker on platform_mail_outbox
+	for all to nano_worker using (true) with check (true);
+
+create or replace function nano_has_notebook_capability(candidate_notebook_id text, candidate_capability text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = pg_catalog, public
+as $$
+	select exists (
+		select 1 from public.notebook_memberships m
+		where m.notebook_id = candidate_notebook_id
+		  and m.user_id = nullif(current_setting('app.principal_id', true), '')
+		  and case candidate_capability
+			when 'notebook.read' then m.role in ('viewer', 'editor', 'owner')
+			when 'source.read' then m.role in ('viewer', 'editor', 'owner')
+			when 'source.maintain' then m.role in ('editor', 'owner')
+			when 'notebook.manage' then m.role = 'owner'
+			else false
+		  end
+	)
+$$;
+revoke all on function nano_has_notebook_capability(text, text) from public;
+grant execute on function nano_has_notebook_capability(text, text) to nano_app;
+
+create or replace function nano_membership_insert_allowed(candidate_notebook_id text, candidate_user_id text, candidate_role text)
+returns boolean
+language sql
+stable
+security definer
+set search_path = pg_catalog, public
+as $$
+	select candidate_user_id = nullif(current_setting('app.principal_id', true), '') and (
+		(candidate_role = 'owner' and not exists (
+			select 1 from public.notebook_memberships m where m.notebook_id=candidate_notebook_id
+		))
+		or (candidate_role in ('viewer','editor') and exists (
+			select 1
+			from public.notebook_invitations i
+			join public.identity_users u on u.id=candidate_user_id
+			where i.notebook_id=candidate_notebook_id and i.canonical_email=u.canonical_email
+			  and i.role=candidate_role and i.state='pending' and i.expires_at > now()
+		))
+	)
+$$;
+revoke all on function nano_membership_insert_allowed(text, text, text) from public;
+grant execute on function nano_membership_insert_allowed(text, text, text) to nano_app;
+
+create or replace function nano_transfer_notebook_ownership(candidate_notebook_id text, actor_user_id text, target_user_id text)
+returns boolean
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+begin
+	if actor_user_id <> nullif(current_setting('app.principal_id', true), '')
+		or not exists(select 1 from public.notebook_memberships where notebook_id=candidate_notebook_id and user_id=actor_user_id and role='owner')
+		or not exists(select 1 from public.notebook_memberships where notebook_id=candidate_notebook_id and user_id=target_user_id and role in ('viewer','editor')) then
+		return false;
+	end if;
+	update public.notebook_memberships set role='editor' where notebook_id=candidate_notebook_id and user_id=actor_user_id;
+	update public.notebook_memberships set role='owner' where notebook_id=candidate_notebook_id and user_id=target_user_id;
+	return true;
+end
+$$;
+revoke all on function nano_transfer_notebook_ownership(text, text, text) from public;
+grant execute on function nano_transfer_notebook_ownership(text, text, text) to nano_app;
+
+create or replace function nano_depart_notebook_member(candidate_notebook_id text, actor_user_id text, target_user_id text, owner_action boolean)
+returns boolean
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+	allowed boolean;
+begin
+	select case when owner_action then
+		exists(select 1 from public.notebook_memberships where notebook_id=candidate_notebook_id and user_id=actor_user_id and role='owner')
+		and exists(select 1 from public.notebook_memberships where notebook_id=candidate_notebook_id and user_id=target_user_id and role <> 'owner')
+	else
+		actor_user_id=target_user_id and exists(select 1 from public.notebook_memberships where notebook_id=candidate_notebook_id and user_id=target_user_id and role <> 'owner')
+	end into allowed;
+	if not allowed or actor_user_id <> nullif(current_setting('app.principal_id', true), '') then
+		return false;
+	end if;
+
+	update public.agent_jobs j set status='cancelled', lease_token=null, lease_expires_at=null,
+		finished_at=now(), updated_at=now()
+	from public.agent_runs r join public.chat_chats c on c.id=r.chat_id
+	where j.run_id=r.id and c.notebook_id=candidate_notebook_id and c.creator_user_id=target_user_id
+	  and j.status in ('queued','running');
+	update public.agent_runs r set status='cancelled', error_code='membership_revoked', finished_at=now(), updated_at=now()
+	from public.chat_chats c
+	where r.chat_id=c.id and c.notebook_id=candidate_notebook_id and c.creator_user_id=target_user_id
+	  and r.status in ('queued','running');
+	delete from public.chat_chats where notebook_id=candidate_notebook_id and creator_user_id=target_user_id;
+	delete from public.notebook_memberships where notebook_id=candidate_notebook_id and user_id=target_user_id and role <> 'owner';
+	return found;
+end
+$$;
+revoke all on function nano_depart_notebook_member(text, text, text, boolean) from public;
+grant execute on function nano_depart_notebook_member(text, text, text, boolean) to nano_app;
+
+create or replace function nano_notebook_member_directory(candidate_notebook_id text)
+returns table(user_id text, canonical_email text, display_email text, role text, created_at timestamptz)
+language sql
+stable
+security definer
+set search_path = pg_catalog, public
+as $$
+	select m.user_id, u.canonical_email, u.display_email, m.role, m.created_at
+	from public.notebook_memberships m join public.identity_users u on u.id=m.user_id
+	where m.notebook_id=candidate_notebook_id
+	  and exists(select 1 from public.notebook_memberships actor
+		where actor.notebook_id=candidate_notebook_id
+		  and actor.user_id=nullif(current_setting('app.principal_id', true), '') and actor.role='owner')
+	order by case m.role when 'owner' then 0 else 1 end, lower(u.display_email), m.user_id
+$$;
+revoke all on function nano_notebook_member_directory(text) from public;
+grant execute on function nano_notebook_member_directory(text) to nano_app;
+
+create or replace function nano_delete_notebook(candidate_notebook_id text, actor_user_id text)
+returns boolean
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+begin
+	if actor_user_id <> nullif(current_setting('app.principal_id', true), '')
+		or not exists(select 1 from public.notebook_memberships where notebook_id=candidate_notebook_id and user_id=actor_user_id and role='owner') then
+		return false;
+	end if;
+	update public.agent_jobs j set status='cancelled',lease_token=null,lease_expires_at=null,finished_at=now(),updated_at=now()
+	from public.agent_runs r join public.chat_chats c on c.id=r.chat_id
+	where j.run_id=r.id and c.notebook_id=candidate_notebook_id and j.status in ('queued','running');
+	update public.agent_runs r set status='cancelled',error_code='notebook_deleted',finished_at=now(),updated_at=now()
+	from public.chat_chats c where r.chat_id=c.id and c.notebook_id=candidate_notebook_id and r.status in ('queued','running');
+	delete from public.notebook_notebooks where id=candidate_notebook_id;
+	return found;
+end
+$$;
+revoke all on function nano_delete_notebook(text, text) from public;
+grant execute on function nano_delete_notebook(text, text) to nano_app;
+
+drop policy if exists notebook_memberships_owner on notebook_memberships;
+drop policy if exists notebook_memberships_read on notebook_memberships;
+create policy notebook_memberships_owner on notebook_memberships
+	for select to nano_app
+	using (
+		user_id = nullif(current_setting('app.principal_id', true), '')
+		or nano_has_notebook_capability(notebook_id, 'notebook.manage')
+	);
+
+drop policy if exists notebook_memberships_insert on notebook_memberships;
+create policy notebook_memberships_insert on notebook_memberships
+	for insert to nano_app
+	with check (nano_membership_insert_allowed(notebook_id, user_id, role));
+
+drop policy if exists notebook_memberships_update on notebook_memberships;
+create policy notebook_memberships_update on notebook_memberships
+	for update to nano_app
+	using (nano_has_notebook_capability(notebook_id, 'notebook.manage'))
+	with check (nano_has_notebook_capability(notebook_id, 'notebook.manage'));
+
+drop policy if exists notebook_memberships_delete on notebook_memberships;
+create policy notebook_memberships_delete on notebook_memberships
+	for delete to nano_app
+	using (
+		(role <> 'owner' and user_id = nullif(current_setting('app.principal_id', true), ''))
+		or (role <> 'owner' and nano_has_notebook_capability(notebook_id, 'notebook.manage'))
+	);
 
 drop policy if exists notebook_memberships_worker on notebook_memberships;
 create policy notebook_memberships_worker on notebook_memberships
 	for select to nano_worker
 	using (true);
+
+drop policy if exists notebook_invitations_owner_read on notebook_invitations;
+create policy notebook_invitations_owner_read on notebook_invitations
+	for select to nano_app
+	using (
+		exists (
+			select 1 from notebook_memberships m
+			where m.notebook_id = notebook_invitations.notebook_id
+			  and m.user_id = nullif(current_setting('app.principal_id', true), '')
+			  and m.role = 'owner'
+		)
+		or exists (
+			select 1 from identity_users u
+			where u.id = nullif(current_setting('app.principal_id', true), '')
+			  and u.canonical_email = notebook_invitations.canonical_email
+		)
+	);
+
+drop policy if exists notebook_invitations_owner_insert on notebook_invitations;
+create policy notebook_invitations_owner_insert on notebook_invitations
+	for insert to nano_app
+	with check (exists (
+		select 1 from notebook_memberships m
+		where m.notebook_id = notebook_invitations.notebook_id
+		  and m.user_id = nullif(current_setting('app.principal_id', true), '')
+		  and m.role = 'owner'
+	));
+
+drop policy if exists notebook_invitations_participant_update on notebook_invitations;
+create policy notebook_invitations_participant_update on notebook_invitations
+	for update to nano_app
+	using (
+		exists (
+			select 1 from notebook_memberships m
+			where m.notebook_id = notebook_invitations.notebook_id
+			  and m.user_id = nullif(current_setting('app.principal_id', true), '')
+			  and m.role = 'owner'
+		)
+		or exists (
+			select 1 from identity_users u
+			where u.id = nullif(current_setting('app.principal_id', true), '')
+			  and u.canonical_email = notebook_invitations.canonical_email
+		)
+	)
+	with check (true);
 
 drop policy if exists notebook_notebooks_owner on notebook_notebooks;
 drop policy if exists notebook_notebooks_read on notebook_notebooks;

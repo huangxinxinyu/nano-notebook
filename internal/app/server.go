@@ -106,6 +106,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/v1/auth/sign-out", s.signOut)
 	s.mux.HandleFunc("/api/v1/notebooks", s.notebooks)
 	s.mux.HandleFunc("/api/v1/notebooks/", s.notebookByID)
+	s.mux.HandleFunc("/api/v1/invitations/accept", s.acceptInvitation)
+	s.mux.HandleFunc("/api/v1/invitations/resolve", s.resolveInvitation)
 	s.mux.HandleFunc("/api/v1/sources/", s.sourceByID)
 	s.mux.HandleFunc("/api/v1/citations/", s.citationByID)
 	s.mux.HandleFunc("/api/v1/source-upload-intents/", s.sourceUploadIntentByID)
@@ -443,6 +445,38 @@ func (s *Server) notebookByID(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) == 2 && parts[0] != "" && parts[1] == "chats" {
 		s.notebookChats(w, r, user.ID, parts[0])
+		return
+	}
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "invitations" {
+		s.notebookInvitations(w, r, user, parts[0])
+		return
+	}
+	if len(parts) >= 3 && len(parts) <= 4 && parts[0] != "" && parts[1] == "invitations" && parts[2] != "" {
+		action := ""
+		if len(parts) == 4 {
+			action = parts[3]
+		}
+		s.notebookInvitationByID(w, r, user, parts[0], parts[2], action)
+		return
+	}
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "members" {
+		s.notebookMembers(w, r, user, parts[0])
+		return
+	}
+	if len(parts) >= 3 && len(parts) <= 4 && parts[0] != "" && parts[1] == "members" && parts[2] != "" {
+		action := ""
+		if len(parts) == 4 {
+			action = parts[3]
+		}
+		s.notebookMemberCommand(w, r, user, parts[0], parts[2], action)
+		return
+	}
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "leave" {
+		s.leaveNotebook(w, r, user, parts[0])
+		return
+	}
+	if len(parts) == 1 && parts[0] != "" && (r.Method == http.MethodPatch || r.Method == http.MethodDelete) {
+		s.mutateNotebook(w, r, user, parts[0])
 		return
 	}
 	if r.Method != http.MethodGet || len(parts) != 1 || parts[0] == "" {
