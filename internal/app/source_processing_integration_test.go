@@ -21,12 +21,55 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/normalize"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
+	"github.com/huangxinxinyu/nano-notebook/internal/qdrantstore"
+	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
 	"github.com/huangxinxinyu/nano-notebook/internal/source"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcejobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceprocessing"
+	"github.com/huangxinxinyu/nano-notebook/internal/sourceprojection"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+func TestFreshDatabaseBootstrapProcessesFirstTextSourceToReady(t *testing.T) {
+	api := newTestAPI(t)
+	config := testRetrievalIndexConfig()
+	config.EmbeddingModel = "test/embed"
+	config.EmbeddingDimensions = 3
+	version, created, err := retrieval.NewVersionStore(api.db.Pool()).BootstrapDevelopment(
+		context.Background(), "riv_dev_baseline_v1", "dev-bootstrap-v1", config,
+	)
+	if err != nil || !created {
+		t.Fatalf("BootstrapDevelopment version=%+v created=%t err=%v", version, created, err)
+	}
+
+	owner := api.register(t, "fresh-bootstrap-source@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "fresh-bootstrap-source")
+	ownerID := sourceTestUserID(t, api, "fresh-bootstrap-source@example.com")
+	payload := []byte("The first Source can become searchable on a clean development database.")
+	objectKey := seedProcessableSource(t, api, ownerID, notebookID, "src_fresh_bootstrap", "srcjob_fresh_bootstrap", source.FormatTXT, payload)
+	objects := objectstore.NewMemoryStore()
+	if err := objects.Put(context.Background(), objectKey, payload); err != nil {
+		t.Fatal(err)
+	}
+	queue := sourcejobs.NewQueue(api.db.Pool(), time.Minute)
+	lease, ok, err := queue.Claim(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
+	}
+	vectors := &memoryVectorStore{}
+	projection := sourceprojection.New(api.db.Pool(), vectors, deterministicEmbedder{})
+	processor := sourceprocessing.NewProcessor(api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, projection, sourceprocessing.Config{
+		ExtractionConfigID: "extract-text-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000,
+	})
+	if err := processor.ProcessLease(context.Background(), lease); err != nil {
+		t.Fatalf("ProcessLease: %v", err)
+	}
+	assertSourceJobState(t, api, "src_fresh_bootstrap", "srcjob_fresh_bootstrap", source.StateReady, "succeeded", "")
+	if len(vectors.points) == 0 {
+		t.Fatal("fresh Source produced no Retrieval points")
+	}
+}
 
 func TestTextSourceProcessorPublishesActiveEvidenceAndReadyAtomically(t *testing.T) {
 	api := newTestAPI(t)
@@ -575,6 +618,32 @@ func TestTextSourceProcessorResumesFromPublishedEvidenceBoundary(t *testing.T) {
 	}
 }
 
+func TestSourceProcessorTerminallyFailsMissingRetrievalAuthority(t *testing.T) {
+	api := newTestAPI(t)
+	owner := api.register(t, "source-processing-retrieval-unavailable@example.com")
+	notebookID := createSourceTestNotebook(t, api, owner, "source-processing-retrieval-unavailable")
+	ownerID := sourceTestUserID(t, api, "source-processing-retrieval-unavailable@example.com")
+	payload := []byte("Evidence awaiting retrieval authority.")
+	objectKey := seedProcessableSource(t, api, ownerID, notebookID, "src_processing_retrieval_unavailable", "srcjob_processing_retrieval_unavailable", source.FormatTXT, payload)
+	objects := objectstore.NewMemoryStore()
+	if err := objects.Put(context.Background(), objectKey, payload); err != nil {
+		t.Fatal(err)
+	}
+	queue := sourcejobs.NewQueue(api.db.Pool(), time.Minute)
+	lease, ok, err := queue.Claim(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("Claim=%+v ok=%v err=%v", lease, ok, err)
+	}
+	projection := &recordingEvidenceProjection{buildError: sourceprocessing.ErrRetrievalUnavailable}
+	processor := sourceprocessing.NewProcessor(api.db.Pool(), queue, evidence.NewPublisher(api.db.Pool(), objects), objects, projection, sourceprocessing.Config{
+		ExtractionConfigID: "extract-text-v1", MaxSourceBytes: 1 << 20, MaxNormalizedRunes: 10_000,
+	})
+	if err := processor.ProcessLease(context.Background(), lease); err != nil {
+		t.Fatalf("ProcessLease terminal failure: %v", err)
+	}
+	assertSourceJobState(t, api, "src_processing_retrieval_unavailable", "srcjob_processing_retrieval_unavailable", source.StateFailed, "failed", "retrieval_unavailable")
+}
+
 type recordingEvidenceProjection struct {
 	builds         int
 	verifications  int
@@ -583,6 +652,25 @@ type recordingEvidenceProjection struct {
 	buildError     error
 	pool           *pgxpool.Pool
 	indexVersionID string
+}
+
+type memoryVectorStore struct {
+	points []qdrantstore.Point
+}
+
+func (s *memoryVectorStore) Upsert(_ context.Context, points []qdrantstore.Point) error {
+	s.points = append(s.points, points...)
+	return nil
+}
+
+func (s *memoryVectorStore) Count(_ context.Context, scope qdrantstore.Scope) (int, error) {
+	count := 0
+	for _, point := range s.points {
+		if point.NotebookID == scope.NotebookID && point.IndexVersionID == scope.IndexVersionID {
+			count++
+		}
+	}
+	return count, nil
 }
 
 type fixedExtractor struct {

@@ -157,6 +157,7 @@ const strings = {
     sourceFailureUnavailable: "The stored Source is unavailable or changed.",
     sourceFailureUnreadable: "The file content could not be read.",
     sourceFailureIndexing: "The search index could not be verified.",
+    sourceFailureRetrievalUnavailable: "Search indexing is not configured. Ask an administrator to activate a Retrieval Index Version.",
     sourceFailureInterrupted: "Processing was interrupted too many times.",
     sourceFailureGeneric: "This Source could not be processed.",
     deleteSource: "Delete",
@@ -321,6 +322,7 @@ const strings = {
     sourceFailureUnavailable: "已保存的资料不可用或已发生变化。",
     sourceFailureUnreadable: "无法读取此文件的内容。",
     sourceFailureIndexing: "无法验证此资料的检索索引。",
+    sourceFailureRetrievalUnavailable: "尚未配置检索索引，请联系管理员激活 Retrieval Index Version。",
     sourceFailureInterrupted: "资料处理被中断的次数过多。",
     sourceFailureGeneric: "无法处理此资料。",
     deleteSource: "删除",
@@ -821,6 +823,7 @@ function Workspace({ t, user, notebookID, onLocale, onLibrary, onOpen, onSignedO
       source_unavailable: t.sourceFailureUnavailable,
       content_unreadable: t.sourceFailureUnreadable,
       indexing_failed: t.sourceFailureIndexing,
+      retrieval_unavailable: t.sourceFailureRetrievalUnavailable,
       processing_interrupted: t.sourceFailureInterrupted,
       processing_failed: t.sourceFailureGeneric
     },

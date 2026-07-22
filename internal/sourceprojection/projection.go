@@ -50,6 +50,9 @@ func (p *Projection) Build(ctx context.Context, command sourceprocessing.Project
 		return err
 	}
 	version, err := retrieval.NewVersionStore(p.pool).Active(ctx)
+	if errors.Is(err, retrieval.ErrVersionNotFound) {
+		return fmt.Errorf("%w: %v", sourceprocessing.ErrRetrievalUnavailable, err)
+	}
 	if err != nil {
 		return err
 	}

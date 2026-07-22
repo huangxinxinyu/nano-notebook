@@ -272,7 +272,8 @@ test("renames, retries, and confirms permanent Source removal", async () => {
     if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
     if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [
       { id: "src_ready", notebook_id: "nb_test", title: "old-name.pdf", format: "pdf", byte_size: 2048, state: "ready" },
-      { id: "src_failed", notebook_id: "nb_test", title: "broken.docx", format: "docx", byte_size: 4096, state: "failed", failure_reason: "content_unreadable" }
+      { id: "src_failed", notebook_id: "nb_test", title: "broken.docx", format: "docx", byte_size: 4096, state: "failed", failure_reason: "content_unreadable" },
+      { id: "src_retrieval", notebook_id: "nb_test", title: "unindexed.pdf", format: "pdf", byte_size: 1024, state: "failed", failure_reason: "retrieval_unavailable" }
     ] });
     if (url.endsWith("/api/v1/sources/src_ready") && method === "PATCH") {
       actions.push(`rename:${(JSON.parse(String(init?.body)) as { title: string }).title}`);
@@ -296,6 +297,7 @@ test("renames, retries, and confirms permanent Source removal", async () => {
   const sources = await screen.findByRole("region", { name: "Sources" });
   await within(sources).findByText("old-name.pdf");
   expect(within(sources).getByText("The file content could not be read.")).toBeInTheDocument();
+  expect(within(sources).getByText("Search indexing is not configured. Ask an administrator to activate a Retrieval Index Version.")).toBeInTheDocument();
   await user.click(within(sources).getByRole("button", { name: "Retry broken.docx" }));
   await user.click(within(sources).getByRole("button", { name: "Rename old-name.pdf" }));
   const renameDialog = await screen.findByRole("dialog", { name: "Rename source" });

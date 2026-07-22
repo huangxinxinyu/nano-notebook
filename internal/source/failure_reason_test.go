@@ -13,6 +13,7 @@ func TestSafeFailureReasonCollapsesInternalProcessingErrors(t *testing.T) {
 		"source_integrity_mismatch":  "source_unavailable",
 		"extraction_invalid":         "content_unreadable",
 		"projection_invalid":         "indexing_failed",
+		"retrieval_unavailable":      "retrieval_unavailable",
 		"retry_exhausted":            "processing_interrupted",
 		"provider-secret-error":      "processing_failed",
 		"":                           "processing_failed",

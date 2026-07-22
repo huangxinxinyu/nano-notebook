@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
 )
 
 func TestLoadWorkerConfigDefaultsToGeminiEmbeddingCollection(t *testing.T) {
-	for _, name := range []string{"NANO_QDRANT_COLLECTION", "NANO_QDRANT_DENSE_DIMENSIONS"} {
+	for _, name := range []string{"NANO_QDRANT_COLLECTION", "NANO_QDRANT_DENSE_DIMENSIONS", "NANO_RETRIEVAL_BOOTSTRAP_MODE", "NANO_RETRIEVAL_BOOTSTRAP_CONFIG_PATH"} {
 		value, existed := os.LookupEnv(name)
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)
@@ -29,6 +32,101 @@ func TestLoadWorkerConfigDefaultsToGeminiEmbeddingCollection(t *testing.T) {
 	if config.QdrantCollection != "nano-source-evidence-gemini-2-768-v1" || config.QdrantDenseDimensions != 768 {
 		t.Fatalf("Qdrant embedding defaults=%q/%d", config.QdrantCollection, config.QdrantDenseDimensions)
 	}
+	if config.RetrievalBootstrapMode != "development" || config.RetrievalBootstrapConfigPath != "evals/rag/pinned-config-v1.json" {
+		t.Fatalf("Retrieval bootstrap defaults=%q/%q", config.RetrievalBootstrapMode, config.RetrievalBootstrapConfigPath)
+	}
+}
+
+func TestLoadWorkerConfigAcceptsRequiredRetrievalAuthority(t *testing.T) {
+	t.Setenv("NANO_RETRIEVAL_BOOTSTRAP_MODE", "required")
+	t.Setenv("NANO_RETRIEVAL_BOOTSTRAP_CONFIG_PATH", "/release/pinned-config.json")
+	config, err := loadWorkerConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.RetrievalBootstrapMode != "required" || config.RetrievalBootstrapConfigPath != "/release/pinned-config.json" {
+		t.Fatalf("Retrieval bootstrap config=%q/%q", config.RetrievalBootstrapMode, config.RetrievalBootstrapConfigPath)
+	}
+}
+
+func TestLoadWorkerConfigRejectsUnknownRetrievalBootstrapMode(t *testing.T) {
+	t.Setenv("NANO_RETRIEVAL_BOOTSTRAP_MODE", "automatic")
+	if _, err := loadWorkerConfig(); err == nil {
+		t.Fatal("loadWorkerConfig accepted unknown Retrieval bootstrap mode")
+	}
+}
+
+func TestPrepareRetrievalAuthorityBootstrapsPinnedDevelopmentConfig(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "pinned.json")
+	if err := os.WriteFile(configPath, []byte(`{
+		"index": {
+			"chunk": {"max_runes": 800, "overlap_runes": 120, "preserve_heading_context": true},
+			"analyzer_id": "nano-mixed-v1",
+			"bm25_k1": 1.2,
+			"bm25_b": 0.75,
+			"bm25_average_document_length": 240,
+			"embedding_model": "gemini/gemini-embedding-2",
+			"embedding_dimensions": 768,
+			"embedding_profile_id": "gemini-retrieval-v1",
+			"dense_candidates": 40,
+			"sparse_candidates": 40,
+			"rrf_k": 60,
+			"reranker_id": "qwen-rerank-v1",
+			"rerank_candidates": 20,
+			"degradation_policy_id": "hybrid-required-v1"
+		}
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	authority := &workerRetrievalAuthority{requiredErr: retrieval.ErrVersionNotFound}
+	version, created, err := prepareRetrievalAuthority(context.Background(), authority, workerConfig{
+		RetrievalBootstrapMode: "development", RetrievalBootstrapConfigPath: configPath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created || version.ID != developmentBaselineVersionID || authority.bootstrapCalls != 1 || authority.requireCalls != 1 ||
+		authority.config.EmbeddingModel != "gemini/gemini-embedding-2" || authority.config.EmbeddingDimensions != 768 {
+		t.Fatalf("version=%+v created=%t authority=%+v", version, created, authority)
+	}
+}
+
+func TestPrepareRetrievalAuthorityKeepsExistingDevelopmentAuthorityWithoutReadingBootstrapConfig(t *testing.T) {
+	authority := &workerRetrievalAuthority{}
+	version, created, err := prepareRetrievalAuthority(context.Background(), authority, workerConfig{
+		RetrievalBootstrapMode: "development", RetrievalBootstrapConfigPath: "/does/not/exist.json",
+	})
+	if err != nil || created || version.ID != "" || authority.requireCalls != 1 || authority.bootstrapCalls != 0 {
+		t.Fatalf("prepare existing development version=%+v created=%t err=%v authority=%+v", version, created, err, authority)
+	}
+}
+
+func TestPrepareRetrievalAuthorityRequiresExistingProductionAuthorityWithoutReadingBootstrapConfig(t *testing.T) {
+	authority := &workerRetrievalAuthority{requiredErr: retrieval.ErrVersionNotFound}
+	_, _, err := prepareRetrievalAuthority(context.Background(), authority, workerConfig{
+		RetrievalBootstrapMode: "required", RetrievalBootstrapConfigPath: "/does/not/exist.json",
+	})
+	if !errors.Is(err, retrieval.ErrVersionNotFound) || authority.requireCalls != 1 || authority.bootstrapCalls != 0 {
+		t.Fatalf("prepare required err=%v authority=%+v", err, authority)
+	}
+}
+
+type workerRetrievalAuthority struct {
+	bootstrapCalls int
+	requireCalls   int
+	config         retrieval.IndexConfig
+	requiredErr    error
+}
+
+func (a *workerRetrievalAuthority) BootstrapDevelopment(_ context.Context, id, provenance string, config retrieval.IndexConfig) (retrieval.IndexVersion, bool, error) {
+	a.bootstrapCalls++
+	a.config = config
+	return retrieval.IndexVersion{ID: id, Status: retrieval.VersionActive, PromotedByEvalRunID: provenance, Config: config}, true, nil
+}
+
+func (a *workerRetrievalAuthority) RequireActive(context.Context) error {
+	a.requireCalls++
+	return a.requiredErr
 }
 
 func TestLoadWorkerConfigIncludesBoundedCollectorSender(t *testing.T) {

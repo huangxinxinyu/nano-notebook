@@ -11,17 +11,101 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
 )
 
+func TestDevelopmentRetrievalBootstrapCreatesOnlyAnEmptyBaseline(t *testing.T) {
+	api := newTestAPI(t)
+	store := retrieval.NewVersionStore(api.db.Pool())
+	config := testRetrievalIndexConfig()
+
+	baseline, created, err := store.BootstrapDevelopment(
+		context.Background(), "riv_dev_baseline_v1", "dev-bootstrap-v1", config,
+	)
+	if err != nil {
+		t.Fatalf("BootstrapDevelopment: %v", err)
+	}
+	if !created || baseline.ID != "riv_dev_baseline_v1" || baseline.Status != retrieval.VersionActive ||
+		baseline.PromotedByEvalRunID != "dev-bootstrap-v1" || baseline.Config != config {
+		t.Fatalf("baseline=%+v created=%t", baseline, created)
+	}
+
+	again, created, err := store.BootstrapDevelopment(
+		context.Background(), "riv_dev_baseline_v1", "dev-bootstrap-v1", config,
+	)
+	if err != nil || created || again.ID != baseline.ID || again.ConfigSHA256 != baseline.ConfigSHA256 {
+		t.Fatalf("idempotent bootstrap=%+v created=%t err=%v", again, created, err)
+	}
+}
+
+func TestDevelopmentRetrievalBootstrapRefusesCandidateOnlyHistory(t *testing.T) {
+	api := newTestAPI(t)
+	store := retrieval.NewVersionStore(api.db.Pool())
+	config := testRetrievalIndexConfig()
+	if _, err := store.CreateCandidate(context.Background(), "riv_in_progress", config); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := store.BootstrapDevelopment(
+		context.Background(), "riv_dev_baseline_v1", "dev-bootstrap-v1", config,
+	); !errors.Is(err, retrieval.ErrBootstrapConflict) {
+		t.Fatalf("BootstrapDevelopment candidate-only history=%v, want conflict", err)
+	}
+}
+
+func TestDevelopmentRetrievalBootstrapPreservesEvaluatedActiveVersion(t *testing.T) {
+	api := newTestAPI(t)
+	store := retrieval.NewVersionStore(api.db.Pool())
+	config := testRetrievalIndexConfig()
+	candidate, err := store.CreateCandidate(context.Background(), "riv_evaluated_active", config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordEval(context.Background(), retrieval.EvalRun{
+		ID: "eval_evaluated_active", IndexVersionID: candidate.ID, FixtureSuiteSHA256: sixtyFour("f"),
+		Status: retrieval.EvalPassed, MetricsJSON: []byte(`{"citation_precision":1}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	active, err := store.Promote(context.Background(), candidate.ID, "eval_evaluated_active")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bootstrapConfig := config
+	bootstrapConfig.Chunk.MaxRunes++
+	got, created, err := store.BootstrapDevelopment(
+		context.Background(), "riv_dev_baseline_v1", "dev-bootstrap-v1", bootstrapConfig,
+	)
+	if err != nil || created || got.ID != active.ID || got.PromotedByEvalRunID != "eval_evaluated_active" || got.Config != config {
+		t.Fatalf("preserved active=%+v created=%t err=%v", got, created, err)
+	}
+}
+
+func TestRequiredRetrievalAuthorityRejectsMissingActiveVersion(t *testing.T) {
+	api := newTestAPI(t)
+	store := retrieval.NewVersionStore(api.db.Pool())
+	if err := store.RequireActive(context.Background()); !errors.Is(err, retrieval.ErrVersionNotFound) {
+		t.Fatalf("RequireActive=%v, want missing version", err)
+	}
+	var versions int
+	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from retrieval_index_versions`).Scan(&versions); err != nil || versions != 0 {
+		t.Fatalf("required authority mutated version history count=%d err=%v", versions, err)
+	}
+
+	if _, _, err := store.BootstrapDevelopment(
+		context.Background(), "riv_dev_baseline_v1", "dev-bootstrap-v1", testRetrievalIndexConfig(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RequireActive(context.Background()); err != nil {
+		t.Fatalf("RequireActive with baseline: %v", err)
+	}
+}
+
 func TestRetrievalIndexPromotionRequiresPassingOfflineEval(t *testing.T) {
 	api := newTestAPI(t)
 	store := retrieval.NewVersionStore(api.db.Pool())
-	config := retrieval.IndexConfig{
-		Chunk:      retrieval.ChunkConfig{MaxRunes: 800, OverlapRunes: 120, PreserveHeadingContext: true},
-		AnalyzerID: "nano-mixed-v1", BM25K1: 1.2, BM25B: 0.75, BM25AverageDocumentLength: 240,
-		EmbeddingModel: "text-embedding-v1", EmbeddingDimensions: 1024, EmbeddingProfileID: retrieval.EmbeddingProfileGeminiRetrievalV1,
-		DenseCandidates: 40, SparseCandidates: 40, RRFK: 60,
-		RerankerID: "qwen-rerank-v1", RerankCandidates: 20,
-		DegradationPolicyID: "hybrid-required-v1",
-	}
+	config := testRetrievalIndexConfig()
+	config.EmbeddingModel = "text-embedding-v1"
+	config.EmbeddingDimensions = 1024
 	first, err := store.CreateCandidate(context.Background(), "riv_first", config)
 	if err != nil {
 		t.Fatalf("CreateCandidate: %v", err)
@@ -134,6 +218,17 @@ func TestRetrievalIndexPromotionRequiresPassingOfflineEval(t *testing.T) {
 	previous, err := store.ByID(context.Background(), first.ID)
 	if err != nil || previous.Status != retrieval.VersionRetired {
 		t.Fatalf("previous = %+v, err=%v", previous, err)
+	}
+}
+
+func testRetrievalIndexConfig() retrieval.IndexConfig {
+	return retrieval.IndexConfig{
+		Chunk:      retrieval.ChunkConfig{MaxRunes: 800, OverlapRunes: 120, PreserveHeadingContext: true},
+		AnalyzerID: "nano-mixed-v1", BM25K1: 1.2, BM25B: 0.75, BM25AverageDocumentLength: 240,
+		EmbeddingModel: "gemini/gemini-embedding-2", EmbeddingDimensions: 768, EmbeddingProfileID: retrieval.EmbeddingProfileGeminiRetrievalV1,
+		DenseCandidates: 40, SparseCandidates: 40, RRFK: 60,
+		RerankerID: "qwen-rerank-v1", RerankCandidates: 20,
+		DegradationPolicyID: "hybrid-required-v1",
 	}
 }
 

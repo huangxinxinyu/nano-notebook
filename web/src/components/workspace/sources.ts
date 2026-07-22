@@ -8,7 +8,7 @@ export type MemberSource = {
   format: string;
   byte_size: number;
   state: "processing" | "ready" | "failed";
-  failure_reason?: "limits_exceeded" | "source_unavailable" | "content_unreadable" | "indexing_failed" | "processing_interrupted" | "processing_failed";
+  failure_reason?: "limits_exceeded" | "source_unavailable" | "content_unreadable" | "indexing_failed" | "retrieval_unavailable" | "processing_interrupted" | "processing_failed";
 };
 
 export type SourcesController = {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -28,6 +29,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/platform/telemetry"
 	"github.com/huangxinxinyu/nano-notebook/internal/qdrantstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/replay"
+	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourcejobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceprocessing"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceprojection"
@@ -61,6 +63,8 @@ type workerConfig struct {
 	QdrantAPIKey                   string
 	QdrantCollection               string
 	QdrantDenseDimensions          int
+	RetrievalBootstrapMode         string
+	RetrievalBootstrapConfigPath   string
 	SourceProcessingLease          time.Duration
 	SourceProcessingHeartbeat      time.Duration
 	SourceProcessingPoll           time.Duration
@@ -97,6 +101,16 @@ type traceFlusher interface {
 	ForceFlush(context.Context) error
 }
 
+const (
+	developmentBaselineVersionID   = "riv_dev_baseline_v1"
+	developmentBootstrapProvenance = "dev-bootstrap-v1"
+)
+
+type retrievalAuthority interface {
+	BootstrapDevelopment(context.Context, string, string, retrieval.IndexConfig) (retrieval.IndexVersion, bool, error)
+	RequireActive(context.Context) error
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -112,6 +126,14 @@ func main() {
 		os.Exit(1)
 	}
 	defer db.Close()
+	indexVersion, bootstrapped, err := prepareRetrievalAuthority(ctx, retrieval.NewVersionStore(db.Pool()), config)
+	if err != nil {
+		slog.Error("worker retrieval authority unavailable", "mode", config.RetrievalBootstrapMode, "error", err)
+		os.Exit(1)
+	}
+	if bootstrapped {
+		slog.Info("development Retrieval Index baseline activated", "index_version_id", indexVersion.ID)
+	}
 	shutdownTelemetry, err := telemetry.Start(ctx, "nano-worker")
 	if err != nil {
 		slog.Error("worker telemetry unavailable", "error", err)
@@ -373,6 +395,40 @@ func main() {
 	slog.Info("worker stopped")
 }
 
+func prepareRetrievalAuthority(ctx context.Context, authority retrievalAuthority, config workerConfig) (retrieval.IndexVersion, bool, error) {
+	if authority == nil {
+		return retrieval.IndexVersion{}, false, errors.New("Retrieval authority is unavailable")
+	}
+	if config.RetrievalBootstrapMode == "required" {
+		if err := authority.RequireActive(ctx); err != nil {
+			return retrieval.IndexVersion{}, false, fmt.Errorf("active Retrieval Index Version is required: %w", err)
+		}
+		return retrieval.IndexVersion{}, false, nil
+	}
+	if err := authority.RequireActive(ctx); err == nil {
+		return retrieval.IndexVersion{}, false, nil
+	} else if !errors.Is(err, retrieval.ErrVersionNotFound) {
+		return retrieval.IndexVersion{}, false, fmt.Errorf("check active Retrieval Index Version: %w", err)
+	}
+	payload, err := os.ReadFile(config.RetrievalBootstrapConfigPath)
+	if err != nil {
+		return retrieval.IndexVersion{}, false, fmt.Errorf("read Retrieval bootstrap config: %w", err)
+	}
+	var pinned struct {
+		Index retrieval.IndexConfig `json:"index"`
+	}
+	if err := json.Unmarshal(payload, &pinned); err != nil {
+		return retrieval.IndexVersion{}, false, fmt.Errorf("parse Retrieval bootstrap config: %w", err)
+	}
+	version, created, err := authority.BootstrapDevelopment(
+		ctx, developmentBaselineVersionID, developmentBootstrapProvenance, pinned.Index,
+	)
+	if err != nil {
+		return retrieval.IndexVersion{}, false, fmt.Errorf("bootstrap development Retrieval Index: %w", err)
+	}
+	return version, created, nil
+}
+
 func shutdownTraceExporter(ctx context.Context, exporter interface {
 	traceFlusher
 	Shutdown(context.Context) error
@@ -534,11 +590,13 @@ func loadWorkerConfig() (workerConfig, error) {
 			Region:          env("NANO_SOURCE_S3_REGION", "us-east-1"), UseTLS: sourceUseTLS,
 		},
 		SourcePurgeLease: sourcePurgeLease, SourcePurgePoll: sourcePurgePoll,
-		QdrantURL:             env("NANO_QDRANT_URL", "http://127.0.0.1:56333"),
-		QdrantAPIKey:          strings.TrimSpace(os.Getenv("NANO_QDRANT_API_KEY")),
-		QdrantCollection:      env("NANO_QDRANT_COLLECTION", "nano-source-evidence-gemini-2-768-v1"),
-		QdrantDenseDimensions: qdrantDenseDimensions,
-		SourceProcessingLease: sourceProcessingLease, SourceProcessingHeartbeat: sourceProcessingHeartbeat,
+		QdrantURL:                    env("NANO_QDRANT_URL", "http://127.0.0.1:56333"),
+		QdrantAPIKey:                 strings.TrimSpace(os.Getenv("NANO_QDRANT_API_KEY")),
+		QdrantCollection:             env("NANO_QDRANT_COLLECTION", "nano-source-evidence-gemini-2-768-v1"),
+		QdrantDenseDimensions:        qdrantDenseDimensions,
+		RetrievalBootstrapMode:       env("NANO_RETRIEVAL_BOOTSTRAP_MODE", "development"),
+		RetrievalBootstrapConfigPath: env("NANO_RETRIEVAL_BOOTSTRAP_CONFIG_PATH", "evals/rag/pinned-config-v1.json"),
+		SourceProcessingLease:        sourceProcessingLease, SourceProcessingHeartbeat: sourceProcessingHeartbeat,
 		SourceProcessingPoll: sourceProcessingPoll, SourceExtractionConfigID: env("NANO_SOURCE_EXTRACTION_CONFIG_ID", "extract-text-v1"),
 		SourceVisionModel:            env("NANO_SOURCE_VISION_MODEL", "gemini/gemini-2.5-flash"),
 		SourceTranscriptionModel:     env("NANO_SOURCE_TRANSCRIPTION_MODEL", "openai/whisper-1"),
@@ -571,6 +629,8 @@ func loadWorkerConfig() (workerConfig, error) {
 		strings.TrimSpace(config.SourceS3.AccessKeyID) == "" || strings.TrimSpace(config.SourceS3.SecretAccessKey) == "" ||
 		strings.TrimSpace(config.SourceS3.Bucket) == "" || config.SourcePurgeLease <= 0 || config.SourcePurgePoll <= 0 ||
 		strings.TrimSpace(config.QdrantURL) == "" || strings.TrimSpace(config.QdrantCollection) == "" || config.QdrantDenseDimensions <= 0 ||
+		(config.RetrievalBootstrapMode != "development" && config.RetrievalBootstrapMode != "required") ||
+		strings.TrimSpace(config.RetrievalBootstrapConfigPath) == "" ||
 		config.SourceProcessingLease <= 0 || config.SourceProcessingHeartbeat <= 0 || config.SourceProcessingHeartbeat >= config.SourceProcessingLease ||
 		config.SourceProcessingPoll <= 0 || strings.TrimSpace(config.SourceExtractionConfigID) == "" ||
 		strings.TrimSpace(config.SourceVisionModel) == "" || strings.TrimSpace(config.SourceTranscriptionModel) == "" ||

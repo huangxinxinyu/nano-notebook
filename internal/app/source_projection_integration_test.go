@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
+	"github.com/huangxinxinyu/nano-notebook/internal/normalize"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/qdrantstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
@@ -17,6 +19,19 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceprocessing"
 	"github.com/huangxinxinyu/nano-notebook/internal/sourceprojection"
 )
+
+func TestSourceProjectionReportsMissingActiveRetrievalAuthority(t *testing.T) {
+	api := newTestAPI(t)
+	projection := sourceprojection.New(api.db.Pool(), unusedVectorStore{}, deterministicEmbedder{})
+	err := projection.Build(context.Background(), sourceprocessing.ProjectionCommand{
+		Lease:      sourcejobs.Lease{ID: "srcjob_missing_authority", SourceID: "src_missing_authority", NotebookID: "nb_missing_authority", LeaseToken: "lease-token"},
+		RevisionID: "evr_missing_authority",
+		Artifact:   normalize.Artifact{SourceID: "src_missing_authority"},
+	})
+	if !errors.Is(err, sourceprocessing.ErrRetrievalUnavailable) {
+		t.Fatalf("Build without active Retrieval Index=%v, want Retrieval unavailable", err)
+	}
+}
 
 func TestSourceProjectionBuildsAndVerifiesRealQdrantBeforeReady(t *testing.T) {
 	qdrantURL := os.Getenv("NANO_TEST_QDRANT_URL")
@@ -186,6 +201,12 @@ func TestCandidateReindexBuildsEveryActiveEvidenceRevisionBeforePromotion(t *tes
 }
 
 type deterministicEmbedder struct{}
+
+type unusedVectorStore struct{}
+
+func (unusedVectorStore) Upsert(context.Context, []qdrantstore.Point) error { return nil }
+
+func (unusedVectorStore) Count(context.Context, qdrantstore.Scope) (int, error) { return 0, nil }
 
 func (deterministicEmbedder) Embed(_ context.Context, request models.EmbeddingRequest) (models.EmbeddingOutcome, error) {
 	vectors := make([][]float32, len(request.Inputs))

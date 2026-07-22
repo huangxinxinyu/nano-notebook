@@ -169,6 +169,8 @@ func SafeFailureReason(internalCode string) string {
 		return "content_unreadable"
 	case "projection_invalid":
 		return "indexing_failed"
+	case "retrieval_unavailable":
+		return "retrieval_unavailable"
 	case "retry_exhausted":
 		return "processing_interrupted"
 	default:

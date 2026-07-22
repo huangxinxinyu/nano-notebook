@@ -15,8 +15,9 @@ import (
 )
 
 var (
-	ErrEvalGate        = errors.New("Retrieval Index promotion requires a passing Eval Run")
-	ErrVersionNotFound = errors.New("Retrieval Index Version not found")
+	ErrEvalGate          = errors.New("Retrieval Index promotion requires a passing Eval Run")
+	ErrVersionNotFound   = errors.New("Retrieval Index Version not found")
+	ErrBootstrapConflict = errors.New("Retrieval Index development bootstrap requires empty version history or an active version")
 )
 
 type IndexConfig struct {
@@ -204,6 +205,73 @@ func (s *VersionStore) Promote(ctx context.Context, versionID, evalRunID string)
 
 func (s *VersionStore) Active(ctx context.Context) (IndexVersion, error) {
 	return s.one(ctx, `select id from retrieval_index_versions where status='active'`)
+}
+
+func (s *VersionStore) RequireActive(ctx context.Context) error {
+	_, err := s.Active(ctx)
+	return err
+}
+
+func (s *VersionStore) BootstrapDevelopment(ctx context.Context, id, provenance string, config IndexConfig) (IndexVersion, bool, error) {
+	if s == nil || s.pool == nil || strings.TrimSpace(id) == "" || strings.TrimSpace(provenance) == "" || !validIndexConfig(config) {
+		return IndexVersion{}, false, errors.New("invalid Retrieval Index development bootstrap")
+	}
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return IndexVersion{}, false, err
+	}
+	digest := sha256.Sum256(configJSON)
+	tx, err := s.workerTx(ctx)
+	if err != nil {
+		return IndexVersion{}, false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended('retrieval-index-promotion', 0))`); err != nil {
+		return IndexVersion{}, false, err
+	}
+	var activeID string
+	err = tx.QueryRow(ctx, `select id from retrieval_index_versions where status='active'`).Scan(&activeID)
+	if err == nil {
+		version, loadErr := versionByID(ctx, tx, activeID, false)
+		if loadErr != nil {
+			return IndexVersion{}, false, loadErr
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return IndexVersion{}, false, err
+		}
+		return version, false, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return IndexVersion{}, false, err
+	}
+	var versionCount int
+	if err := tx.QueryRow(ctx, `select count(*) from retrieval_index_versions`).Scan(&versionCount); err != nil {
+		return IndexVersion{}, false, err
+	}
+	if versionCount != 0 {
+		return IndexVersion{}, false, ErrBootstrapConflict
+	}
+	var version IndexVersion
+	var rawConfig []byte
+	err = tx.QueryRow(ctx, `
+		insert into retrieval_index_versions(
+			id, config_json, config_sha256, status, promoted_by_eval_run_id, promoted_at
+		) values ($1, $2, $3, 'active', $4, now())
+		returning id, config_json, config_sha256, status, coalesce(promoted_by_eval_run_id,''), created_at, promoted_at
+	`, id, configJSON, hex.EncodeToString(digest[:]), provenance).Scan(
+		&version.ID, &rawConfig, &version.ConfigSHA256, &version.Status,
+		&version.PromotedByEvalRunID, &version.CreatedAt, &version.PromotedAt,
+	)
+	if err != nil {
+		return IndexVersion{}, false, err
+	}
+	if err := json.Unmarshal(rawConfig, &version.Config); err != nil {
+		return IndexVersion{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return IndexVersion{}, false, err
+	}
+	return version, true, nil
 }
 
 func (s *VersionStore) ByID(ctx context.Context, id string) (IndexVersion, error) {

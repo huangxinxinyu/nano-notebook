@@ -19,7 +19,10 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-var ErrProjectionInvalid = errors.New("Source projection verification failed")
+var (
+	ErrProjectionInvalid    = errors.New("Source projection verification failed")
+	ErrRetrievalUnavailable = errors.New("Source retrieval authority is unavailable")
+)
 
 type Config struct {
 	ExtractionConfigID     string
@@ -183,6 +186,9 @@ func (p *Processor) ProcessLease(ctx context.Context, lease sourcejobs.Lease) (r
 	trace.moveStage("source.indexing")
 	if item.State == source.StateSegmenting {
 		if err := p.projection.Build(ctx, command); err != nil {
+			if errors.Is(err, ErrRetrievalUnavailable) {
+				return p.failTraced(ctx, lease, trace, "retrieval_unavailable")
+			}
 			if errors.Is(err, ErrProjectionInvalid) {
 				return p.failTraced(ctx, lease, trace, "projection_invalid")
 			}
