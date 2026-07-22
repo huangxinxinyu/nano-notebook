@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
+	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
 )
 
 type claimVerifierStub struct {
@@ -33,7 +35,7 @@ func (s *claimVerifierStub) VerifyClaimSupport(_ context.Context, request models
 func TestGroundingDisclosesMaterialClaimsOmittedFromTheComposerClaimMap(t *testing.T) {
 	api, attempt, _, _ := groundingFixture(t, "omitted-grounding@example.com", "src_omitted", "evr_omitted")
 	verifier := &claimVerifierStub{pass: true, uncovered: []string{"The budget is $5M."}}
-	service := agent.NewGroundingService(api.db.Pool(), verifier, &fallbackDecisionStub{}, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
+	service := agent.NewGroundingService(api.db.Pool(), verifier, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
 	draft := models.FinalDraft{Text: "The launch is 20 July. The budget is $5M.", Claims: []models.DraftClaim{{
 		Text: "The launch is 20 July.", Citations: []models.EvidenceAddress{{SourceID: "src_omitted", EvidenceRevisionID: "evr_omitted", UnitID: "unit_ground", StartRune: 0, EndRune: 27}},
 	}}}
@@ -47,23 +49,37 @@ func TestGroundingDisclosesMaterialClaimsOmittedFromTheComposerClaimMap(t *testi
 	}
 }
 
-type fallbackDecisionStub struct {
-	calls   int
-	request models.ModelRequest
+type sequenceDecisionModel struct {
+	requests  []models.ModelRequest
+	decisions []models.ModelDecision
 }
 
-func (s *fallbackDecisionStub) Decide(_ context.Context, request models.ModelRequest) (models.ModelOutcome, error) {
-	s.calls++
-	s.request = request
-	return models.ModelOutcome{ModelDecision: models.ModelDecision{Final: &models.FinalDraft{Text: "General knowledge answer."}}, Metadata: models.ModelCallMetadata{
-		RequestedModel: request.Model, ResultKind: models.ModelResultFinalDraft,
-	}}, nil
+func (m *sequenceDecisionModel) Decide(_ context.Context, request models.ModelRequest) (models.ModelOutcome, error) {
+	m.requests = append(m.requests, request)
+	if len(m.decisions) == 0 {
+		return models.ModelOutcome{}, errors.New("unexpected model decision")
+	}
+	decision := m.decisions[0]
+	m.decisions = m.decisions[1:]
+	resultKind := models.ModelResultFinalDraft
+	if decision.Proposal != nil {
+		resultKind = models.ModelResultActionProposal
+	}
+	return models.ModelOutcome{ModelDecision: decision, Metadata: models.ModelCallMetadata{RequestedModel: request.Model, ResultKind: resultKind}}, nil
+}
+
+type emptyEvidenceBackend struct {
+	result retrieval.SearchResult
+}
+
+func (b emptyEvidenceBackend) SearchEvidence(context.Context, agent.Attempt, string, string) (retrieval.SearchResult, error) {
+	return b.result, nil
 }
 
 func TestGroundingPreparesSupportedClaimsFromCheckpointedEvidence(t *testing.T) {
 	api, attempt, notebookID, _ := groundingFixture(t, "supported-grounding@example.com", "src_ground", "evr_ground")
 	verifier := &claimVerifierStub{pass: true}
-	service := agent.NewGroundingService(api.db.Pool(), verifier, &fallbackDecisionStub{}, agent.GroundingConfig{
+	service := agent.NewGroundingService(api.db.Pool(), verifier, agent.GroundingConfig{
 		VerifierModel: "verifier-test", VerifierPromptVersion: "claim-support-v1",
 	})
 	prefix := checkpointedEvidencePrefix("src_ground", "evr_ground", "unit_ground", 0, 27, false, false)
@@ -98,7 +114,7 @@ func TestGroundingPreparesSupportedClaimsFromCheckpointedEvidence(t *testing.T) 
 func TestGroundingRejectsForgedCitationBeforeVerifier(t *testing.T) {
 	api, attempt, _, _ := groundingFixture(t, "forged-grounding@example.com", "src_forged_ground", "evr_forged_ground")
 	verifier := &claimVerifierStub{pass: true}
-	service := agent.NewGroundingService(api.db.Pool(), verifier, &fallbackDecisionStub{}, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
+	service := agent.NewGroundingService(api.db.Pool(), verifier, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
 	prefix := checkpointedEvidencePrefix("src_forged_ground", "evr_forged_ground", "unit_ground", 0, 27, false, false)
 	_, err := service.Prepare(context.Background(), attempt, prefix, models.FinalDraft{Text: "Forged claim.", Claims: []models.DraftClaim{{
 		Text: "Forged claim.", Citations: []models.EvidenceAddress{{
@@ -112,7 +128,7 @@ func TestGroundingRejectsForgedCitationBeforeVerifier(t *testing.T) {
 
 func TestGroundingReplacesUnsupportedClaimsWithAnExplicitEvidenceGap(t *testing.T) {
 	api, attempt, _, _ := groundingFixture(t, "unsupported-grounding@example.com", "src_unsupported", "evr_unsupported")
-	service := agent.NewGroundingService(api.db.Pool(), &claimVerifierStub{pass: false}, &fallbackDecisionStub{}, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
+	service := agent.NewGroundingService(api.db.Pool(), &claimVerifierStub{pass: false}, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
 	prepared, err := service.Prepare(context.Background(), attempt,
 		checkpointedEvidencePrefix("src_unsupported", "evr_unsupported", "unit_ground", 0, 27, false, false),
 		models.FinalDraft{Text: "The unsupported launch claim.", Claims: []models.DraftClaim{{
@@ -133,28 +149,149 @@ func TestGroundingReplacesUnsupportedClaimsWithAnExplicitEvidenceGap(t *testing.
 	}
 }
 
-func TestGroundingUsesFreshSourceFreeFallbackOnlyForCompleteNonDegradedZeroSupport(t *testing.T) {
-	api, attempt, _, _ := groundingFixture(t, "zero-grounding@example.com", "src_zero_ground", "evr_zero_ground")
-	verifier := &claimVerifierStub{pass: true}
-	fallback := &fallbackDecisionStub{}
-	service := agent.NewGroundingService(api.db.Pool(), verifier, fallback, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
-	prepared, err := service.Prepare(context.Background(), attempt, checkpointedEvidencePrefix("", "", "", 0, 0, true, false), models.FinalDraft{Text: "No source evidence.", Claims: []models.DraftClaim{}})
+func TestGroundingAcceptsSelectedSourceFinalWhenNoCiteableEvidence(t *testing.T) {
+	tests := []struct {
+		name     string
+		prefix   agent.CheckpointPrefix
+		complete bool
+		degraded bool
+	}{
+		{name: "no search"},
+		{name: "complete empty search", prefix: checkpointedEvidencePrefix("", "", "", 0, 0, true, false), complete: true},
+		{name: "degraded empty search", prefix: checkpointedEvidencePrefix("", "", "", 0, 0, false, true), degraded: true},
+	}
+	for index, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api, attempt, _, _ := groundingFixture(t, fmt.Sprintf("source-free-%d@example.com", index), fmt.Sprintf("src_source_free_%d", index), fmt.Sprintf("evr_source_free_%d", index))
+			service := agent.NewGroundingService(api.db.Pool(), &claimVerifierStub{pass: true}, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
+			draft := models.FinalDraft{Text: "Ordinary conversational answer."}
+			prepared, err := service.Prepare(context.Background(), attempt, tt.prefix, draft)
+			if err != nil || prepared.Text != draft.Text || len(prepared.Claims) != 0 {
+				t.Fatalf("prepared=%+v err=%v", prepared, err)
+			}
+			var outcome string
+			var complete, degraded bool
+			if err := api.db.Pool().QueryRow(context.Background(), `
+				select outcome,research_complete,retrieval_degraded from agent_run_grounding_plans where run_id=$1
+			`, attempt.RunID).Scan(&outcome, &complete, &degraded); err != nil {
+				t.Fatal(err)
+			}
+			if outcome != "source_free" || complete != tt.complete || degraded != tt.degraded {
+				t.Fatalf("plan=%s complete=%t degraded=%t", outcome, complete, degraded)
+			}
+		})
+	}
+}
+
+func TestGroundingRejectsClaimFreeFinalAfterCiteableEvidence(t *testing.T) {
+	api, attempt, _, _ := groundingFixture(t, "claim-free-after-evidence@example.com", "src_claim_free_after_evidence", "evr_claim_free_after_evidence")
+	service := agent.NewGroundingService(api.db.Pool(), &claimVerifierStub{pass: true}, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
+	_, err := service.Prepare(
+		context.Background(),
+		attempt,
+		checkpointedEvidencePrefix("src_claim_free_after_evidence", "evr_claim_free_after_evidence", "unit_ground", 0, 27, false, false),
+		models.FinalDraft{Text: "Uncited answer after Evidence."},
+	)
+	if !errors.Is(err, agent.ErrGroundingIncomplete) {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestPublicationAcceptsSourceFreeFinalWithSelectedSource(t *testing.T) {
+	api, attempt, _, _ := groundingFixture(t, "source-free-publication@example.com", "src_source_free_publish", "evr_source_free_publish")
+	service := agent.NewGroundingService(api.db.Pool(), &claimVerifierStub{pass: true}, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
+	draft, err := service.Prepare(context.Background(), attempt, agent.CheckpointPrefix{}, models.FinalDraft{Text: "Ordinary conversational answer."})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fallback.calls != 1 || !strings.HasPrefix(prepared.Text, "The following answer is not based on the selected Sources.") || len(prepared.Claims) != 0 {
-		t.Fatalf("prepared=%+v fallback=%+v", prepared, fallback)
+	runtime := agent.NewPostgresRuntime(api.db.Pool(), "", nil)
+	checkpoint, err := agent.NewFinalDraftCheckpoint(1, draft)
+	if err != nil {
+		t.Fatal(err)
 	}
-	encoded, _ := json.Marshal(fallback.request)
-	if strings.Contains(string(encoded), "source_id") || strings.Contains(string(encoded), "evidence_revision_id") || strings.Contains(string(encoded), "No source evidence") {
-		t.Fatalf("fallback leaked Source research context: %s", encoded)
+	if _, err := runtime.AppendCheckpoint(context.Background(), attempt, checkpoint); err != nil {
+		t.Fatal(err)
 	}
+	if err := runtime.PublishFinal(context.Background(), attempt, draft); err != nil {
+		t.Fatal(err)
+	}
+	var content string
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select m.content from agent_runs r join chat_messages m on m.id=r.output_message_id where r.id=$1
+	`, attempt.RunID).Scan(&content); err != nil {
+		t.Fatal(err)
+	}
+	var citations int
+	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from chat_citations where run_id=$1`, attempt.RunID).Scan(&citations); err != nil {
+		t.Fatal(err)
+	}
+	if content != draft.Text || citations != 0 {
+		t.Fatalf("content=%q citations=%d", content, citations)
+	}
+}
 
-	api2, attempt2, _, _ := groundingFixture(t, "degraded-grounding@example.com", "src_degraded_ground", "evr_degraded_ground")
-	service2 := agent.NewGroundingService(api2.db.Pool(), verifier, fallback, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
-	_, err = service2.Prepare(context.Background(), attempt2, checkpointedEvidencePrefix("", "", "", 0, 0, false, true), models.FinalDraft{Text: "No source evidence."})
-	if !errors.Is(err, agent.ErrGroundingIncomplete) || fallback.calls != 1 {
-		t.Fatalf("degraded error=%v fallback calls=%d", err, fallback.calls)
+func TestControllerPublishesPlainTextForSelectedSourceBeforeEvidence(t *testing.T) {
+	api, attempt, _, _ := groundingFixture(t, "source-free-controller@example.com", "src_source_free_controller", "evr_source_free_controller")
+	model := &recordingModelClient{result: models.ModelDecision{Final: &models.FinalDraft{Text: "Ordinary conversational answer."}}}
+	grounder := agent.NewGroundingService(api.db.Pool(), &claimVerifierStub{pass: true}, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
+	runtime := agent.NewPostgresRuntime(api.db.Pool(), agent.BareSystemPrompt, nil, agent.WithGroundingService(grounder))
+	registry, err := agent.NewActionRegistry(agent.NewSearchEvidenceAction(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.NewController(runtime, model, registry).Execute(context.Background(), attempt); err != nil {
+		t.Fatal(err)
+	}
+	if model.calls != 1 || model.request.FinalDraftFormat != models.FinalDraftFormatGroundedOptionalV1 || len(model.request.ActionDefinitions) != 1 || model.request.ActionDefinitions[0].Name != "search_evidence" {
+		t.Fatalf("model calls=%d request=%+v", model.calls, model.request)
+	}
+	var runStatus, jobStatus, content, outcome string
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select r.status,j.status,m.content,p.outcome
+		from agent_runs r
+		join agent_jobs j on j.run_id=r.id
+		join chat_messages m on m.id=r.output_message_id
+		join agent_run_grounding_plans p on p.run_id=r.id
+		where r.id=$1
+	`, attempt.RunID).Scan(&runStatus, &jobStatus, &content, &outcome); err != nil {
+		t.Fatal(err)
+	}
+	if runStatus != "completed" || jobStatus != "succeeded" || content != "Ordinary conversational answer." || outcome != "source_free" {
+		t.Fatalf("terminal=%s/%s content=%q outcome=%q", runStatus, jobStatus, content, outcome)
+	}
+}
+
+func TestControllerPublishesPlainTextAfterSearchReturnsNoEvidence(t *testing.T) {
+	api, attempt, _, _ := groundingFixture(t, "empty-search-controller@example.com", "src_empty_search_controller", "evr_empty_search_controller")
+	model := &sequenceDecisionModel{decisions: []models.ModelDecision{
+		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{{
+			Name: "search_evidence", Input: json.RawMessage(`{"query":"capabilities","purpose":"check selected Sources"}`),
+		}}}},
+		{Final: &models.FinalDraft{Text: "Ordinary conversational answer after an empty search."}},
+	}}
+	grounder := agent.NewGroundingService(api.db.Pool(), &claimVerifierStub{pass: true}, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
+	runtime := agent.NewPostgresRuntime(api.db.Pool(), agent.BareSystemPrompt, nil, agent.WithGroundingService(grounder))
+	registry, err := agent.NewActionRegistry(agent.NewSearchEvidenceAction(emptyEvidenceBackend{result: retrieval.SearchResult{CompleteEmpty: true}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.NewController(runtime, model, registry).Execute(context.Background(), attempt); err != nil {
+		t.Fatal(err)
+	}
+	if len(model.requests) != 2 || model.requests[0].FinalDraftFormat != models.FinalDraftFormatGroundedOptionalV1 || model.requests[1].FinalDraftFormat != models.FinalDraftFormatGroundedOptionalV1 {
+		t.Fatalf("requests=%+v", model.requests)
+	}
+	var content, outcome string
+	var complete, degraded bool
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select m.content,p.outcome,p.research_complete,p.retrieval_degraded
+		from agent_runs r join chat_messages m on m.id=r.output_message_id
+		join agent_run_grounding_plans p on p.run_id=r.id where r.id=$1
+	`, attempt.RunID).Scan(&content, &outcome, &complete, &degraded); err != nil {
+		t.Fatal(err)
+	}
+	if content != "Ordinary conversational answer after an empty search." || outcome != "source_free" || !complete || degraded {
+		t.Fatalf("content=%q plan=%s complete=%t degraded=%t", content, outcome, complete, degraded)
 	}
 }
 
@@ -162,7 +299,7 @@ func TestPublicationAtomicallyCopiesVerifiedCitationsAndRejectsSourceDeletionRac
 	for _, removeBeforePublish := range []bool{false, true} {
 		t.Run(map[bool]string{false: "publishes", true: "deletion fenced"}[removeBeforePublish], func(t *testing.T) {
 			api, attempt, _, sessionCookie := groundingFixture(t, "publication-grounding-"+map[bool]string{false: "ok", true: "deleted"}[removeBeforePublish]+"@example.com", "src_publish", "evr_publish")
-			service := agent.NewGroundingService(api.db.Pool(), &claimVerifierStub{pass: true}, &fallbackDecisionStub{}, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
+			service := agent.NewGroundingService(api.db.Pool(), &claimVerifierStub{pass: true}, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
 			prefix := checkpointedEvidencePrefix("src_publish", "evr_publish", "unit_ground", 0, 27, false, false)
 			draft := models.FinalDraft{Text: "The launch is 20 July.", Claims: []models.DraftClaim{{
 				Text: "The launch is 20 July.", Citations: []models.EvidenceAddress{{SourceID: "src_publish", EvidenceRevisionID: "evr_publish", UnitID: "unit_ground", StartRune: 0, EndRune: 27}},

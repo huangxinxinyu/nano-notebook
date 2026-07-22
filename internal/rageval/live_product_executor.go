@@ -73,7 +73,7 @@ func NewLiveProductExecutor(pool *pgxpool.Pool, vectors *qdrantstore.Client, mod
 	if err != nil {
 		return nil, err
 	}
-	grounder := agent.NewGroundingService(pool, meter, meter, agent.GroundingConfig{VerifierModel: verifierModel, VerifierPromptVersion: verifierPromptVersion})
+	grounder := agent.NewGroundingService(pool, meter, agent.GroundingConfig{VerifierModel: verifierModel, VerifierPromptVersion: verifierPromptVersion})
 	runtime := agent.NewPostgresRuntime(pool, agent.GroundedSystemPrompt, nil, agent.WithGroundingService(grounder))
 	return &LiveProductExecutor{
 		pool: pool, manifest: manifest, caseByID: caseByID, meter: meter,

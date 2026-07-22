@@ -36,7 +36,6 @@ type GroundingConfig struct {
 type GroundingService struct {
 	pool     *pgxpool.Pool
 	verifier ClaimSupportVerifier
-	fallback DecisionModel
 	config   GroundingConfig
 }
 
@@ -56,8 +55,8 @@ type researchState struct {
 	ranges       []researchRange
 }
 
-func NewGroundingService(pool *pgxpool.Pool, verifier ClaimSupportVerifier, fallback DecisionModel, config GroundingConfig) *GroundingService {
-	return &GroundingService{pool: pool, verifier: verifier, fallback: fallback, config: config}
+func NewGroundingService(pool *pgxpool.Pool, verifier ClaimSupportVerifier, config GroundingConfig) *GroundingService {
+	return &GroundingService{pool: pool, verifier: verifier, config: config}
 }
 
 func (s *GroundingService) Prepare(ctx context.Context, attempt Attempt, prefix CheckpointPrefix, draft models.FinalDraft) (models.FinalDraft, error) {
@@ -139,18 +138,13 @@ func (s *GroundingService) prepare(ctx context.Context, tracer *agentobs.Tracer,
 	}
 	result.research = research
 	if len(draft.Claims) == 0 {
-		if !research.performed || !research.complete || research.degraded || research.evidenceSeen {
+		if research.evidenceSeen {
 			return result, ErrGroundingIncomplete
 		}
-		fallback, err := s.freshFallback(ctx, attempt)
-		if err != nil {
+		if err := s.persistPlan(ctx, attempt, draft, "source_free", research.complete, research.degraded, nil, "", ""); err != nil {
 			return result, err
 		}
-		if err := s.persistPlan(ctx, attempt, fallback, "zero_support", true, false, nil, "", ""); err != nil {
-			return result, err
-		}
-		result.draft = fallback
-		result.outcome = "zero_support"
+		result.outcome = "source_free"
 		return result, nil
 	}
 	if !research.evidenceSeen || s.verifier == nil || strings.TrimSpace(s.config.VerifierModel) == "" || strings.TrimSpace(s.config.VerifierPromptVersion) == "" {
@@ -294,11 +288,11 @@ func parseResearchState(prefix CheckpointPrefix) (researchState, error) {
 				state.complete = false
 			}
 			for _, evidence := range output.Evidence {
-				state.evidenceSeen = true
 				for _, item := range evidence.EvidenceRanges {
 					if evidence.SourceID == "" || evidence.EvidenceRevisionID == "" || item.UnitID == "" || item.StartRune < 0 || item.EndRune <= item.StartRune {
 						return researchState{}, ErrGroundingInvalid
 					}
+					state.evidenceSeen = true
 					state.ranges = append(state.ranges, researchRange{
 						SourceID: evidence.SourceID, RevisionID: evidence.EvidenceRevisionID, UnitID: item.UnitID,
 						StartRune: item.StartRune, EndRune: item.EndRune,
@@ -398,69 +392,6 @@ func addressWasRetrieved(address models.EvidenceAddress, ranges []researchRange)
 		}
 	}
 	return false
-}
-
-func (s *GroundingService) freshFallback(ctx context.Context, attempt Attempt) (models.FinalDraft, error) {
-	if s.fallback == nil {
-		return models.FinalDraft{}, ErrGroundingIncomplete
-	}
-	tx, err := s.workerTx(ctx)
-	if err != nil {
-		return models.FinalDraft{}, err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	var model, chatID, inputMessageID string
-	if err := tx.QueryRow(ctx, `select model,chat_id,input_message_id from agent_runs where id=$1`, attempt.RunID).Scan(&model, &chatID, &inputMessageID); err != nil {
-		return models.FinalDraft{}, err
-	}
-	rows, err := tx.Query(ctx, `
-		with cutoff as (select created_at,id from chat_messages where id=$2 and chat_id=$1),
-		recent as (
-			select m.role,m.content,m.created_at,m.id from chat_messages m,cutoff c
-			where m.chat_id=$1 and (m.created_at,m.id)<=(c.created_at,c.id)
-			order by m.created_at desc,m.id desc limit 20
-		)
-		select role,content from recent order by created_at,id
-	`, chatID, inputMessageID)
-	if err != nil {
-		return models.FinalDraft{}, err
-	}
-	messages := []models.ModelMessage{{
-		Role:    models.RoleSystem,
-		Content: "Answer the user from general model knowledge without using or mentioning any Source passage or citation. Do not claim the selected Sources support the answer. Do not expose hidden chain-of-thought.",
-	}}
-	lastUser := ""
-	for rows.Next() {
-		var message models.ModelMessage
-		if err := rows.Scan(&message.Role, &message.Content); err != nil {
-			rows.Close()
-			return models.FinalDraft{}, err
-		}
-		messages = append(messages, message)
-		if message.Role == models.RoleUser {
-			lastUser = message.Content
-		}
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return models.FinalDraft{}, err
-	}
-	rows.Close()
-	if err := tx.Commit(ctx); err != nil {
-		return models.FinalDraft{}, err
-	}
-	outcome, err := s.fallback.Decide(ctx, models.ModelRequest{Model: model, Messages: messages})
-	if err != nil {
-		return models.FinalDraft{}, err
-	}
-	if outcome.Final == nil || outcome.Proposal != nil || len(outcome.Final.Claims) != 0 {
-		return models.FinalDraft{}, ErrGroundingInvalid
-	}
-	prefix := "The following answer is not based on the selected Sources. "
-	if containsHan(lastUser) {
-		prefix = "以下回答不基于所选来源。"
-	}
-	return models.FinalDraft{Text: prefix + strings.TrimSpace(outcome.Final.Text)}, nil
 }
 
 func containsHan(value string) bool {

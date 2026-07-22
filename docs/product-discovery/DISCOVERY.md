@@ -78,7 +78,7 @@ Immutability ensures that a historical Citation never silently points to evidenc
 
 ### Grounding Principle
 
-Chat produces Grounded Answers using only Sources selected from the current Notebook and never supplements a partially supported answer with model knowledge or internet information. When complete, non-degraded research finds no support at all, Chat may instead produce a wholly separate, clearly disclosed Model-Knowledge Answer with no Citations; otherwise it reports the unsupported portion as insufficient.
+Chat produces Grounded Answers using only Sources selected from the current Notebook and never supplements a partially supported answer with model knowledge or internet information. While no accepted search result contains a valid Evidence range, Chat may instead produce a claim-free Model-Knowledge Answer with no Citations and no claim of Source support. Any citeable Evidence activates the strict grounded contract.
 
 Future search results must first be added to the Notebook as Sources before Chat can use them as evidence.
 
@@ -272,3 +272,4 @@ The product baseline is consolidated in [REQUIREMENTS.md](./REQUIREMENTS.md). Re
 40. Allowed a whole-answer model-knowledge fallback only after complete, non-degraded research finds zero support in selected Sources. Partial support never mixes with model knowledge, fallback uses a fresh call without Source passages, carries no Citations, and discloses its basis in the Answer.
 41. Allowed multi-file selection for local uploads while keeping each accepted file an independent Source and processing lifecycle; one invalid or failed item does not roll back the others.
 42. Made the Citation-oriented Source Viewer directly accessible from the Sources list for inspecting ready content and Evidence Coverage, without adding Source summaries or original-file download.
+43. Replaced Source-selection-driven final JSON and the fresh zero-support fallback with an Evidence-aware contract: claim-free text is valid until a search returns a citeable Evidence range; after that transition, grounded JSON, verification, and Citations are mandatory. This supersedes decision 40 while preserving the no-mixing rule for partially supported Answers.

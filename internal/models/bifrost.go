@@ -49,7 +49,10 @@ type ModelRequest struct {
 	FinalDraftFormat  string
 }
 
-const FinalDraftFormatGroundedV1 = "grounded-v1"
+const (
+	FinalDraftFormatGroundedV1         = "grounded-v1"
+	FinalDraftFormatGroundedOptionalV1 = "grounded-optional-v1"
+)
 
 type ErrorKind string
 
@@ -194,6 +197,10 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 	if len(tools) > 0 {
 		toolChoice = "auto"
 	}
+	responseFormat := map[string]string(nil)
+	if request.FinalDraftFormat == FinalDraftFormatGroundedV1 {
+		responseFormat = map[string]string{"type": "json_object"}
+	}
 	body, err := json.Marshal(struct {
 		Model               string            `json:"model"`
 		Messages            []providerMessage `json:"messages"`
@@ -201,6 +208,7 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 		MaxCompletionTokens int               `json:"max_completion_tokens"`
 		Tools               []providerTool    `json:"tools,omitempty"`
 		ToolChoice          string            `json:"tool_choice,omitempty"`
+		ResponseFormat      map[string]string `json:"response_format,omitempty"`
 	}{
 		Model:               request.Model,
 		Messages:            messages,
@@ -208,6 +216,7 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 		MaxCompletionTokens: c.maxCompletionTokens,
 		Tools:               tools,
 		ToolChoice:          toolChoice,
+		ResponseFormat:      responseFormat,
 	})
 	if err != nil {
 		return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
@@ -283,18 +292,22 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 		}
 		decision := ModelDecision{}
 		if choice.Message.Content != nil && strings.TrimSpace(*choice.Message.Content) != "" {
-			if request.FinalDraftFormat == FinalDraftFormatGroundedV1 {
+			if request.FinalDraftFormat == FinalDraftFormatGroundedV1 || request.FinalDraftFormat == FinalDraftFormatGroundedOptionalV1 {
 				var draft FinalDraft
 				decoder := json.NewDecoder(strings.NewReader(*choice.Message.Content))
 				decoder.DisallowUnknownFields()
-				if err := decoder.Decode(&draft); err != nil {
-					return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid grounded Final Draft")}
-				}
+				decodeErr := decoder.Decode(&draft)
 				var trailing any
-				if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-					return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("grounded Final Draft has trailing JSON")}
+				trailingErr := decoder.Decode(&trailing)
+				invalidJSON := decodeErr != nil || !errors.Is(trailingErr, io.EOF)
+				if invalidJSON || (request.FinalDraftFormat == FinalDraftFormatGroundedOptionalV1 && draft.Validate() != nil) {
+					if request.FinalDraftFormat == FinalDraftFormatGroundedV1 {
+						return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid grounded Final Draft")}
+					}
+					decision.Final = &FinalDraft{Text: *choice.Message.Content}
+				} else {
+					decision.Final = &draft
 				}
-				decision.Final = &draft
 			} else {
 				decision.Final = &FinalDraft{Text: *choice.Message.Content}
 			}

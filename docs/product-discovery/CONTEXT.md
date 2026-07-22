@@ -21,7 +21,7 @@ A Chat response whose factual claims are supported only by the Sources selected 
 _Avoid_: General answer, best-effort answer
 
 **Model-Knowledge Answer**:
-A clearly disclosed Chat response based on the configured model rather than Notebook Sources. It carries no Citations and is allowed when no Source is selected or when completed research determines that the selected Sources contain no support at all; it never fills gaps inside a partially supported Grounded Answer.
+A Chat response based on the configured model rather than citeable Notebook Evidence. It carries no Citations and is allowed while no accepted search result contains a valid Evidence range, including when Sources are selected; it cannot claim Source support and never fills gaps inside a partially supported Grounded Answer.
 _Avoid_: Grounded Answer, hybrid answer, silent fallback
 
 **Research Agent**:

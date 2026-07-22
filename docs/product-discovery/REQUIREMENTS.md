@@ -28,9 +28,9 @@ Anything absent from the initial-release column is outside initial acceptance un
 
 ### Foundation Delivery Sequence
 
-The model-knowledge Chat capability is a formal but deliberately narrow product capability introduced in Sprint 2A. It answers directly from the configured model without claiming to have read Sources, searched the web, or produced a Grounded Answer. It is used when no Source is selected and may be used after complete, non-degraded research determines that selected Sources contain no support at all. The Answer itself discloses that it is not based on Notebook Sources rather than persisting a mode on each Message; the Agent may suggest useful Sources when they would materially improve accuracy, recency, depth, verification, or citation quality.
+The model-knowledge Chat capability is a formal but deliberately narrow product capability introduced in Sprint 2A. It answers directly from the configured model without claiming to have read Sources, searched the web, or produced a Grounded Answer. It is used while no accepted search result contains a valid Evidence range, including when Sources are selected but irrelevant to an ordinary conversational request. The Answer carries no Citations and cannot claim Source support; the Agent may suggest useful Sources when they would materially improve accuracy, recency, depth, verification, or citation quality.
 
-This mode proves private Chat, durable Message/Run/Job admission, real model execution, publication, refresh, and failure behavior before RAG exists. It does not weaken the grounded contract: a partially supported answer remains strictly Source-grounded and model knowledge never fills its gaps. Automatic fallback is whole-answer only, carries no Citations, and requires an independent model call with no Source passages.
+This mode proves private Chat, durable Message/Run/Job admission, real model execution, publication, refresh, and failure behavior before RAG exists. It does not weaken the grounded contract: after any accepted search returns citeable Evidence, the final response is strict grounded JSON, and model knowledge never fills gaps in a partially supported Answer.
 
 ## Initial Release
 
@@ -135,7 +135,7 @@ Documents include extracted text, document structure, readable tables, and usabl
 - A Member can include or exclude Sources before submitting the next question.
 - Selection changes affect subsequent answers only.
 - Sources added later do not silently enter existing Chats.
-- When no Source is selected, a question runs in disclosed model-knowledge mode. When Sources are selected, only complete, non-degraded research finding zero support may switch the whole response to a fresh Model-Knowledge Answer with no Source passages or Citations; partial support remains grounded and discloses its gaps.
+- When no Source is selected, a question runs in model-knowledge mode. When Sources are selected, the final response remains claim-free text while no accepted search contains a valid Evidence range. Any citeable Evidence switches the Run to strict grounded JSON; partial support remains grounded and discloses its gaps.
 
 ### Research Agent
 
@@ -150,7 +150,7 @@ The initial Research Agent cannot:
 - Create durable Outputs
 - Silently mix unselected Sources, model knowledge, or hidden internet context into a source-grounded answer
 
-If selected Sources partially support an answer, the Agent uses only that Evidence and states what remains insufficient instead of filling gaps with general knowledge. If complete, non-degraded research finds no supporting Evidence at all, the Run may perform a fresh model call without Source passages and publish a whole Model-Knowledge Answer whose opening disclosure states that it is not based on the selected Sources. A degraded or incomplete search, Source deletion, authorization loss, or cancellation can never trigger fallback. Message rows do not carry a duplicate answer mode.
+If selected Sources partially support an answer, the Agent uses only that Evidence and states what remains insufficient instead of filling gaps with general knowledge. Before any accepted result contains citeable Evidence, the Composer may instead finish with claim-free text; this remains valid after an empty, failed, or degraded no-Evidence search and creates no Citations. Source deletion, authorization loss, and cancellation still prevent publication. Message rows do not carry a duplicate answer mode.
 
 ### Agent Run Experience
 

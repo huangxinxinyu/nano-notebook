@@ -63,7 +63,18 @@ func TestBifrostClientReturnsANonStreamingFinalDecision(t *testing.T) {
 }
 
 func TestBifrostParsesGroundedFinalDraftAsTypedClaims(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ResponseFormat struct {
+				Type string `json:"type"`
+			} `json:"response_format"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.ResponseFormat.Type != "json_object" {
+			t.Fatalf("response_format=%+v", request.ResponseFormat)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"text\":\"The launch is 20 July.\",\"claims\":[{\"text\":\"The launch is 20 July.\",\"citations\":[{\"source_id\":\"src_a\",\"evidence_revision_id\":\"evr_a\",\"unit_id\":\"unit_a\",\"start_rune\":0,\"end_rune\":27}]}]}"},"finish_reason":"stop"}]}`))
 	}))
@@ -77,6 +88,81 @@ func TestBifrostParsesGroundedFinalDraftAsTypedClaims(t *testing.T) {
 	}
 	if outcome.Final == nil || len(outcome.Final.Claims) != 1 || outcome.Final.Claims[0].Citations[0].UnitID != "unit_a" {
 		t.Fatalf("outcome=%+v", outcome)
+	}
+}
+
+func TestBifrostOptionalGroundedFinalDecodesVoluntaryJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := request["response_format"]; exists {
+			t.Fatalf("optional grounded request enabled response_format: %s", request["response_format"])
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"text\":\"General knowledge answer.\",\"claims\":[]}"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	outcome, err := NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
+		Model: "composer", FinalDraftFormat: FinalDraftFormatGroundedOptionalV1,
+		Messages: []ModelMessage{{Role: RoleSystem, Content: "Use Sources only when needed."}, {Role: RoleUser, Content: "What can you do?"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Final == nil || outcome.Final.Text != "General knowledge answer." || len(outcome.Final.Claims) != 0 {
+		t.Fatalf("outcome=%+v", outcome)
+	}
+}
+
+func TestBifrostOptionalGroundedFinalAcceptsPlainText(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Ordinary conversational answer."},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	outcome, err := NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
+		Model: "composer", FinalDraftFormat: FinalDraftFormatGroundedOptionalV1,
+		Messages: []ModelMessage{{Role: RoleSystem, Content: "Use Sources only when needed."}, {Role: RoleUser, Content: "What can you do?"}},
+	})
+	if err != nil || outcome.Final == nil || outcome.Final.Text != "Ordinary conversational answer." || len(outcome.Final.Claims) != 0 {
+		t.Fatalf("outcome=%+v err=%v", outcome, err)
+	}
+}
+
+func TestBifrostOptionalGroundedFinalAcceptsMalformedJSONAsText(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{not actually JSON}"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	outcome, err := NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
+		Model: "composer", FinalDraftFormat: FinalDraftFormatGroundedOptionalV1,
+		Messages: []ModelMessage{{Role: RoleSystem, Content: "Use Sources only when needed."}, {Role: RoleUser, Content: "Show this notation."}},
+	})
+	if err != nil || outcome.Final == nil || outcome.Final.Text != "{not actually JSON}" || len(outcome.Final.Claims) != 0 {
+		t.Fatalf("outcome=%+v err=%v", outcome, err)
+	}
+}
+
+func TestBifrostRequiredGroundedFinalRejectsPlainText(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Unsupported plain text."},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	_, err := NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
+		Model: "composer", FinalDraftFormat: FinalDraftFormatGroundedV1,
+		Messages: []ModelMessage{{Role: RoleSystem, Content: "Return JSON."}, {Role: RoleUser, Content: "What do the Sources say?"}},
+	})
+	var modelErr *ModelError
+	if !errors.As(err, &modelErr) || modelErr.Kind != ErrorInvalidResponse {
+		t.Fatalf("error=%v", err)
 	}
 }
 

@@ -3,6 +3,7 @@ package app_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -180,9 +181,15 @@ func (liveEvalModel) Rerank(_ context.Context, request models.RerankRequest) (mo
 
 func (liveEvalModel) Decide(_ context.Context, request models.ModelRequest) (models.ModelOutcome, error) {
 	if len(request.Messages) == 2 {
+		if request.FinalDraftFormat != models.FinalDraftFormatGroundedOptionalV1 {
+			return models.ModelOutcome{}, fmt.Errorf("first grounded format = %q", request.FinalDraftFormat)
+		}
 		return models.ModelOutcome{ModelDecision: models.ModelDecision{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{{
 			Name: "search_evidence", Input: json.RawMessage(`{"query":"launch date","purpose":"answer the question"}`),
 		}}}}, Metadata: liveEvalDecisionMetadata(request.Model, models.ModelResultActionProposal)}, nil
+	}
+	if request.FinalDraftFormat != models.FinalDraftFormatGroundedV1 {
+		return models.ModelOutcome{}, fmt.Errorf("evidence-bearing grounded format = %q", request.FinalDraftFormat)
 	}
 	claim := "The launch date is 20 July."
 	return models.ModelOutcome{ModelDecision: models.ModelDecision{Final: &models.FinalDraft{Text: claim, Claims: []models.DraftClaim{{

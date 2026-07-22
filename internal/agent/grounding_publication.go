@@ -68,6 +68,10 @@ func validateGroundingPublication(ctx context.Context, tx pgx.Tx, runID string, 
 		if selectedCount != 0 || len(expected.Claims) != 0 || researchComplete || degraded || verifierModel != "" || verifierPrompt != "" {
 			return "", ErrGroundingInvalid
 		}
+	case "source_free":
+		if selectedCount == 0 || len(expected.Claims) != 0 || verifierModel != "" || verifierPrompt != "" {
+			return "", ErrGroundingInvalid
+		}
 	case "zero_support":
 		if selectedCount == 0 || len(expected.Claims) != 0 || !researchComplete || degraded || verifierModel != "" || verifierPrompt != "" {
 			return "", ErrGroundingInvalid

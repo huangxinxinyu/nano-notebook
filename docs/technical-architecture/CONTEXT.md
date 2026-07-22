@@ -121,7 +121,7 @@ The fixed set of immutable Sources and their active Evidence Revisions selected 
 _Avoid_: Current Sources, live Notebook contents
 
 **Grounding Outcome**:
-The Run-owned classification of a published answer as Source-grounded or an explicitly disclosed whole Model-Knowledge Answer. It is determined from completed retrieval, accepted Evidence, verified Claim Support Records, and Citations rather than duplicated on the Assistant Message; degraded research cannot establish a zero-support fallback.
+The Run-owned classification of a published answer as Source-grounded, `source_free`, or historical `zero_support`. It is determined from accepted Evidence ranges, verified Claim Support Records, and Citations rather than duplicated on the Assistant Message. Degraded research with Evidence remains grounded; degraded research without Evidence may remain `source_free`.
 _Avoid_: Message answer mode, mixed answer, UI toggle
 
 **Agent Controller**:

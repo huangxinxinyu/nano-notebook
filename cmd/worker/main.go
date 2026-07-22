@@ -238,7 +238,7 @@ func main() {
 		slog.Error("Agent Trace purge Sender invalid", "error", err)
 		os.Exit(1)
 	}
-	grounder := agent.NewGroundingService(db.Pool(), modelClient, modelClient, agent.GroundingConfig{
+	grounder := agent.NewGroundingService(db.Pool(), modelClient, agent.GroundingConfig{
 		VerifierModel: config.AgentVerifierModel, VerifierPromptVersion: config.AgentVerifierPrompt,
 	})
 	runtime := agent.NewPostgresRuntime(db.Pool(), agent.BareSystemPrompt, nil,

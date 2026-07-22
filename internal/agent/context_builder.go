@@ -59,9 +59,23 @@ func (r *PostgresRuntime) BuildDecisionRequest(
 	}
 	request.ActionDefinitions = cloneActionDefinitions(definitions)
 	if execution.PromptVersion == GroundedPromptVersion {
-		request.FinalDraftFormat = models.FinalDraftFormatGroundedV1
+		request.FinalDraftFormat, err = groundedFinalDraftFormat(prefix)
+		if err != nil {
+			return models.ModelRequest{}, err
+		}
 	}
 	return request, nil
+}
+
+func groundedFinalDraftFormat(prefix CheckpointPrefix) (string, error) {
+	research, err := parseResearchState(prefix)
+	if err != nil {
+		return "", err
+	}
+	if research.evidenceSeen {
+		return models.FinalDraftFormatGroundedV1, nil
+	}
+	return models.FinalDraftFormatGroundedOptionalV1, nil
 }
 
 func cloneActionDefinitions(definitions []models.ActionDefinition) []models.ActionDefinition {
