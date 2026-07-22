@@ -21,12 +21,12 @@ func TestCommandExecutorRunsOneBoundedStrictProductCase(t *testing.T) {
 		t.Fatal(err)
 	}
 	evalCase := rageval.Case{ID: "case-command", Critical: true, Families: []rageval.SourceFamily{rageval.FamilyTXT}, Language: rageval.LanguageEnglish, Question: "Question?", ExpectedEvidenceSets: [][]string{{"unit-a"}}, RequiredFacts: []string{"fact"}, Fixtures: []rageval.Fixture{{ID: "fixture-a", Family: rageval.FamilyTXT, URI: "fixture://sprint6/txt-en-v1", SHA256: "7a779b4f810b901de48889890fc53a025c365b02bd5ccfee3d58d4926f48e81d"}}}
-	config := rageval.PinnedConfig{ExtractionConfigID: "extract-v1", EvidenceSchemaVersion: 1, ComposerModel: "compose", VerifierModel: "verify", VerifierPromptVersion: "verify-prompt-v1", PromptVersion: "prompt-v1", AgentConfigID: "agent-v1"}
+	config := rageval.PinnedConfig{ExtractionConfigID: "extract-v1", EvidenceSchemaVersion: 1, ComposerModel: "compose", PromptVersion: "prompt-v1", AgentConfigID: "agent-v1"}
 	observation, err := executor.ExecuteCase(context.Background(), evalCase, config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if observation.CaseID != evalCase.ID || !reflect.DeepEqual(observation.RetrievedEvidenceIDs, []string{"unit-a"}) || observation.MaterialClaimCount != 1 {
+	if observation.CaseID != evalCase.ID || !reflect.DeepEqual(observation.RetrievedEvidenceIDs, []string{"unit-a"}) || !reflect.DeepEqual(observation.CitationSourceIDs, []string{"fixture-a"}) {
 		t.Fatalf("observation=%+v", observation)
 	}
 }
@@ -67,7 +67,7 @@ func TestRAGEvalCommandHelper(t *testing.T) {
 	}
 	observation := rageval.Observation{
 		CaseID: request.Case.ID, FixtureSHA256: map[string]string{"fixture-a": request.Case.Fixtures[0].SHA256}, CoveragePassed: true,
-		RetrievedEvidenceIDs: []string{"unit-a"}, CitationEvidenceIDs: []string{"unit-a"}, MaterialClaimCount: 1, CitedClaimCount: 1,
+		RetrievedEvidenceIDs: []string{"unit-a"}, CitationSourceIDs: []string{"fixture-a"},
 		RequiredFactsFound: []string{"fact"}, LatencyMilliseconds: 10,
 	}
 	_ = json.NewEncoder(os.Stdout).Encode(observation)

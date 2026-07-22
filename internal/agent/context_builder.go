@@ -59,23 +59,35 @@ func (r *PostgresRuntime) BuildDecisionRequest(
 	}
 	request.ActionDefinitions = cloneActionDefinitions(definitions)
 	if execution.PromptVersion == GroundedPromptVersion {
-		request.FinalDraftFormat, err = groundedFinalDraftFormat(prefix)
+		request.RequiredActionName, err = groundedRequiredAction(prefix)
 		if err != nil {
 			return models.ModelRequest{}, err
+		}
+		if request.RequiredActionName != "" && !hasActionDefinition(request.ActionDefinitions, request.RequiredActionName) {
+			return models.ModelRequest{}, ErrGroundingIncomplete
 		}
 	}
 	return request, nil
 }
 
-func groundedFinalDraftFormat(prefix CheckpointPrefix) (string, error) {
+func groundedRequiredAction(prefix CheckpointPrefix) (string, error) {
 	research, err := parseResearchState(prefix)
 	if err != nil {
 		return "", err
 	}
-	if research.evidenceSeen {
-		return models.FinalDraftFormatGroundedV1, nil
+	if !research.performed {
+		return "search_evidence", nil
 	}
-	return models.FinalDraftFormatGroundedOptionalV1, nil
+	return "", nil
+}
+
+func hasActionDefinition(definitions []models.ActionDefinition, name string) bool {
+	for _, definition := range definitions {
+		if definition.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func cloneActionDefinitions(definitions []models.ActionDefinition) []models.ActionDefinition {

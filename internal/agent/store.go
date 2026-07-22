@@ -59,24 +59,27 @@ type RunProjection struct {
 }
 
 type CitationSnapshot struct {
-	ID                 string `json:"id"`
-	MessageID          string `json:"message_id"`
-	ClaimOrdinal       int    `json:"claim_ordinal"`
-	CitationOrdinal    int    `json:"citation_ordinal"`
-	ClaimText          string `json:"claim_text"`
-	SourceID           string `json:"source_id"`
-	EvidenceRevisionID string `json:"evidence_revision_id"`
-	UnitID             string `json:"unit_id"`
-	StartRune          int    `json:"start_rune"`
-	EndRune            int    `json:"end_rune"`
+	ID                 string  `json:"id"`
+	MessageID          string  `json:"message_id"`
+	ReferenceKind      string  `json:"reference_kind"`
+	ReferenceOrdinal   *int    `json:"reference_ordinal,omitempty"`
+	ClaimOrdinal       *int    `json:"claim_ordinal,omitempty"`
+	CitationOrdinal    *int    `json:"citation_ordinal,omitempty"`
+	ClaimText          *string `json:"claim_text,omitempty"`
+	SourceID           string  `json:"source_id"`
+	SourceTitle        *string `json:"source_title,omitempty"`
+	EvidenceRevisionID *string `json:"evidence_revision_id,omitempty"`
+	UnitID             *string `json:"unit_id,omitempty"`
+	StartRune          *int    `json:"start_rune,omitempty"`
+	EndRune            *int    `json:"end_rune,omitempty"`
 }
 
 type CitationView struct {
 	Citation     CitationSnapshot            `json:"citation"`
 	SourceTitle  string                      `json:"source_title"`
 	SourceFormat source.Format               `json:"source_format"`
-	UnitKind     string                      `json:"unit_kind"`
-	Preview      string                      `json:"preview"`
+	UnitKind     string                      `json:"unit_kind,omitempty"`
+	Preview      string                      `json:"preview,omitempty"`
 	Coordinate   *normalize.SourceCoordinate `json:"coordinate,omitempty"`
 }
 
@@ -235,21 +238,29 @@ func (s *Store) ProjectionForUser(ctx context.Context, userID, runID string) (Ru
 
 func (s *Store) CitationsForRun(ctx context.Context, userID, runID string) ([]CitationSnapshot, error) {
 	return s.listCitations(ctx, `
-		select c.citation_id,c.message_id,c.claim_ordinal,c.citation_ordinal,c.claim_text,
-			c.source_id,c.evidence_revision_id,c.unit_id,c.start_rune,c.end_rune
-		from chat_citations c join agent_runs r on r.id=c.run_id
+		select c.citation_id,c.message_id,c.reference_kind,c.reference_ordinal,c.claim_ordinal,c.citation_ordinal,c.claim_text,
+			c.source_id,src.title,c.evidence_revision_id,c.unit_id,c.start_rune,c.end_rune
+		from chat_citations c
+		join agent_runs r on r.id=c.run_id
+		join chat_chats chat on chat.id=r.chat_id
+		join notebook_memberships member on member.notebook_id=chat.notebook_id and member.user_id=r.user_id
+		left join source_sources src on src.id=c.source_id and src.notebook_id=chat.notebook_id
 		where c.run_id=$1 and r.user_id=$2
-		order by c.claim_ordinal,c.citation_ordinal
+		order by case when c.reference_kind='source' then 0 else 1 end,c.reference_ordinal,c.claim_ordinal,c.citation_ordinal
 	`, runID, userID)
 }
 
 func (s *Store) CitationsForChat(ctx context.Context, userID, chatID string) ([]CitationSnapshot, error) {
 	return s.listCitations(ctx, `
-		select c.citation_id,c.message_id,c.claim_ordinal,c.citation_ordinal,c.claim_text,
-			c.source_id,c.evidence_revision_id,c.unit_id,c.start_rune,c.end_rune
-		from chat_citations c join agent_runs r on r.id=c.run_id
+		select c.citation_id,c.message_id,c.reference_kind,c.reference_ordinal,c.claim_ordinal,c.citation_ordinal,c.claim_text,
+			c.source_id,src.title,c.evidence_revision_id,c.unit_id,c.start_rune,c.end_rune
+		from chat_citations c
+		join agent_runs r on r.id=c.run_id
+		join chat_chats chat on chat.id=r.chat_id
+		join notebook_memberships member on member.notebook_id=chat.notebook_id and member.user_id=r.user_id
+		left join source_sources src on src.id=c.source_id and src.notebook_id=chat.notebook_id
 		where r.chat_id=$1 and r.user_id=$2
-		order by r.created_at,c.claim_ordinal,c.citation_ordinal
+		order by r.created_at,case when c.reference_kind='source' then 0 else 1 end,c.reference_ordinal,c.claim_ordinal,c.citation_ordinal
 	`, chatID, userID)
 }
 
@@ -263,8 +274,9 @@ func (s *Store) listCitations(ctx context.Context, query string, args ...any) ([
 	for rows.Next() {
 		var citation CitationSnapshot
 		if err := rows.Scan(
-			&citation.ID, &citation.MessageID, &citation.ClaimOrdinal, &citation.CitationOrdinal, &citation.ClaimText,
-			&citation.SourceID, &citation.EvidenceRevisionID, &citation.UnitID, &citation.StartRune, &citation.EndRune,
+			&citation.ID, &citation.MessageID, &citation.ReferenceKind, &citation.ReferenceOrdinal,
+			&citation.ClaimOrdinal, &citation.CitationOrdinal, &citation.ClaimText,
+			&citation.SourceID, &citation.SourceTitle, &citation.EvidenceRevisionID, &citation.UnitID, &citation.StartRune, &citation.EndRune,
 		); err != nil {
 			return nil, err
 		}
@@ -279,13 +291,18 @@ func (s *Store) CitationViewForUser(ctx context.Context, userID, citationID stri
 	}
 	var view CitationView
 	err := s.db.QueryRow(ctx, `
-		select c.citation_id,c.message_id,c.claim_ordinal,c.citation_ordinal,c.claim_text,
-			c.source_id,c.evidence_revision_id,c.unit_id,c.start_rune,c.end_rune
-		from chat_citations c join agent_runs r on r.id=c.run_id
+		select c.citation_id,c.message_id,c.reference_kind,c.reference_ordinal,c.claim_ordinal,c.citation_ordinal,c.claim_text,
+			c.source_id,src.title,c.evidence_revision_id,c.unit_id,c.start_rune,c.end_rune
+		from chat_citations c
+		join agent_runs r on r.id=c.run_id
+		join chat_chats chat on chat.id=r.chat_id
+		join notebook_memberships member on member.notebook_id=chat.notebook_id and member.user_id=r.user_id
+		left join source_sources src on src.id=c.source_id and src.notebook_id=chat.notebook_id
 		where c.citation_id=$1 and r.user_id=$2
 	`, citationID, userID).Scan(
-		&view.Citation.ID, &view.Citation.MessageID, &view.Citation.ClaimOrdinal, &view.Citation.CitationOrdinal,
-		&view.Citation.ClaimText, &view.Citation.SourceID, &view.Citation.EvidenceRevisionID, &view.Citation.UnitID,
+		&view.Citation.ID, &view.Citation.MessageID, &view.Citation.ReferenceKind, &view.Citation.ReferenceOrdinal,
+		&view.Citation.ClaimOrdinal, &view.Citation.CitationOrdinal,
+		&view.Citation.ClaimText, &view.Citation.SourceID, &view.Citation.SourceTitle, &view.Citation.EvidenceRevisionID, &view.Citation.UnitID,
 		&view.Citation.StartRune, &view.Citation.EndRune,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -293,6 +310,22 @@ func (s *Store) CitationViewForUser(ctx context.Context, userID, citationID stri
 	}
 	if err != nil {
 		return CitationView{}, err
+	}
+	if view.Citation.ReferenceKind == "source" {
+		err = s.db.QueryRow(ctx, `
+			select title,format from source_sources where id=$1 and state='ready'
+		`, view.Citation.SourceID).Scan(&view.SourceTitle, &view.SourceFormat)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return CitationView{}, ErrCitationUnavailable
+		}
+		if err != nil {
+			return CitationView{}, err
+		}
+		return view, nil
+	}
+	if view.Citation.ReferenceKind != "precise" || view.Citation.EvidenceRevisionID == nil || view.Citation.UnitID == nil ||
+		view.Citation.StartRune == nil || view.Citation.EndRune == nil {
+		return CitationView{}, ErrCitationUnavailable
 	}
 	var unitText string
 	var coordinateJSON []byte
@@ -302,7 +335,7 @@ func (s *Store) CitationViewForUser(ctx context.Context, userID, citationID stri
 		join source_evidence_revisions r on r.id=$2 and r.source_id=s.id and r.status='active'
 		join source_evidence_units u on u.id=$3 and u.revision_id=r.id and u.source_id=s.id
 		where s.id=$1 and s.state='ready'
-	`, view.Citation.SourceID, view.Citation.EvidenceRevisionID, view.Citation.UnitID).Scan(
+	`, view.Citation.SourceID, *view.Citation.EvidenceRevisionID, *view.Citation.UnitID).Scan(
 		&view.SourceTitle, &view.SourceFormat, &view.UnitKind, &unitText, &coordinateJSON,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -312,10 +345,10 @@ func (s *Store) CitationViewForUser(ctx context.Context, userID, citationID stri
 		return CitationView{}, err
 	}
 	runes := []rune(unitText)
-	if view.Citation.StartRune < 0 || view.Citation.EndRune > len(runes) || view.Citation.EndRune <= view.Citation.StartRune {
+	if *view.Citation.StartRune < 0 || *view.Citation.EndRune > len(runes) || *view.Citation.EndRune <= *view.Citation.StartRune {
 		return CitationView{}, ErrCitationUnavailable
 	}
-	view.Preview = string(runes[view.Citation.StartRune:view.Citation.EndRune])
+	view.Preview = string(runes[*view.Citation.StartRune:*view.Citation.EndRune])
 	if len(coordinateJSON) > 0 {
 		var coordinate normalize.SourceCoordinate
 		if json.Unmarshal(coordinateJSON, &coordinate) != nil {

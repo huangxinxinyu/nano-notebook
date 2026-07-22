@@ -139,19 +139,19 @@ func (e *ProductRunExecutor) ExecuteCase(ctx context.Context, evalCase Case, con
 		return Observation{}, err
 	}
 	observation.RetrievedEvidenceIDs = aliasesForUnits(retrievedUnits, unitAliases)
-	citationUnits, err := loadCitationAndClaimFacts(ctx, tx, manifestCase.RunID, config.VerifierModel, config.VerifierPromptVersion, &observation)
+	citationSources, err := loadCitationSources(ctx, tx, manifestCase, &observation)
 	if err != nil {
 		return Observation{}, err
 	}
-	observation.CitationEvidenceIDs = aliasesForUnits(citationUnits, unitAliases)
+	observation.CitationSourceIDs = citationSources
 	for _, fact := range evalCase.RequiredFacts {
 		if strings.Contains(answer, fact) {
 			observation.RequiredFactsFound = append(observation.RequiredFactsFound, fact)
 		}
 	}
-	for _, claim := range evalCase.ForbiddenClaims {
-		if strings.Contains(answer, claim) {
-			observation.ForbiddenClaimsFound = append(observation.ForbiddenClaimsFound, claim)
+	for _, fact := range evalCase.ForbiddenFacts {
+		if strings.Contains(answer, fact) {
+			observation.ForbiddenFactsFound = append(observation.ForbiddenFactsFound, fact)
 		}
 	}
 	if err := loadModelUsage(ctx, tx, manifestCase.RunID, &observation); err != nil {
@@ -276,34 +276,39 @@ func loadRetrievedUnits(ctx context.Context, tx pgx.Tx, runID string) ([]string,
 	return units, nil
 }
 
-func loadCitationAndClaimFacts(ctx context.Context, tx pgx.Tx, runID, verifierModel, verifierPromptVersion string, observation *Observation) ([]string, error) {
-	var storedVerifier, storedPrompt string
-	if err := tx.QueryRow(ctx, `select verifier_model,verifier_prompt_version from agent_run_grounding_plans where run_id=$1`, runID).Scan(&storedVerifier, &storedPrompt); err != nil {
+func loadCitationSources(ctx context.Context, tx pgx.Tx, manifestCase ProductRunCase, observation *Observation) ([]string, error) {
+	var outcome string
+	if err := tx.QueryRow(ctx, `select outcome from agent_run_grounding_plans where run_id=$1`, manifestCase.RunID).Scan(&outcome); err != nil {
 		return nil, err
 	}
-	if storedVerifier != verifierModel || storedPrompt != verifierPromptVersion {
-		observation.InvariantFailures = append(observation.InvariantFailures, "pinned_verifier_mismatch")
+	if outcome != "source_cited" && outcome != "source_free" {
+		observation.InvariantFailures = append(observation.InvariantFailures, "source_reference_grounding_mismatch")
 	}
-	if err := tx.QueryRow(ctx, `select count(*) from agent_claim_support_records where run_id=$1`, runID).Scan(&observation.MaterialClaimCount); err != nil {
-		return nil, err
-	}
-	if err := tx.QueryRow(ctx, `select count(distinct claim_ordinal) from chat_citations where run_id=$1`, runID).Scan(&observation.CitedClaimCount); err != nil {
-		return nil, err
-	}
-	rows, err := tx.Query(ctx, `select unit_id from chat_citations where run_id=$1 order by claim_ordinal,citation_ordinal`, runID)
+	rows, err := tx.Query(ctx, `
+		select source_id from chat_citations
+		where run_id=$1 and reference_kind='source' order by reference_ordinal
+	`, manifestCase.RunID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	units := make([]string, 0)
+	fixtureBySource := make(map[string]string, len(manifestCase.FixtureSources))
+	for fixtureID, sourceID := range manifestCase.FixtureSources {
+		fixtureBySource[sourceID] = fixtureID
+	}
+	sources := make([]string, 0)
 	for rows.Next() {
-		var unitID string
-		if err := rows.Scan(&unitID); err != nil {
+		var sourceID string
+		if err := rows.Scan(&sourceID); err != nil {
 			return nil, err
 		}
-		units = append(units, unitID)
+		if fixtureID := fixtureBySource[sourceID]; fixtureID != "" {
+			sources = append(sources, fixtureID)
+		} else {
+			sources = append(sources, sourceID)
+		}
 	}
-	return units, rows.Err()
+	return sources, rows.Err()
 }
 
 func loadModelUsage(ctx context.Context, tx pgx.Tx, runID string, observation *Observation) error {

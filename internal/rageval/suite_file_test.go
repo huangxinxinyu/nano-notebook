@@ -57,7 +57,7 @@ func TestSprint6SuiteIsStrictValidAndDigestPinned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if digest != "f48f765dfbb70ad1debdc5ca83879d8029dcc561ec1aa5ddc32b253bceb1977c" {
+	if digest != "67668d9c0e938f8a5572573dcc3c840d14cf7a24a2b99ecba83cabdd09e8fa1f" {
 		t.Fatalf("suite SHA-256 = %s", digest)
 	}
 }

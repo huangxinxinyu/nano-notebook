@@ -438,6 +438,44 @@ test("opens a published Citation without exposing retrieval internals", async ()
   expect(image).toHaveAttribute("src", "/api/v1/sources/src_image/viewer-asset");
 });
 
+test("renders Source references inline and opens the normal Source viewer", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({
+      chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" },
+      messages: [{ id: "msg_source_answer", role: "assistant", content: "Complete 120 credits [source:src_degree]. Keep a 2.0 GPA [source:src_degree].", created_at: "2026-07-22T12:00:00Z" }],
+      runs: [],
+      citations: [{ id: "cit_source", message_id: "msg_source_answer", reference_kind: "source", reference_ordinal: 0, source_id: "src_degree", source_title: "degree-plan.pdf" }]
+    });
+    if (url.endsWith("/api/v1/sources/src_degree")) return json({ source: {
+      id: "src_degree", title: "degree-plan.pdf", format: "pdf",
+      revision: { viewer: { kind: "pages", page_count: 2 }, coverage: { status: "complete", gaps: [] }, units: [
+        { id: "unit_degree", kind: "paragraph", text: "Complete 120 credits and keep a 2.0 GPA.", coordinate: { kind: "pdf_region", page_number: 1 } }
+      ] }
+    } });
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  const chat = await screen.findByRole("region", { name: "Chat" });
+  expect(within(chat).queryByText(/\[source:/)).not.toBeInTheDocument();
+  const references = await within(chat).findAllByRole("button", { name: "Citation 1 for degree-plan.pdf" });
+  expect(references).toHaveLength(2);
+  expect(references[0]).toHaveTextContent("[1]");
+  expect(within(chat).queryByText("[2]")).not.toBeInTheDocument();
+  await user.click(references[0]);
+  const viewer = await screen.findByRole("dialog", { name: "degree-plan.pdf" });
+  expect(within(viewer).getByText("Complete 120 credits and keep a 2.0 GPA.")).toBeInTheDocument();
+  expect(within(viewer).queryByText(/Citation preview|The cache stores/)).not.toBeInTheDocument();
+});
+
 test("submits one durable Message and projects the final answer from Run SSE", async () => {
   window.history.pushState(null, "", "/notebooks/nb_test");
   let admittedMessageID = "";
@@ -1119,8 +1157,8 @@ test("explores a Trace with synchronized Tree, Timeline, and explicit Replay loa
           { trace_id: "trace-admin", span_id: "root-admin", parent_span_id: "", name: "agent.execution", start_sequence: 1, end_sequence: null, started_at_unix_nano: 1700000000000000000, ended_at_unix_nano: null, duration_nanoseconds: null, status: "", start_attributes: [], end_attributes: [], replay: [], model: null },
           { trace_id: "trace-admin", span_id: "model-admin", parent_span_id: "root-admin", name: "gen_ai.model.call", start_sequence: 2, end_sequence: 4, started_at_unix_nano: 1700000001000000000, ended_at_unix_nano: 1700000003000000000, duration_nanoseconds: 2000000000, status: "ok", start_attributes: [], end_attributes: [{ Key: "agent.error.kind", Value: { Kind: "string", String: "gateway_timeout" } }], replay: [{ attachment_id: "019bf000-0000-7000-8000-000000000555", class: "model_request", record_sequence: 2 }], model: { requested_model: "qwen-flash", selected_model: "qwen-flash", provider: "aliyun", input_tokens: 12, output_tokens: null, total_tokens: null, cached_tokens: null, reasoning_tokens: null, gateway_retries: 0, gateway_fallbacks: 0, duration_nanoseconds: 2000000000, cost: { known: true, amount: 0.002, currency: "USD", source: "provider_reported" } } },
           { trace_id: "trace-admin", span_id: "search-admin", parent_span_id: "root-admin", name: "agent.action", start_sequence: 5, end_sequence: 6, started_at_unix_nano: 1700000003100000000, ended_at_unix_nano: 1700000003500000000, duration_nanoseconds: 400000000, status: "ok", start_attributes: [{ Key: "agent.action.name", Value: { Kind: "string", String: "search_evidence" } }, { Key: "nano.rag.search.purpose", Value: { Kind: "string", String: "compare methods" } }], end_attributes: [{ Key: "nano.rag.dense.candidate_count", Value: { Kind: "int64", Int64: 12 } }, { Key: "nano.rag.bm25.candidate_count", Value: { Kind: "int64", Int64: 9 } }, { Key: "nano.rag.rrf.candidate_ids", Value: { Kind: "string", String: "[\"chunk-b\",\"chunk-a\"]" } }, { Key: "nano.rag.rerank.candidate_ids", Value: { Kind: "string", String: "[\"chunk-a\"]" } }, { Key: "nano.rag.retrieval.degraded", Value: { Kind: "bool", Bool: true } }, { Key: "nano.rag.retrieval.degradations", Value: { Kind: "string", String: "[\"reranker_unavailable\"]" } }], replay: [], model: null },
-          { trace_id: "trace-admin", span_id: "verify-admin", parent_span_id: "root-admin", name: "nano.claim_support", start_sequence: 7, end_sequence: 8, started_at_unix_nano: 1700000003600000000, ended_at_unix_nano: 1700000003700000000, duration_nanoseconds: 100000000, status: "ok", start_attributes: [{ Key: "nano.rag.verifier.claim_count", Value: { Kind: "int64", Int64: 3 } }, { Key: "nano.rag.verifier.evidence_count", Value: { Kind: "int64", Int64: 5 } }], end_attributes: [{ Key: "nano.rag.verifier.supported_count", Value: { Kind: "int64", Int64: 2 } }, { Key: "nano.rag.verifier.unsupported_count", Value: { Kind: "int64", Int64: 1 } }], replay: [], model: null },
-          { trace_id: "trace-admin", span_id: "publish-admin", parent_span_id: "root-admin", name: "nano.publication", start_sequence: 9, end_sequence: 10, started_at_unix_nano: 1700000003800000000, ended_at_unix_nano: 1700000003900000000, duration_nanoseconds: 100000000, status: "ok", start_attributes: [], end_attributes: [{ Key: "nano.rag.grounding.outcome", Value: { Kind: "string", String: "supported" } }], replay: [], model: null }
+          { trace_id: "trace-admin", span_id: "grounding-admin", parent_span_id: "root-admin", name: "nano.grounding", start_sequence: 7, end_sequence: 8, started_at_unix_nano: 1700000003600000000, ended_at_unix_nano: 1700000003700000000, duration_nanoseconds: 100000000, status: "ok", start_attributes: [], end_attributes: [{ Key: "nano.rag.grounding.research_performed", Value: { Kind: "bool", Bool: true } }, { Key: "nano.rag.source_reference.eligible_source_count", Value: { Kind: "int64", Int64: 2 } }, { Key: "nano.rag.source_reference.valid_count", Value: { Kind: "int64", Int64: 1 } }, { Key: "nano.rag.source_reference.discarded_marker_count", Value: { Kind: "int64", Int64: 1 } }], replay: [], model: null },
+          { trace_id: "trace-admin", span_id: "publish-admin", parent_span_id: "root-admin", name: "nano.publication", start_sequence: 9, end_sequence: 10, started_at_unix_nano: 1700000003800000000, ended_at_unix_nano: 1700000003900000000, duration_nanoseconds: 100000000, status: "ok", start_attributes: [], end_attributes: [{ Key: "nano.rag.grounding.outcome", Value: { Kind: "string", String: "source_cited" } }], replay: [], model: null }
         ],
         events: [{ trace_id: "trace-admin", sequence: 3, span_id: "root-admin", name: "nano.run.admitted", occurred_at_unix_nano: 1700000000500000000, attributes: [] }],
         links: [{ trace_id: "trace-admin", sequence: 5, span_id: "model-admin", name: "retries", target_trace_id: "trace-previous", target_span_id: "child-previous", occurred_at_unix_nano: 1700000004000000000, attributes: [] }]
@@ -1152,8 +1190,9 @@ test("explores a Trace with synchronized Tree, Timeline, and explicit Replay loa
   expect(within(rag).getByText("12 → 9")).toBeInTheDocument();
   expect(within(rag).getByText("chunk-b → chunk-a")).toBeInTheDocument();
   expect(within(rag).getByText("reranker_unavailable")).toBeInTheDocument();
-  expect(within(rag).getByText("2 supported / 1 unsupported")).toBeInTheDocument();
-  expect(within(rag).getByText("supported")).toBeInTheDocument();
+  expect(within(rag).getByText("1 valid / 1 discarded")).toBeInTheDocument();
+  expect(within(rag).getByText("2 eligible Sources")).toBeInTheDocument();
+  expect(within(rag).getByText("source_cited")).toBeInTheDocument();
   const tree = await screen.findByRole("tree", { name: "Trace Tree" });
   const timeline = screen.getByRole("region", { name: "Trace Timeline" });
   expect(within(tree).getByText("agent.execution")).toBeInTheDocument();

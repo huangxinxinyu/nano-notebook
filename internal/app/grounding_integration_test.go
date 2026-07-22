@@ -15,40 +15,6 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
 )
 
-type claimVerifierStub struct {
-	calls     int
-	request   models.ClaimSupportRequest
-	pass      bool
-	uncovered []string
-}
-
-func (s *claimVerifierStub) VerifyClaimSupport(_ context.Context, request models.ClaimSupportRequest) (models.ClaimSupportOutcome, error) {
-	s.calls++
-	s.request = request
-	verdicts := make([]models.ClaimSupportVerdict, len(request.Claims))
-	for index := range verdicts {
-		verdicts[index] = models.ClaimSupportVerdict{Ordinal: index, Supported: s.pass}
-	}
-	return models.ClaimSupportOutcome{Verdicts: verdicts, UncoveredClaims: append([]string(nil), s.uncovered...)}, nil
-}
-
-func TestGroundingDisclosesMaterialClaimsOmittedFromTheComposerClaimMap(t *testing.T) {
-	api, attempt, _, _ := groundingFixture(t, "omitted-grounding@example.com", "src_omitted", "evr_omitted")
-	verifier := &claimVerifierStub{pass: true, uncovered: []string{"The budget is $5M."}}
-	service := agent.NewGroundingService(api.db.Pool(), verifier, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
-	draft := models.FinalDraft{Text: "The launch is 20 July. The budget is $5M.", Claims: []models.DraftClaim{{
-		Text: "The launch is 20 July.", Citations: []models.EvidenceAddress{{SourceID: "src_omitted", EvidenceRevisionID: "evr_omitted", UnitID: "unit_ground", StartRune: 0, EndRune: 27}},
-	}}}
-	prepared, err := service.Prepare(context.Background(), attempt,
-		checkpointedEvidencePrefix("src_omitted", "evr_omitted", "unit_ground", 0, 27, false, false), draft)
-	if err != nil || len(prepared.Claims) != 1 || strings.Contains(prepared.Text, "$5M") || !strings.Contains(prepared.Text, "do not provide enough evidence") {
-		t.Fatalf("prepared=%+v err=%v", prepared, err)
-	}
-	if verifier.request.Answer != draft.Text {
-		t.Fatalf("verifier Answer=%q", verifier.request.Answer)
-	}
-}
-
 type sequenceDecisionModel struct {
 	requests  []models.ModelRequest
 	decisions []models.ModelDecision
@@ -76,76 +42,68 @@ func (b emptyEvidenceBackend) SearchEvidence(context.Context, agent.Attempt, str
 	return b.result, nil
 }
 
-func TestGroundingPreparesSupportedClaimsFromCheckpointedEvidence(t *testing.T) {
-	api, attempt, notebookID, _ := groundingFixture(t, "supported-grounding@example.com", "src_ground", "evr_ground")
-	verifier := &claimVerifierStub{pass: true}
-	service := agent.NewGroundingService(api.db.Pool(), verifier, agent.GroundingConfig{
-		VerifierModel: "verifier-test", VerifierPromptVersion: "claim-support-v1",
-	})
-	prefix := checkpointedEvidencePrefix("src_ground", "evr_ground", "unit_ground", 0, 27, false, false)
-	draft := models.FinalDraft{Text: "The launch is 20 July.", Claims: []models.DraftClaim{{
-		Text: "The launch is 20 July.", Citations: []models.EvidenceAddress{{
-			SourceID: "src_ground", EvidenceRevisionID: "evr_ground", UnitID: "unit_ground", StartRune: 0, EndRune: 27,
-		}},
-	}}}
-	prepared, err := service.Prepare(context.Background(), attempt, prefix, draft)
+func TestGroundingPersistsAllowlistedInlineSourceReferencesWithoutVerifier(t *testing.T) {
+	api, attempt, notebookID, _ := groundingFixture(t, "source-marker-grounding@example.com", "src_marker", "evr_marker")
+	service := agent.NewGroundingService(api.db.Pool())
+	draft := models.FinalDraft{Text: "The launch is 20 July [source:src_marker]. Unknown [source:src_forged]."}
+	prepared, err := service.Prepare(
+		context.Background(), attempt,
+		checkpointedEvidencePrefix("src_marker", "evr_marker", "unit_ground", 0, 27, false, false),
+		draft,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prepared.Text != draft.Text || verifier.calls != 1 || len(verifier.request.Claims) != 1 || verifier.request.Claims[0].Evidence[0].Text != "The launch date is 20 July." {
-		t.Fatalf("prepared/verifier=%+v/%+v", prepared, verifier)
+	if prepared.Text != "The launch is 20 July [source:src_marker]. Unknown ." {
+		t.Fatalf("prepared=%+v", prepared)
 	}
 	var outcome string
-	var claims, citations int
-	if err := api.db.Pool().QueryRow(context.Background(), `select outcome from agent_run_grounding_plans where run_id=$1`, attempt.RunID).Scan(&outcome); err != nil {
+	var performed bool
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select outcome,research_performed from agent_run_grounding_plans where run_id=$1
+	`, attempt.RunID).Scan(&outcome, &performed); err != nil {
 		t.Fatal(err)
 	}
-	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from agent_claim_support_records where run_id=$1 and verdict='supported'`, attempt.RunID).Scan(&claims); err != nil {
+	var sourceID string
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select source_id from agent_draft_source_references where run_id=$1 and reference_ordinal=0 and notebook_id=$2
+	`, attempt.RunID, notebookID).Scan(&sourceID); err != nil {
 		t.Fatal(err)
 	}
-	if err := api.db.Pool().QueryRow(context.Background(), `select count(*) from agent_draft_citations where run_id=$1 and notebook_id=$2`, attempt.RunID, notebookID).Scan(&citations); err != nil {
-		t.Fatal(err)
-	}
-	if outcome != "supported" || claims != 1 || citations != 1 {
-		t.Fatalf("grounding plan=%s claims=%d citations=%d", outcome, claims, citations)
+	if outcome != "source_cited" || !performed || sourceID != "src_marker" {
+		t.Fatalf("plan=%s performed=%t source=%s", outcome, performed, sourceID)
 	}
 }
 
-func TestGroundingRejectsForgedCitationBeforeVerifier(t *testing.T) {
-	api, attempt, _, _ := groundingFixture(t, "forged-grounding@example.com", "src_forged_ground", "evr_forged_ground")
-	verifier := &claimVerifierStub{pass: true}
-	service := agent.NewGroundingService(api.db.Pool(), verifier, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
-	prefix := checkpointedEvidencePrefix("src_forged_ground", "evr_forged_ground", "unit_ground", 0, 27, false, false)
-	_, err := service.Prepare(context.Background(), attempt, prefix, models.FinalDraft{Text: "Forged claim.", Claims: []models.DraftClaim{{
-		Text: "Forged claim.", Citations: []models.EvidenceAddress{{
-			SourceID: "src_forged_ground", EvidenceRevisionID: "evr_forged_ground", UnitID: "unit_ground", StartRune: 0, EndRune: 28,
-		}},
-	}}})
-	if !errors.Is(err, agent.ErrGroundingInvalid) || verifier.calls != 0 {
-		t.Fatalf("error=%v verifier calls=%d", err, verifier.calls)
+func TestGroundingRequiresSearchAttemptForSelectedSources(t *testing.T) {
+	api, attempt, _, _ := groundingFixture(t, "mandatory-search-grounding@example.com", "src_mandatory", "evr_mandatory")
+	service := agent.NewGroundingService(api.db.Pool())
+	_, err := service.Prepare(context.Background(), attempt, agent.CheckpointPrefix{}, models.FinalDraft{Text: "Hello."})
+	if !errors.Is(err, agent.ErrGroundingIncomplete) {
+		t.Fatalf("error=%v", err)
 	}
 }
 
-func TestGroundingReplacesUnsupportedClaimsWithAnExplicitEvidenceGap(t *testing.T) {
-	api, attempt, _, _ := groundingFixture(t, "unsupported-grounding@example.com", "src_unsupported", "evr_unsupported")
-	service := agent.NewGroundingService(api.db.Pool(), &claimVerifierStub{pass: false}, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
-	prepared, err := service.Prepare(context.Background(), attempt,
-		checkpointedEvidencePrefix("src_unsupported", "evr_unsupported", "unit_ground", 0, 27, false, false),
-		models.FinalDraft{Text: "The unsupported launch claim.", Claims: []models.DraftClaim{{
-			Text: "The unsupported launch claim.", Citations: []models.EvidenceAddress{{
-				SourceID: "src_unsupported", EvidenceRevisionID: "evr_unsupported", UnitID: "unit_ground", StartRune: 0, EndRune: 27,
-			}},
-		}}},
+func TestGroundingAcceptsUnmarkedPlainTextAfterEvidence(t *testing.T) {
+	api, attempt, _, _ := groundingFixture(t, "unmarked-after-evidence@example.com", "src_unmarked", "evr_unmarked")
+	service := agent.NewGroundingService(api.db.Pool())
+	prepared, err := service.Prepare(
+		context.Background(), attempt,
+		checkpointedEvidencePrefix("src_unmarked", "evr_unmarked", "unit_ground", 0, 27, false, true),
+		models.FinalDraft{Text: "Ordinary conversational answer."},
 	)
-	if err != nil || len(prepared.Claims) != 0 || !strings.Contains(prepared.Text, "do not provide enough evidence") {
+	if err != nil || prepared.Text != "Ordinary conversational answer." {
 		t.Fatalf("prepared=%+v err=%v", prepared, err)
 	}
 	var outcome string
-	if err := api.db.Pool().QueryRow(context.Background(), `select outcome from agent_run_grounding_plans where run_id=$1`, attempt.RunID).Scan(&outcome); err != nil {
+	var performed, degraded bool
+	if err := api.db.Pool().QueryRow(context.Background(), `
+		select outcome,research_performed,retrieval_degraded from agent_run_grounding_plans where run_id=$1
+	`, attempt.RunID).Scan(&outcome, &performed, &degraded); err != nil {
 		t.Fatal(err)
 	}
-	if outcome != "insufficient_evidence" {
-		t.Fatalf("outcome=%s", outcome)
+	if outcome != "source_free" || !performed || !degraded {
+		t.Fatalf("plan=%s performed=%t degraded=%t", outcome, performed, degraded)
 	}
 }
 
@@ -156,17 +114,16 @@ func TestGroundingAcceptsSelectedSourceFinalWhenNoCiteableEvidence(t *testing.T)
 		complete bool
 		degraded bool
 	}{
-		{name: "no search"},
 		{name: "complete empty search", prefix: checkpointedEvidencePrefix("", "", "", 0, 0, true, false), complete: true},
 		{name: "degraded empty search", prefix: checkpointedEvidencePrefix("", "", "", 0, 0, false, true), degraded: true},
 	}
 	for index, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			api, attempt, _, _ := groundingFixture(t, fmt.Sprintf("source-free-%d@example.com", index), fmt.Sprintf("src_source_free_%d", index), fmt.Sprintf("evr_source_free_%d", index))
-			service := agent.NewGroundingService(api.db.Pool(), &claimVerifierStub{pass: true}, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
+			service := agent.NewGroundingService(api.db.Pool())
 			draft := models.FinalDraft{Text: "Ordinary conversational answer."}
 			prepared, err := service.Prepare(context.Background(), attempt, tt.prefix, draft)
-			if err != nil || prepared.Text != draft.Text || len(prepared.Claims) != 0 {
+			if err != nil || prepared.Text != draft.Text {
 				t.Fatalf("prepared=%+v err=%v", prepared, err)
 			}
 			var outcome string
@@ -183,29 +140,16 @@ func TestGroundingAcceptsSelectedSourceFinalWhenNoCiteableEvidence(t *testing.T)
 	}
 }
 
-func TestGroundingRejectsClaimFreeFinalAfterCiteableEvidence(t *testing.T) {
-	api, attempt, _, _ := groundingFixture(t, "claim-free-after-evidence@example.com", "src_claim_free_after_evidence", "evr_claim_free_after_evidence")
-	service := agent.NewGroundingService(api.db.Pool(), &claimVerifierStub{pass: true}, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
-	_, err := service.Prepare(
-		context.Background(),
-		attempt,
-		checkpointedEvidencePrefix("src_claim_free_after_evidence", "evr_claim_free_after_evidence", "unit_ground", 0, 27, false, false),
-		models.FinalDraft{Text: "Uncited answer after Evidence."},
-	)
-	if !errors.Is(err, agent.ErrGroundingIncomplete) {
-		t.Fatalf("error=%v", err)
-	}
-}
-
 func TestPublicationAcceptsSourceFreeFinalWithSelectedSource(t *testing.T) {
 	api, attempt, _, _ := groundingFixture(t, "source-free-publication@example.com", "src_source_free_publish", "evr_source_free_publish")
-	service := agent.NewGroundingService(api.db.Pool(), &claimVerifierStub{pass: true}, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
-	draft, err := service.Prepare(context.Background(), attempt, agent.CheckpointPrefix{}, models.FinalDraft{Text: "Ordinary conversational answer."})
+	service := agent.NewGroundingService(api.db.Pool())
+	draft, err := service.Prepare(context.Background(), attempt, checkpointedEvidencePrefix("", "", "", 0, 0, true, false), models.FinalDraft{Text: "Ordinary conversational answer."})
 	if err != nil {
 		t.Fatal(err)
 	}
 	runtime := agent.NewPostgresRuntime(api.db.Pool(), "", nil)
-	checkpoint, err := agent.NewFinalDraftCheckpoint(1, draft)
+	appendSearchCheckpoints(t, runtime, attempt, checkpointedEvidencePrefix("", "", "", 0, 0, true, false))
+	checkpoint, err := agent.NewFinalDraftCheckpoint(2, draft)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,37 +174,6 @@ func TestPublicationAcceptsSourceFreeFinalWithSelectedSource(t *testing.T) {
 	}
 }
 
-func TestControllerPublishesPlainTextForSelectedSourceBeforeEvidence(t *testing.T) {
-	api, attempt, _, _ := groundingFixture(t, "source-free-controller@example.com", "src_source_free_controller", "evr_source_free_controller")
-	model := &recordingModelClient{result: models.ModelDecision{Final: &models.FinalDraft{Text: "Ordinary conversational answer."}}}
-	grounder := agent.NewGroundingService(api.db.Pool(), &claimVerifierStub{pass: true}, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
-	runtime := agent.NewPostgresRuntime(api.db.Pool(), agent.BareSystemPrompt, nil, agent.WithGroundingService(grounder))
-	registry, err := agent.NewActionRegistry(agent.NewSearchEvidenceAction(nil))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := agent.NewController(runtime, model, registry).Execute(context.Background(), attempt); err != nil {
-		t.Fatal(err)
-	}
-	if model.calls != 1 || model.request.FinalDraftFormat != models.FinalDraftFormatGroundedOptionalV1 || len(model.request.ActionDefinitions) != 1 || model.request.ActionDefinitions[0].Name != "search_evidence" {
-		t.Fatalf("model calls=%d request=%+v", model.calls, model.request)
-	}
-	var runStatus, jobStatus, content, outcome string
-	if err := api.db.Pool().QueryRow(context.Background(), `
-		select r.status,j.status,m.content,p.outcome
-		from agent_runs r
-		join agent_jobs j on j.run_id=r.id
-		join chat_messages m on m.id=r.output_message_id
-		join agent_run_grounding_plans p on p.run_id=r.id
-		where r.id=$1
-	`, attempt.RunID).Scan(&runStatus, &jobStatus, &content, &outcome); err != nil {
-		t.Fatal(err)
-	}
-	if runStatus != "completed" || jobStatus != "succeeded" || content != "Ordinary conversational answer." || outcome != "source_free" {
-		t.Fatalf("terminal=%s/%s content=%q outcome=%q", runStatus, jobStatus, content, outcome)
-	}
-}
-
 func TestControllerPublishesPlainTextAfterSearchReturnsNoEvidence(t *testing.T) {
 	api, attempt, _, _ := groundingFixture(t, "empty-search-controller@example.com", "src_empty_search_controller", "evr_empty_search_controller")
 	model := &sequenceDecisionModel{decisions: []models.ModelDecision{
@@ -269,7 +182,7 @@ func TestControllerPublishesPlainTextAfterSearchReturnsNoEvidence(t *testing.T) 
 		}}}},
 		{Final: &models.FinalDraft{Text: "Ordinary conversational answer after an empty search."}},
 	}}
-	grounder := agent.NewGroundingService(api.db.Pool(), &claimVerifierStub{pass: true}, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
+	grounder := agent.NewGroundingService(api.db.Pool())
 	runtime := agent.NewPostgresRuntime(api.db.Pool(), agent.BareSystemPrompt, nil, agent.WithGroundingService(grounder))
 	registry, err := agent.NewActionRegistry(agent.NewSearchEvidenceAction(emptyEvidenceBackend{result: retrieval.SearchResult{CompleteEmpty: true}}))
 	if err != nil {
@@ -278,7 +191,7 @@ func TestControllerPublishesPlainTextAfterSearchReturnsNoEvidence(t *testing.T) 
 	if err := agent.NewController(runtime, model, registry).Execute(context.Background(), attempt); err != nil {
 		t.Fatal(err)
 	}
-	if len(model.requests) != 2 || model.requests[0].FinalDraftFormat != models.FinalDraftFormatGroundedOptionalV1 || model.requests[1].FinalDraftFormat != models.FinalDraftFormatGroundedOptionalV1 {
+	if len(model.requests) != 2 || model.requests[0].RequiredActionName != "search_evidence" || model.requests[1].RequiredActionName != "" {
 		t.Fatalf("requests=%+v", model.requests)
 	}
 	var content, outcome string
@@ -295,21 +208,20 @@ func TestControllerPublishesPlainTextAfterSearchReturnsNoEvidence(t *testing.T) 
 	}
 }
 
-func TestPublicationAtomicallyCopiesVerifiedCitationsAndRejectsSourceDeletionRace(t *testing.T) {
+func TestPublicationAtomicallyCopiesSourceReferencesAndRejectsSourceDeletionRace(t *testing.T) {
 	for _, removeBeforePublish := range []bool{false, true} {
 		t.Run(map[bool]string{false: "publishes", true: "deletion fenced"}[removeBeforePublish], func(t *testing.T) {
-			api, attempt, _, sessionCookie := groundingFixture(t, "publication-grounding-"+map[bool]string{false: "ok", true: "deleted"}[removeBeforePublish]+"@example.com", "src_publish", "evr_publish")
-			service := agent.NewGroundingService(api.db.Pool(), &claimVerifierStub{pass: true}, agent.GroundingConfig{VerifierModel: "v", VerifierPromptVersion: "p"})
+			api, attempt, notebookID, sessionCookie := groundingFixture(t, "publication-grounding-"+map[bool]string{false: "ok", true: "deleted"}[removeBeforePublish]+"@example.com", "src_publish", "evr_publish")
+			service := agent.NewGroundingService(api.db.Pool())
 			prefix := checkpointedEvidencePrefix("src_publish", "evr_publish", "unit_ground", 0, 27, false, false)
-			draft := models.FinalDraft{Text: "The launch is 20 July.", Claims: []models.DraftClaim{{
-				Text: "The launch is 20 July.", Citations: []models.EvidenceAddress{{SourceID: "src_publish", EvidenceRevisionID: "evr_publish", UnitID: "unit_ground", StartRune: 0, EndRune: 27}},
-			}}}
+			draft := models.FinalDraft{Text: "The launch is 20 July [source:src_publish]."}
 			prepared, err := service.Prepare(context.Background(), attempt, prefix, draft)
 			if err != nil {
 				t.Fatal(err)
 			}
 			runtime := agent.NewPostgresRuntime(api.db.Pool(), "", nil)
-			checkpoint, err := agent.NewFinalDraftCheckpoint(1, prepared)
+			appendSearchCheckpoints(t, runtime, attempt, prefix)
+			checkpoint, err := agent.NewFinalDraftCheckpoint(2, prepared)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -337,13 +249,58 @@ func TestPublicationAtomicallyCopiesVerifiedCitationsAndRejectsSourceDeletionRac
 				t.Fatalf("publication err=%v messages=%d citations=%d", err, messages, citations)
 			} else {
 				var citationID string
-				if err := api.db.Pool().QueryRow(context.Background(), `select citation_id from chat_citations where run_id=$1`, attempt.RunID).Scan(&citationID); err != nil {
+				var referenceKind string
+				if err := api.db.Pool().QueryRow(context.Background(), `select citation_id,reference_kind from chat_citations where run_id=$1`, attempt.RunID).Scan(&citationID, &referenceKind); err != nil {
 					t.Fatal(err)
 				}
+				if referenceKind != "source" {
+					t.Fatalf("reference kind=%q", referenceKind)
+				}
+				var chatID string
+				if err := api.db.Pool().QueryRow(context.Background(), `select chat_id from agent_runs where id=$1`, attempt.RunID).Scan(&chatID); err != nil {
+					t.Fatal(err)
+				}
+				snapshot := api.getWithCookie(t, "/api/v1/chats/"+chatID, sessionCookie)
+				if snapshot.Code != http.StatusOK || !strings.Contains(snapshot.Body.String(), `"source_title":"src_publish"`) {
+					t.Fatalf("Chat snapshot=%d %s", snapshot.Code, snapshot.Body.String())
+				}
 				resolved := api.getWithCookie(t, "/api/v1/citations/"+citationID, sessionCookie)
-				if resolved.Code != http.StatusOK || !strings.Contains(resolved.Body.String(), "The launch date is 20 July.") ||
+				if resolved.Code != http.StatusOK || !strings.Contains(resolved.Body.String(), `"reference_kind":"source"`) ||
+					!strings.Contains(resolved.Body.String(), `"source_id":"src_publish"`) || strings.Contains(resolved.Body.String(), "The launch date is 20 July.") ||
 					strings.Contains(resolved.Body.String(), "object_key") || strings.Contains(resolved.Body.String(), "sha256") {
 					t.Fatalf("Citation resolution=%d %s", resolved.Code, resolved.Body.String())
+				}
+				var userID string
+				if err := api.db.Pool().QueryRow(context.Background(), `select user_id from agent_runs where id=$1`, attempt.RunID).Scan(&userID); err != nil {
+					t.Fatal(err)
+				}
+				replacementEmail := "citation-replacement-owner@example.com"
+				api.register(t, replacementEmail)
+				replacementOwnerID := sourceTestUserID(t, api, replacementEmail)
+				tx, err := api.db.Pool().Begin(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := tx.Exec(context.Background(), `update notebook_memberships set role='viewer' where notebook_id=$1 and user_id=$2`, notebookID, userID); err != nil {
+					_ = tx.Rollback(context.Background())
+					t.Fatal(err)
+				}
+				if _, err := tx.Exec(context.Background(), `insert into notebook_memberships(notebook_id,user_id,role) values($1,$2,'owner')`, notebookID, replacementOwnerID); err != nil {
+					_ = tx.Rollback(context.Background())
+					t.Fatal(err)
+				}
+				if err := tx.Commit(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := api.db.Pool().Exec(context.Background(), `delete from notebook_memberships where notebook_id=$1 and user_id=$2`, notebookID, userID); err != nil {
+					t.Fatal(err)
+				}
+				unauthorized := api.getWithCookie(t, "/api/v1/citations/"+citationID, sessionCookie)
+				if unauthorized.Code != http.StatusNotFound {
+					t.Fatalf("unauthorized Citation resolution=%d %s", unauthorized.Code, unauthorized.Body.String())
+				}
+				if _, err := api.db.Pool().Exec(context.Background(), `insert into notebook_memberships(notebook_id,user_id,role) values($1,$2,'viewer')`, notebookID, userID); err != nil {
+					t.Fatal(err)
 				}
 				if _, err := api.db.Pool().Exec(context.Background(), `delete from source_sources where id='src_publish'`); err != nil {
 					t.Fatal(err)
@@ -399,4 +356,25 @@ func checkpointedEvidencePrefix(sourceID, revisionID, unitID string, start, end 
 	return agent.CheckpointPrefix{Proposals: []agent.AcceptedProposal{{DecisionNo: 1, Actions: []agent.AcceptedAction{{
 		ActionID: "decision:1/action:0", Index: 0, Name: "search_evidence", Result: &result,
 	}}}}, AcceptedDecisions: 1, AcceptedActions: 1}
+}
+
+func appendSearchCheckpoints(t *testing.T, runtime *agent.PostgresRuntime, attempt agent.Attempt, prefix agent.CheckpointPrefix) {
+	t.Helper()
+	proposal, err := agent.NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{{
+		Name: "search_evidence", Input: json.RawMessage(`{"query":"launch date","purpose":"answer the question"}`),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.AppendCheckpoint(context.Background(), attempt, proposal); err != nil {
+		t.Fatal(err)
+	}
+	result := prefix.Proposals[0].Actions[0].Result
+	checkpoint, err := agent.NewActionResultCheckpoint(1, 0, "decision:1/action:0", *result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.AppendCheckpoint(context.Background(), attempt, checkpoint); err != nil {
+		t.Fatal(err)
+	}
 }

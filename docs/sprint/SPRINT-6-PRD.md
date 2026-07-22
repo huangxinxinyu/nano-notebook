@@ -8,6 +8,8 @@
 - **Theme:** Multiformat Sources, versioned evidence, hybrid retrieval, grounded answers, and Citations
 - **Delivery boundary:** One Owner can add and inspect supported Sources, research a fixed Source selection through the existing durable Agent, and receive an atomically published verified Answer with inline Citations. Sprint 6 also delivers the developer RAG Trace extension and offline evaluation gate. Sharing roles and invitations remain a later delivery slice.
 
+**2026-07-22 amendment:** ADR 0038 supersedes the claim-generation, exact Evidence-address, and runtime Claim Support Verifier requirements below for new Runs. Selected-Source Runs now always attempt Evidence search and publish plain text with optional allowlisted Source-level references. Historical precise Citations remain readable.
+
 ## 1. Decision
 
 Sprint 6 delivers Nano Notebook's first complete Source-grounded research path:

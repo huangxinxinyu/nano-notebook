@@ -9,48 +9,12 @@ import (
 )
 
 type FinalDraft struct {
-	Text   string       `json:"text"`
-	Claims []DraftClaim `json:"claims,omitempty"`
-}
-
-type DraftClaim struct {
-	Text      string            `json:"text"`
-	Citations []EvidenceAddress `json:"citations"`
-}
-
-type EvidenceAddress struct {
-	SourceID           string `json:"source_id"`
-	EvidenceRevisionID string `json:"evidence_revision_id"`
-	UnitID             string `json:"unit_id"`
-	StartRune          int    `json:"start_rune"`
-	EndRune            int    `json:"end_rune"`
+	Text string `json:"text"`
 }
 
 func (d FinalDraft) Validate() error {
-	if strings.TrimSpace(d.Text) == "" || len(d.Claims) > 64 {
+	if strings.TrimSpace(d.Text) == "" {
 		return errors.New("final draft is invalid")
-	}
-	seenClaims := make(map[string]struct{}, len(d.Claims))
-	for _, claim := range d.Claims {
-		claim.Text = strings.TrimSpace(claim.Text)
-		if claim.Text == "" || len([]rune(claim.Text)) > 4000 || !strings.Contains(d.Text, claim.Text) || len(claim.Citations) == 0 || len(claim.Citations) > 8 {
-			return errors.New("final draft claim is invalid")
-		}
-		if _, duplicate := seenClaims[claim.Text]; duplicate {
-			return errors.New("final draft contains a duplicate claim")
-		}
-		seenClaims[claim.Text] = struct{}{}
-		seenAddresses := make(map[EvidenceAddress]struct{}, len(claim.Citations))
-		for _, address := range claim.Citations {
-			if strings.TrimSpace(address.SourceID) == "" || strings.TrimSpace(address.EvidenceRevisionID) == "" ||
-				strings.TrimSpace(address.UnitID) == "" || address.StartRune < 0 || address.EndRune <= address.StartRune {
-				return errors.New("final draft Evidence address is invalid")
-			}
-			if _, duplicate := seenAddresses[address]; duplicate {
-				return errors.New("final draft contains a duplicate Evidence address")
-			}
-			seenAddresses[address] = struct{}{}
-		}
 	}
 	return nil
 }

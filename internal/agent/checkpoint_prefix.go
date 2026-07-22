@@ -111,7 +111,7 @@ func LoadCheckpointPrefix(ctx context.Context, checkpoints []Checkpoint) (Checkp
 			if err := json.Unmarshal(checkpoint.Payload, &payload); err != nil {
 				return CheckpointPrefix{}, invalidCheckpoint("invalid Final Draft payload")
 			}
-			draft := models.FinalDraft{Text: payload.Text, Claims: payload.Claims}
+			draft := models.FinalDraft{Text: payload.Text}
 			expected, err := NewFinalDraftCheckpoint(checkpoint.DecisionNo, draft)
 			if err != nil || !checkpointMatches(checkpoint, expected) {
 				return CheckpointPrefix{}, invalidCheckpoint("Final Draft identity or payload mismatch")

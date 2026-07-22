@@ -752,8 +752,8 @@ create table if not exists agent_run_grounding_plans (
 	outcome text not null check (outcome in ('source_less','source_free','supported','insufficient_evidence','zero_support')),
 	research_complete boolean not null,
 	retrieval_degraded boolean not null,
-	verifier_model text not null,
-	verifier_prompt_version text not null,
+	verifier_model text not null default '',
+	verifier_prompt_version text not null default '',
 	created_at timestamptz not null default now(),
 	constraint agent_run_grounding_plans_shape_check check (
 		(outcome='source_less' and research_complete=false and retrieval_degraded=false and verifier_model='' and verifier_prompt_version='')
@@ -771,6 +771,22 @@ alter table agent_run_grounding_plans drop constraint if exists agent_run_ground
 alter table agent_run_grounding_plans add constraint agent_run_grounding_plans_shape_check check (
 	(outcome='source_less' and research_complete=false and retrieval_degraded=false and verifier_model='' and verifier_prompt_version='')
 	or (outcome='source_free' and verifier_model='' and verifier_prompt_version='')
+	or (outcome='supported' and verifier_model<>'' and verifier_prompt_version<>'')
+	or (outcome='insufficient_evidence' and verifier_model<>'' and verifier_prompt_version<>'')
+	or (outcome='zero_support' and research_complete=true and retrieval_degraded=false and verifier_model='' and verifier_prompt_version='')
+);
+
+alter table agent_run_grounding_plans add column if not exists research_performed boolean not null default false;
+alter table agent_run_grounding_plans alter column verifier_model set default '';
+alter table agent_run_grounding_plans alter column verifier_prompt_version set default '';
+alter table agent_run_grounding_plans drop constraint if exists agent_run_grounding_plans_outcome_check;
+alter table agent_run_grounding_plans add constraint agent_run_grounding_plans_outcome_check
+	check (outcome in ('source_less','source_free','source_cited','supported','insufficient_evidence','zero_support'));
+alter table agent_run_grounding_plans drop constraint if exists agent_run_grounding_plans_shape_check;
+alter table agent_run_grounding_plans add constraint agent_run_grounding_plans_shape_check check (
+	(outcome='source_less' and research_performed=false and research_complete=false and retrieval_degraded=false and verifier_model='' and verifier_prompt_version='')
+	or (outcome='source_free' and verifier_model='' and verifier_prompt_version='')
+	or (outcome='source_cited' and research_performed=true and verifier_model='' and verifier_prompt_version='')
 	or (outcome='supported' and verifier_model<>'' and verifier_prompt_version<>'')
 	or (outcome='insufficient_evidence' and verifier_model<>'' and verifier_prompt_version<>'')
 	or (outcome='zero_support' and research_complete=true and retrieval_degraded=false and verifier_model='' and verifier_prompt_version='')
@@ -799,6 +815,17 @@ create table if not exists agent_draft_citations (
 	foreign key (run_id, claim_ordinal) references agent_claim_support_records(run_id, claim_ordinal) on delete cascade
 );
 
+create table if not exists agent_draft_source_references (
+	run_id text not null references agent_run_grounding_plans(run_id) on delete cascade,
+	reference_ordinal integer not null check (reference_ordinal between 0 and 63),
+	citation_id text not null unique check (char_length(citation_id) between 1 and 80),
+	notebook_id text not null check (char_length(notebook_id) between 1 and 255),
+	source_id text not null check (char_length(source_id) between 1 and 255),
+	created_at timestamptz not null default now(),
+	primary key (run_id, reference_ordinal),
+	unique (run_id, source_id)
+);
+
 create table if not exists chat_citations (
 	message_id text not null references chat_messages(id) on delete cascade,
 	citation_id text not null,
@@ -816,6 +843,25 @@ create table if not exists chat_citations (
 	primary key (message_id, citation_id),
 	unique (run_id, claim_ordinal, citation_ordinal)
 );
+
+alter table chat_citations add column if not exists reference_kind text not null default 'precise';
+alter table chat_citations add column if not exists reference_ordinal integer;
+alter table chat_citations alter column claim_ordinal drop not null;
+alter table chat_citations alter column citation_ordinal drop not null;
+alter table chat_citations alter column claim_text drop not null;
+alter table chat_citations alter column evidence_revision_id drop not null;
+alter table chat_citations alter column unit_id drop not null;
+alter table chat_citations alter column start_rune drop not null;
+alter table chat_citations alter column end_rune drop not null;
+alter table chat_citations drop constraint if exists chat_citations_reference_kind_check;
+alter table chat_citations add constraint chat_citations_reference_kind_check check (
+	(reference_kind='precise' and reference_ordinal is null and claim_ordinal is not null and citation_ordinal is not null
+		and claim_text is not null and evidence_revision_id is not null and unit_id is not null and start_rune is not null and end_rune is not null)
+	or (reference_kind='source' and reference_ordinal between 0 and 63 and claim_ordinal is null and citation_ordinal is null
+		and claim_text is null and evidence_revision_id is null and unit_id is null and start_rune is null and end_rune is null)
+);
+create unique index if not exists chat_citations_source_reference_idx
+	on chat_citations(run_id, reference_ordinal) where reference_kind='source';
 
 create unique index if not exists agent_runs_one_active_per_user_idx
 	on agent_runs(user_id)
@@ -1302,6 +1348,7 @@ alter table agent_run_evidence_set enable row level security;
 alter table agent_run_grounding_plans enable row level security;
 alter table agent_claim_support_records enable row level security;
 alter table agent_draft_citations enable row level security;
+alter table agent_draft_source_references enable row level security;
 alter table chat_citations enable row level security;
 alter table agent_run_checkpoints enable row level security;
 alter table agent_traces enable row level security;
@@ -1359,6 +1406,7 @@ grant select on
 	agent_run_grounding_plans,
 	agent_claim_support_records,
 	agent_draft_citations,
+	agent_draft_source_references,
 	chat_citations
 to nano_worker;
 grant insert on agent_run_evidence_set to nano_worker;
@@ -1366,6 +1414,7 @@ grant select, insert, update, delete on
 	agent_run_grounding_plans,
 	agent_claim_support_records,
 	agent_draft_citations,
+	agent_draft_source_references,
 	chat_citations
 to nano_worker;
 grant select, update on source_sources to nano_worker;
@@ -1974,6 +2023,9 @@ create policy agent_claim_support_records_worker on agent_claim_support_records
 	for all to nano_worker using (true) with check (true);
 drop policy if exists agent_draft_citations_worker on agent_draft_citations;
 create policy agent_draft_citations_worker on agent_draft_citations
+	for all to nano_worker using (true) with check (true);
+drop policy if exists agent_draft_source_references_worker on agent_draft_source_references;
+create policy agent_draft_source_references_worker on agent_draft_source_references
 	for all to nano_worker using (true) with check (true);
 drop policy if exists chat_citations_worker on chat_citations;
 create policy chat_citations_worker on chat_citations

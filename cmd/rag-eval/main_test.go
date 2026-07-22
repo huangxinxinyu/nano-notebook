@@ -28,13 +28,14 @@ func TestRunEvaluatesFrozenSuiteFromProductObservations(t *testing.T) {
 			retrieved = append(retrieved, set[0])
 		}
 		fixtures := make(map[string]string, len(evalCase.Fixtures))
+		sources := make([]string, 0, len(evalCase.Fixtures))
 		for _, fixture := range evalCase.Fixtures {
 			fixtures[fixture.ID] = fixture.SHA256
+			sources = append(sources, fixture.ID)
 		}
 		observations = append(observations, rageval.Observation{
 			CaseID: evalCase.ID, FixtureSHA256: fixtures, CoveragePassed: true,
-			RetrievedEvidenceIDs: retrieved, CitationEvidenceIDs: retrieved,
-			MaterialClaimCount: 1, CitedClaimCount: 1, RequiredFactsFound: evalCase.RequiredFacts,
+			RetrievedEvidenceIDs: retrieved, CitationSourceIDs: sources, RequiredFactsFound: evalCase.RequiredFacts,
 			LatencyMilliseconds: 100, EstimatedCostUSD: .01,
 		})
 	}
@@ -54,7 +55,7 @@ func TestRunEvaluatesFrozenSuiteFromProductObservations(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.Status != "passed" || report.FixtureSuiteSHA256 != "f48f765dfbb70ad1debdc5ca83879d8029dcc561ec1aa5ddc32b253bceb1977c" {
+	if report.Status != "passed" || report.FixtureSuiteSHA256 != "67668d9c0e938f8a5572573dcc3c840d14cf7a24a2b99ecba83cabdd09e8fa1f" {
 		t.Fatalf("report = %+v", report)
 	}
 	if err := run([]string{

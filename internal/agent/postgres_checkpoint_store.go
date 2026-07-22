@@ -327,7 +327,7 @@ func canonicalStoredCheckpointPayload(checkpoint Checkpoint, raw []byte) (json.R
 		if err := decodeCheckpointPayload(raw, &payload); err != nil {
 			return nil, invalidCheckpoint("stored Final Draft payload is invalid")
 		}
-		expected, err = NewFinalDraftCheckpoint(checkpoint.DecisionNo, models.FinalDraft{Text: payload.Text, Claims: payload.Claims})
+		expected, err = NewFinalDraftCheckpoint(checkpoint.DecisionNo, models.FinalDraft{Text: payload.Text})
 	default:
 		return nil, invalidCheckpoint("stored checkpoint kind %q is invalid", checkpoint.Kind)
 	}

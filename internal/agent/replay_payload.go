@@ -135,8 +135,7 @@ type modelDecisionReplay struct {
 }
 
 type replayFinalDraft struct {
-	Text   string              `json:"text"`
-	Claims []models.DraftClaim `json:"claims,omitempty"`
+	Text string `json:"text"`
 }
 
 type replayActionProposal struct {
@@ -153,15 +152,7 @@ func EncodeModelDecisionReplay(decision models.ModelDecision) (replay.PlainPaylo
 	document := modelDecisionReplay{replayPayloadHeader: replayHeader(replay.ClassModelDecision)}
 	if decision.Final != nil {
 		budget.addString(decision.Final.Text)
-		for _, claim := range decision.Final.Claims {
-			budget.addString(claim.Text)
-			for _, citation := range claim.Citations {
-				budget.addString(citation.SourceID)
-				budget.addString(citation.EvidenceRevisionID)
-				budget.addString(citation.UnitID)
-			}
-		}
-		document.Final = &replayFinalDraft{Text: decision.Final.Text, Claims: decision.Final.Claims}
+		document.Final = &replayFinalDraft{Text: decision.Final.Text}
 	} else {
 		document.Actions = make([]replayActionProposal, 0, len(decision.Proposal.Actions))
 		for index, action := range decision.Proposal.Actions {
@@ -181,83 +172,6 @@ func EncodeModelDecisionReplay(decision models.ModelDecision) (replay.PlainPaylo
 		return replay.PlainPayload{}, err
 	}
 	return marshalReplayPayload(replay.ClassModelDecision, document)
-}
-
-type claimSupportRequestReplay struct {
-	replayPayloadHeader
-	Operation     string                     `json:"operation"`
-	Model         string                     `json:"model"`
-	PromptVersion string                     `json:"prompt_version"`
-	Answer        string                     `json:"answer"`
-	Claims        []models.ClaimSupportInput `json:"claims"`
-}
-
-func EncodeClaimSupportRequestReplay(request models.ClaimSupportRequest) (replay.PlainPayload, error) {
-	if strings.TrimSpace(request.Model) == "" || strings.TrimSpace(request.PromptVersion) == "" || strings.TrimSpace(request.Answer) == "" || len(request.Claims) == 0 {
-		return replay.PlainPayload{}, errors.New("Replay Claim Support request is invalid")
-	}
-	budget := newReplaySizeBudget()
-	budget.addString(request.Model)
-	budget.addString(request.PromptVersion)
-	budget.addString(request.Answer)
-	for ordinal, claim := range request.Claims {
-		if claim.Ordinal != ordinal || strings.TrimSpace(claim.Text) == "" || len(claim.Evidence) == 0 {
-			return replay.PlainPayload{}, errors.New("Replay Claim Support claim is invalid")
-		}
-		budget.addString(claim.Text)
-		for _, evidence := range claim.Evidence {
-			budget.addString(evidence.SourceID)
-			budget.addString(evidence.RevisionID)
-			budget.addString(evidence.UnitID)
-			budget.addString(evidence.Text)
-		}
-	}
-	if err := budget.err(); err != nil {
-		return replay.PlainPayload{}, err
-	}
-	return marshalReplayPayload(replay.ClassModelRequest, claimSupportRequestReplay{
-		replayPayloadHeader: replayHeader(replay.ClassModelRequest), Operation: "claim_support",
-		Model: request.Model, PromptVersion: request.PromptVersion, Answer: request.Answer, Claims: request.Claims,
-	})
-}
-
-type claimSupportVerdictReplay struct {
-	replayPayloadHeader
-	Operation       string                       `json:"operation"`
-	Verdicts        []models.ClaimSupportVerdict `json:"verdicts"`
-	UncoveredClaims []string                     `json:"uncovered_claims"`
-}
-
-func EncodeClaimSupportVerdictReplay(outcome models.ClaimSupportOutcome) (replay.PlainPayload, error) {
-	if len(outcome.Verdicts) == 0 {
-		return replay.PlainPayload{}, errors.New("Replay Claim Support verdict is empty")
-	}
-	for ordinal, verdict := range outcome.Verdicts {
-		if verdict.Ordinal != ordinal {
-			return replay.PlainPayload{}, errors.New("Replay Claim Support verdict is invalid")
-		}
-	}
-	if len(outcome.UncoveredClaims) > 64 {
-		return replay.PlainPayload{}, errors.New("Replay Claim Support uncovered claim set is invalid")
-	}
-	budget := newReplaySizeBudget()
-	seen := make(map[string]struct{}, len(outcome.UncoveredClaims))
-	for _, claim := range outcome.UncoveredClaims {
-		if strings.TrimSpace(claim) != claim || claim == "" {
-			return replay.PlainPayload{}, errors.New("Replay Claim Support uncovered claim is invalid")
-		}
-		if _, duplicate := seen[claim]; duplicate {
-			return replay.PlainPayload{}, errors.New("Replay Claim Support uncovered claim is duplicated")
-		}
-		seen[claim] = struct{}{}
-		budget.addString(claim)
-	}
-	if err := budget.err(); err != nil {
-		return replay.PlainPayload{}, err
-	}
-	return marshalReplayPayload(replay.ClassModelDecision, claimSupportVerdictReplay{
-		replayPayloadHeader: replayHeader(replay.ClassModelDecision), Operation: "claim_support", Verdicts: outcome.Verdicts, UncoveredClaims: outcome.UncoveredClaims,
-	})
 }
 
 type actionInputReplay struct {

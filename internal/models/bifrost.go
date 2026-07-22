@@ -43,16 +43,11 @@ type ActionDefinition struct {
 }
 
 type ModelRequest struct {
-	Model             string
-	Messages          []ModelMessage
-	ActionDefinitions []ActionDefinition
-	FinalDraftFormat  string
+	Model              string
+	Messages           []ModelMessage
+	ActionDefinitions  []ActionDefinition
+	RequiredActionName string
 }
-
-const (
-	FinalDraftFormatGroundedV1         = "grounded-v1"
-	FinalDraftFormatGroundedOptionalV1 = "grounded-optional-v1"
-)
 
 type ErrorKind string
 
@@ -193,13 +188,25 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 		tool.Function.Parameters = definition.InputSchema
 		tools = append(tools, tool)
 	}
-	toolChoice := ""
+	var toolChoice any
 	if len(tools) > 0 {
 		toolChoice = "auto"
 	}
-	responseFormat := map[string]string(nil)
-	if request.FinalDraftFormat == FinalDraftFormatGroundedV1 {
-		responseFormat = map[string]string{"type": "json_object"}
+	if requiredName := strings.TrimSpace(request.RequiredActionName); requiredName != "" {
+		found := false
+		for _, tool := range tools {
+			if tool.Function.Name == requiredName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("required Action is not defined")}
+		}
+		toolChoice = map[string]any{
+			"type":     "function",
+			"function": map[string]string{"name": requiredName},
+		}
 	}
 	body, err := json.Marshal(struct {
 		Model               string            `json:"model"`
@@ -207,8 +214,7 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 		Stream              bool              `json:"stream"`
 		MaxCompletionTokens int               `json:"max_completion_tokens"`
 		Tools               []providerTool    `json:"tools,omitempty"`
-		ToolChoice          string            `json:"tool_choice,omitempty"`
-		ResponseFormat      map[string]string `json:"response_format,omitempty"`
+		ToolChoice          any               `json:"tool_choice,omitempty"`
 	}{
 		Model:               request.Model,
 		Messages:            messages,
@@ -216,7 +222,6 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 		MaxCompletionTokens: c.maxCompletionTokens,
 		Tools:               tools,
 		ToolChoice:          toolChoice,
-		ResponseFormat:      responseFormat,
 	})
 	if err != nil {
 		return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
@@ -292,25 +297,7 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 		}
 		decision := ModelDecision{}
 		if choice.Message.Content != nil && strings.TrimSpace(*choice.Message.Content) != "" {
-			if request.FinalDraftFormat == FinalDraftFormatGroundedV1 || request.FinalDraftFormat == FinalDraftFormatGroundedOptionalV1 {
-				var draft FinalDraft
-				decoder := json.NewDecoder(strings.NewReader(*choice.Message.Content))
-				decoder.DisallowUnknownFields()
-				decodeErr := decoder.Decode(&draft)
-				var trailing any
-				trailingErr := decoder.Decode(&trailing)
-				invalidJSON := decodeErr != nil || !errors.Is(trailingErr, io.EOF)
-				if invalidJSON || (request.FinalDraftFormat == FinalDraftFormatGroundedOptionalV1 && draft.Validate() != nil) {
-					if request.FinalDraftFormat == FinalDraftFormatGroundedV1 {
-						return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid grounded Final Draft")}
-					}
-					decision.Final = &FinalDraft{Text: *choice.Message.Content}
-				} else {
-					decision.Final = &draft
-				}
-			} else {
-				decision.Final = &FinalDraft{Text: *choice.Message.Content}
-			}
+			decision.Final = &FinalDraft{Text: *choice.Message.Content}
 		}
 		if len(choice.Message.ToolCalls) > 0 {
 			actions := make([]ActionProposal, 0, len(choice.Message.ToolCalls))
@@ -321,6 +308,9 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 				_, duplicateID := providerCallIDs[providerCallID]
 				if providerCallID == "" || duplicateID || call.Type != "function" || strings.TrimSpace(call.Function.Name) == "" || json.Unmarshal([]byte(call.Function.Arguments), &input) != nil || input == nil {
 					return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid Bifrost tool call")}
+				}
+				if requiredName := strings.TrimSpace(request.RequiredActionName); requiredName != "" && call.Function.Name != requiredName {
+					return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost proposal violated required Action")}
 				}
 				providerCallIDs[providerCallID] = struct{}{}
 				var canonical bytes.Buffer
@@ -334,7 +324,8 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 		if err := decision.Validate(); err != nil {
 			return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
 		}
-		if decision.Proposal != nil && choice.FinishReason != "tool_calls" {
+		requiredActionStopped := strings.TrimSpace(request.RequiredActionName) != "" && choice.FinishReason == "stop"
+		if decision.Proposal != nil && choice.FinishReason != "tool_calls" && !requiredActionStopped {
 			return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost Action proposal has inconsistent finish reason")}
 		}
 		if decision.Final != nil && (strings.TrimSpace(choice.FinishReason) == "" || choice.FinishReason == "tool_calls") {

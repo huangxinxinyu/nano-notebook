@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"unicode"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/instrumentation"
@@ -21,22 +20,10 @@ import (
 var (
 	ErrGroundingInvalid    = errors.New("grounding evidence or citation is invalid")
 	ErrGroundingIncomplete = errors.New("grounding research is incomplete")
-	ErrClaimUnsupported    = errors.New("a material claim is not supported")
 )
 
-type ClaimSupportVerifier interface {
-	VerifyClaimSupport(context.Context, models.ClaimSupportRequest) (models.ClaimSupportOutcome, error)
-}
-
-type GroundingConfig struct {
-	VerifierModel         string
-	VerifierPromptVersion string
-}
-
 type GroundingService struct {
-	pool     *pgxpool.Pool
-	verifier ClaimSupportVerifier
-	config   GroundingConfig
+	pool *pgxpool.Pool
 }
 
 type researchRange struct {
@@ -55,19 +42,22 @@ type researchState struct {
 	ranges       []researchRange
 }
 
-func NewGroundingService(pool *pgxpool.Pool, verifier ClaimSupportVerifier, config GroundingConfig) *GroundingService {
-	return &GroundingService{pool: pool, verifier: verifier, config: config}
+func NewGroundingService(pool *pgxpool.Pool) *GroundingService {
+	return &GroundingService{pool: pool}
 }
 
 func (s *GroundingService) Prepare(ctx context.Context, attempt Attempt, prefix CheckpointPrefix, draft models.FinalDraft) (models.FinalDraft, error) {
-	prepared, err := s.prepare(ctx, nil, nil, attempt, prefix, draft)
+	prepared, err := s.prepare(ctx, attempt, prefix, draft)
 	return prepared.draft, err
 }
 
 type groundingPreparation struct {
-	draft    models.FinalDraft
-	outcome  string
-	research researchState
+	draft                models.FinalDraft
+	outcome              string
+	research             researchState
+	eligibleSourceCount  int
+	validReferenceCount  int
+	discardedMarkerCount int
 }
 
 func (s *GroundingService) PrepareTraced(ctx context.Context, tracer *agentobs.Tracer, stager ReplayStager, attempt Attempt, prefix CheckpointPrefix, draft models.FinalDraft) (models.FinalDraft, error) {
@@ -77,17 +67,11 @@ func (s *GroundingService) PrepareTraced(ctx context.Context, tracer *agentobs.T
 	identity := fmt.Sprintf("run/%s/attempt/%d/grounding", attempt.RunID, attempt.AttemptNo)
 	prepared, err := instrumentation.Invoke(ctx, tracer, agentobs.SpanStart{
 		IdentityKey: identity + "/start", Name: TraceSpanGrounding,
-		Attributes: []agentobs.Attribute{agentobs.Int64(TraceKeyVerifierClaimCount, int64(len(draft.Claims)))},
 	}, func(callContext context.Context) (groundingPreparation, error) {
-		return s.prepare(callContext, tracer, stager, attempt, prefix, draft)
+		return s.prepare(callContext, attempt, prefix, draft)
 	}, func(result groundingPreparation, callErr error) agentobs.SpanEnd {
 		status := agentobs.StatusOK
-		attributes := []agentobs.Attribute{
-			agentobs.String(TraceKeyGroundingOutcome, result.outcome),
-			agentobs.Bool(TraceKeyGroundingResearchComplete, result.research.complete),
-			agentobs.Bool(TraceKeyGroundingResearchDegraded, result.research.degraded),
-			agentobs.Int64(TraceKeyVerifierSupportedCount, int64(len(result.draft.Claims))),
-		}
+		attributes := groundingTraceAttributes(result)
 		if callErr != nil {
 			status = agentobs.StatusError
 			if errors.Is(callErr, context.Canceled) {
@@ -100,20 +84,30 @@ func (s *GroundingService) PrepareTraced(ctx context.Context, tracer *agentobs.T
 	return prepared.draft, err
 }
 
+func groundingTraceAttributes(result groundingPreparation) []agentobs.Attribute {
+	return []agentobs.Attribute{
+		agentobs.String(TraceKeyGroundingOutcome, result.outcome),
+		agentobs.Bool(TraceKeyGroundingResearchPerformed, result.research.performed),
+		agentobs.Bool(TraceKeyGroundingResearchComplete, result.research.complete),
+		agentobs.Bool(TraceKeyGroundingResearchDegraded, result.research.degraded),
+		agentobs.Int64(TraceKeyEligibleSourceCount, int64(result.eligibleSourceCount)),
+		agentobs.Int64(TraceKeyValidSourceReferenceCount, int64(result.validReferenceCount)),
+		agentobs.Int64(TraceKeyDiscardedSourceMarkerCount, int64(result.discardedMarkerCount)),
+	}
+}
+
 func groundingErrorKind(err error) string {
 	switch {
 	case errors.Is(err, ErrGroundingInvalid):
 		return "grounding_invalid"
 	case errors.Is(err, ErrGroundingIncomplete):
 		return "grounding_incomplete"
-	case errors.Is(err, ErrClaimUnsupported):
-		return "claim_unsupported"
 	default:
 		return "grounding_failed"
 	}
 }
 
-func (s *GroundingService) prepare(ctx context.Context, tracer *agentobs.Tracer, stager ReplayStager, attempt Attempt, prefix CheckpointPrefix, draft models.FinalDraft) (groundingPreparation, error) {
+func (s *GroundingService) prepare(ctx context.Context, attempt Attempt, prefix CheckpointPrefix, draft models.FinalDraft) (groundingPreparation, error) {
 	result := groundingPreparation{draft: draft}
 	if s == nil || s.pool == nil || draft.Validate() != nil {
 		return groundingPreparation{}, ErrGroundingInvalid
@@ -123,12 +117,17 @@ func (s *GroundingService) prepare(ctx context.Context, tracer *agentobs.Tracer,
 		return groundingPreparation{}, err
 	}
 	if selectedCount == 0 {
-		if len(draft.Claims) != 0 {
+		normalizedText, references, discarded := normalizeSourceMarkers(draft.Text, nil)
+		draft.Text = normalizedText
+		result.validReferenceCount = len(references)
+		result.discardedMarkerCount = discarded
+		if strings.TrimSpace(draft.Text) == "" {
 			return groundingPreparation{}, ErrGroundingInvalid
 		}
-		if err := s.persistPlan(ctx, attempt, draft, "source_less", false, false, nil, "", ""); err != nil {
+		if err := s.persistSourcePlan(ctx, attempt, draft, "source_less", researchState{}, nil); err != nil {
 			return groundingPreparation{}, err
 		}
+		result.draft = draft
 		result.outcome = "source_less"
 		return result, nil
 	}
@@ -137,121 +136,31 @@ func (s *GroundingService) prepare(ctx context.Context, tracer *agentobs.Tracer,
 		return groundingPreparation{}, err
 	}
 	result.research = research
-	if len(draft.Claims) == 0 {
-		if research.evidenceSeen {
-			return result, ErrGroundingIncomplete
-		}
-		if err := s.persistPlan(ctx, attempt, draft, "source_free", research.complete, research.degraded, nil, "", ""); err != nil {
-			return result, err
-		}
-		result.outcome = "source_free"
-		return result, nil
-	}
-	if !research.evidenceSeen || s.verifier == nil || strings.TrimSpace(s.config.VerifierModel) == "" || strings.TrimSpace(s.config.VerifierPromptVersion) == "" {
+	if !research.performed {
 		return result, ErrGroundingIncomplete
 	}
-	claims, notebookID, err := s.authoritativeClaims(ctx, attempt, draft, research)
-	if err != nil {
-		return result, err
+	allowed := make(map[string]struct{})
+	for _, item := range research.ranges {
+		allowed[item.SourceID] = struct{}{}
 	}
-	request := models.ClaimSupportRequest{
-		Model: s.config.VerifierModel, PromptVersion: s.config.VerifierPromptVersion, Answer: draft.Text, Claims: claims,
-	}
-	var verified models.ClaimSupportOutcome
-	if tracer != nil {
-		identity := fmt.Sprintf("run/%s/attempt/%d/grounding/verifier", attempt.RunID, attempt.AttemptNo)
-		verified, err = InvokeClaimSupportVerifier(ctx, tracer, s.verifier, request, ClaimSupportTraceOptions{
-			StartIdentity: identity + "/start", RequestIdentity: identity + "/replay/request",
-			VerdictIdentity: identity + "/replay/verdict", ReplayStager: stager,
-		})
-	} else {
-		verified, err = s.verifier.VerifyClaimSupport(ctx, request)
-	}
-	if err != nil {
-		return result, err
-	}
-	if len(verified.Verdicts) != len(claims) {
+	result.eligibleSourceCount = len(allowed)
+	normalizedText, references, discarded := normalizeSourceMarkers(draft.Text, allowed)
+	result.validReferenceCount = len(references)
+	result.discardedMarkerCount = discarded
+	draft.Text = normalizedText
+	if strings.TrimSpace(draft.Text) == "" {
 		return result, ErrGroundingInvalid
 	}
-	if !validUncoveredClaims(draft, verified.UncoveredClaims) {
-		return result, ErrGroundingInvalid
+	outcome := "source_free"
+	if len(references) > 0 {
+		outcome = "source_cited"
 	}
-	unsupported := make(map[int]struct{})
-	for ordinal, verdict := range verified.Verdicts {
-		if verdict.Ordinal != ordinal {
-			return result, ErrGroundingInvalid
-		}
-		if !verdict.Supported {
-			unsupported[ordinal] = struct{}{}
-		}
-	}
-	if len(unsupported) > 0 {
-		draft = removeUnsupportedClaims(draft, unsupported)
-	}
-	draft = discloseUncoveredClaims(draft, verified.UncoveredClaims)
-	groundingOutcome := "supported"
-	var planNotebook *string = &notebookID
-	if len(draft.Claims) == 0 {
-		groundingOutcome = "insufficient_evidence"
-		planNotebook = nil
-	}
-	if err := s.persistPlan(ctx, attempt, draft, groundingOutcome, research.complete, research.degraded, planNotebook, s.config.VerifierModel, s.config.VerifierPromptVersion); err != nil {
+	if err := s.persistSourcePlan(ctx, attempt, draft, outcome, research, references); err != nil {
 		return result, err
 	}
 	result.draft = draft
-	result.outcome = groundingOutcome
+	result.outcome = outcome
 	return result, nil
-}
-
-func removeUnsupportedClaims(draft models.FinalDraft, unsupported map[int]struct{}) models.FinalDraft {
-	message := insufficientEvidenceMessage(draft.Text)
-	claims := make([]models.DraftClaim, 0, len(draft.Claims)-len(unsupported))
-	for ordinal, claim := range draft.Claims {
-		if _, remove := unsupported[ordinal]; remove {
-			draft.Text = strings.ReplaceAll(draft.Text, claim.Text, message)
-			continue
-		}
-		claims = append(claims, claim)
-	}
-	draft.Claims = claims
-	return draft
-}
-
-func validUncoveredClaims(draft models.FinalDraft, uncovered []string) bool {
-	if len(uncovered) > 64 {
-		return false
-	}
-	seen := make(map[string]struct{}, len(uncovered))
-	for _, claim := range uncovered {
-		if strings.TrimSpace(claim) != claim || claim == "" || len([]rune(claim)) > 4000 || !strings.Contains(draft.Text, claim) {
-			return false
-		}
-		if _, duplicate := seen[claim]; duplicate {
-			return false
-		}
-		for _, declared := range draft.Claims {
-			if strings.Contains(claim, declared.Text) || strings.Contains(declared.Text, claim) {
-				return false
-			}
-		}
-		seen[claim] = struct{}{}
-	}
-	return true
-}
-
-func discloseUncoveredClaims(draft models.FinalDraft, uncovered []string) models.FinalDraft {
-	message := insufficientEvidenceMessage(draft.Text)
-	for _, claim := range uncovered {
-		draft.Text = strings.ReplaceAll(draft.Text, claim, message)
-	}
-	return draft
-}
-
-func insufficientEvidenceMessage(text string) string {
-	if containsHan(text) {
-		return "所选来源没有为这一点提供足够证据。"
-	}
-	return "The selected Sources do not provide enough evidence for this point."
 }
 
 func parseResearchState(prefix CheckpointPrefix) (researchState, error) {
@@ -332,139 +241,98 @@ func (s *GroundingService) selectedSourceCount(ctx context.Context, attempt Atte
 	return count, nil
 }
 
-func (s *GroundingService) authoritativeClaims(ctx context.Context, attempt Attempt, draft models.FinalDraft, research researchState) ([]models.ClaimSupportInput, string, error) {
+func (s *GroundingService) persistSourcePlan(ctx context.Context, attempt Attempt, draft models.FinalDraft, outcome string, research researchState, references []string) error {
+	draftHash, err := sourceGroundingPlanSHA256(draft.Text, references)
+	if err != nil {
+		return err
+	}
 	tx, err := s.workerTx(ctx)
 	if err != nil {
-		return nil, "", err
+		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	var notebookID string
-	if err := tx.QueryRow(ctx, `
-		select c.notebook_id from agent_runs r join chat_chats c on c.id=r.chat_id
-		where r.id=$1
-	`, attempt.RunID).Scan(&notebookID); err != nil {
-		return nil, "", err
-	}
-	claims := make([]models.ClaimSupportInput, 0, len(draft.Claims))
-	for ordinal, claim := range draft.Claims {
-		input := models.ClaimSupportInput{Ordinal: ordinal, Text: claim.Text, Evidence: make([]models.ClaimEvidence, 0, len(claim.Citations))}
-		for _, citation := range claim.Citations {
-			if !addressWasRetrieved(citation, research.ranges) {
-				return nil, "", ErrGroundingInvalid
-			}
-			var text string
-			err := tx.QueryRow(ctx, `
-				select u.text_content
-				from agent_run_evidence_set e
-				join source_sources s on s.id=e.source_id and s.notebook_id=e.notebook_id and s.state='ready'
-				join source_evidence_revisions r on r.id=e.evidence_revision_id and r.source_id=e.source_id and r.status='active'
-				join source_evidence_units u on u.id=$5 and u.revision_id=r.id and u.source_id=s.id and u.notebook_id=s.notebook_id
-				where e.run_id=$1 and e.notebook_id=$2 and e.source_id=$3 and e.evidence_revision_id=$4
-			`, attempt.RunID, notebookID, citation.SourceID, citation.EvidenceRevisionID, citation.UnitID).Scan(&text)
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, "", ErrGroundingInvalid
-			}
-			if err != nil {
-				return nil, "", err
-			}
-			runes := []rune(text)
-			if citation.EndRune > len(runes) {
-				return nil, "", ErrGroundingInvalid
-			}
-			input.Evidence = append(input.Evidence, models.ClaimEvidence{
-				SourceID: citation.SourceID, RevisionID: citation.EvidenceRevisionID, UnitID: citation.UnitID,
-				StartRune: citation.StartRune, EndRune: citation.EndRune, Text: string(runes[citation.StartRune:citation.EndRune]),
-			})
-		}
-		claims = append(claims, input)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, "", err
-	}
-	return claims, notebookID, nil
-}
-
-func addressWasRetrieved(address models.EvidenceAddress, ranges []researchRange) bool {
-	for _, item := range ranges {
-		if address.SourceID == item.SourceID && address.EvidenceRevisionID == item.RevisionID && address.UnitID == item.UnitID &&
-			address.StartRune >= item.StartRune && address.EndRune <= item.EndRune {
-			return true
-		}
-	}
-	return false
-}
-
-func containsHan(value string) bool {
-	for _, character := range value {
-		if unicode.Is(unicode.Han, character) {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *GroundingService) persistPlan(ctx context.Context, attempt Attempt, draft models.FinalDraft, outcome string, complete, degraded bool, notebookID *string, verifierModel, verifierPrompt string) error {
-	draftHash, err := finalDraftSHA256(draft)
-	if err != nil {
-		return err
-	}
-	tx, err := s.workerTx(ctx)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	var authoritative bool
-	if err := tx.QueryRow(ctx, `
-		select exists(
-			select 1 from agent_runs r join agent_jobs j on j.run_id=r.id
-			where r.id=$1 and j.id=$2 and j.attempt_no=$3 and j.lease_token=$4::uuid
-				and r.status='running' and r.output_message_id is null and r.deadline_at>now()
-				and j.status='running' and j.lease_expires_at>now()
-		)
-	`, attempt.RunID, attempt.JobID, attempt.AttemptNo, attempt.LeaseToken).Scan(&authoritative); err != nil {
-		return err
-	}
-	if !authoritative {
+	err = tx.QueryRow(ctx, `
+		select c.notebook_id
+		from agent_runs r
+		join agent_jobs j on j.run_id=r.id
+		join chat_chats c on c.id=r.chat_id
+		where r.id=$1 and j.id=$2 and j.attempt_no=$3 and j.lease_token=$4::uuid
+			and r.status='running' and r.output_message_id is null and r.deadline_at>now()
+			and j.status='running' and j.lease_expires_at>now()
+	`, attempt.RunID, attempt.JobID, attempt.AttemptNo, attempt.LeaseToken).Scan(&notebookID)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrLeaseLost
+	}
+	if err != nil {
+		return err
 	}
 	if _, err := tx.Exec(ctx, `
 		insert into agent_run_grounding_plans(
-			run_id,draft_sha256,outcome,research_complete,retrieval_degraded,verifier_model,verifier_prompt_version
-		) values($1,$2,$3,$4,$5,$6,$7) on conflict (run_id) do nothing
-	`, attempt.RunID, draftHash, outcome, complete, degraded, verifierModel, verifierPrompt); err != nil {
+			run_id,draft_sha256,outcome,research_performed,research_complete,retrieval_degraded
+		) values($1,$2,$3,$4,$5,$6) on conflict (run_id) do nothing
+	`, attempt.RunID, draftHash, outcome, research.performed, research.complete, research.degraded); err != nil {
 		return err
 	}
 	var storedHash, storedOutcome string
-	if err := tx.QueryRow(ctx, `select draft_sha256,outcome from agent_run_grounding_plans where run_id=$1`, attempt.RunID).Scan(&storedHash, &storedOutcome); err != nil {
+	var storedPerformed bool
+	if err := tx.QueryRow(ctx, `
+		select draft_sha256,outcome,research_performed from agent_run_grounding_plans where run_id=$1
+	`, attempt.RunID).Scan(&storedHash, &storedOutcome, &storedPerformed); err != nil {
 		return err
 	}
-	if storedHash != draftHash || storedOutcome != outcome {
+	if storedHash != draftHash || storedOutcome != outcome || storedPerformed != research.performed {
 		return ErrGroundingInvalid
 	}
-	if outcome == "supported" {
-		if notebookID == nil {
+	for ordinal, sourceID := range references {
+		var authorized bool
+		if err := tx.QueryRow(ctx, `
+			select exists(
+				select 1 from agent_run_evidence_set e
+				join source_sources s on s.id=e.source_id and s.notebook_id=e.notebook_id and s.state='ready'
+				join source_evidence_revisions r on r.id=e.evidence_revision_id and r.source_id=e.source_id and r.status='active'
+				where e.run_id=$1 and e.notebook_id=$2 and e.source_id=$3
+			)
+		`, attempt.RunID, notebookID, sourceID).Scan(&authorized); err != nil {
+			return err
+		}
+		if !authorized {
 			return ErrGroundingInvalid
 		}
-		for claimOrdinal, claim := range draft.Claims {
-			if _, err := tx.Exec(ctx, `
-				insert into agent_claim_support_records(run_id,claim_ordinal,claim_text,verdict)
-				values($1,$2,$3,'supported') on conflict do nothing
-			`, attempt.RunID, claimOrdinal, claim.Text); err != nil {
-				return err
-			}
-			for citationOrdinal, citation := range claim.Citations {
-				citationID := citationIdentity(attempt.RunID, claimOrdinal, citationOrdinal, citation)
-				if _, err := tx.Exec(ctx, `
-					insert into agent_draft_citations(
-						run_id,claim_ordinal,citation_ordinal,citation_id,notebook_id,source_id,evidence_revision_id,unit_id,start_rune,end_rune
-					) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) on conflict do nothing
-				`, attempt.RunID, claimOrdinal, citationOrdinal, citationID, *notebookID, citation.SourceID, citation.EvidenceRevisionID, citation.UnitID, citation.StartRune, citation.EndRune); err != nil {
-					return err
-				}
-			}
+		citationID := sourceReferenceIdentity(attempt.RunID, ordinal, sourceID)
+		if _, err := tx.Exec(ctx, `
+			insert into agent_draft_source_references(
+				run_id,reference_ordinal,citation_id,notebook_id,source_id
+			) values($1,$2,$3,$4,$5) on conflict do nothing
+		`, attempt.RunID, ordinal, citationID, notebookID, sourceID); err != nil {
+			return err
 		}
 	}
+	var storedReferences int
+	if err := tx.QueryRow(ctx, `select count(*) from agent_draft_source_references where run_id=$1`, attempt.RunID).Scan(&storedReferences); err != nil {
+		return err
+	}
+	if storedReferences != len(references) {
+		return ErrGroundingInvalid
+	}
 	return tx.Commit(ctx)
+}
+
+func sourceGroundingPlanSHA256(text string, references []string) (string, error) {
+	encoded, err := json.Marshal(struct {
+		Text       string   `json:"text"`
+		References []string `json:"source_references"`
+	}{Text: text, References: references})
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func sourceReferenceIdentity(runID string, ordinal int, sourceID string) string {
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s", runID, ordinal, sourceID)))
+	return "cit_" + hex.EncodeToString(digest[:16])
 }
 
 func finalDraftSHA256(draft models.FinalDraft) (string, error) {
@@ -474,13 +342,6 @@ func finalDraftSHA256(draft models.FinalDraft) (string, error) {
 	}
 	digest := sha256.Sum256(encoded)
 	return hex.EncodeToString(digest[:]), nil
-}
-
-func citationIdentity(runID string, claimOrdinal, citationOrdinal int, address models.EvidenceAddress) string {
-	value := fmt.Sprintf("%s\x00%d\x00%d\x00%s\x00%s\x00%s\x00%d\x00%d", runID, claimOrdinal, citationOrdinal,
-		address.SourceID, address.EvidenceRevisionID, address.UnitID, address.StartRune, address.EndRune)
-	digest := sha256.Sum256([]byte(value))
-	return "cit_" + hex.EncodeToString(digest[:16])
 }
 
 func (s *GroundingService) workerTx(ctx context.Context) (pgx.Tx, error) {

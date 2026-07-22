@@ -1810,6 +1810,22 @@ h2 {
   font-size: 11px;
 }
 
+.chat-inline-answer {
+  white-space: pre-line;
+}
+
+.citation-chip--inline {
+  display: inline-flex;
+  min-width: 22px;
+  min-height: 20px;
+  height: 20px;
+  margin: 0 2px;
+  padding: 0 5px;
+  border-radius: 999px;
+  vertical-align: baseline;
+  font-size: 10px;
+}
+
 .citation-hover-preview {
   display: grid;
   width: min(340px, calc(100vw - 32px));

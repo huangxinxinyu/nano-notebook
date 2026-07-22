@@ -14,6 +14,7 @@ import { Button } from "../ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "../ui/dialog";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip";
 import { appendMessageText, type ChatController, type ChatMessage, type Citation } from "./private-chat";
+import { SourceViewer } from "./source-panel";
 import { SourceImageViewer, type SourceImageRegion } from "./source-image-viewer";
 
 export type ChatPanelCopy = {
@@ -36,6 +37,10 @@ export type ChatPanelCopy = {
   citationUnavailableLabel: string;
   citationPreviewLabel: string;
   closeLabel: string;
+  sourcePreviewLabel: string;
+  processingLabel: string;
+  sourceUnavailableLabel: string;
+  coverageWarningLabel: string;
 };
 
 export function ChatPanelContent({ copy, controller, selectedSourceCount = 0 }: { copy: ChatPanelCopy; controller: ChatController; selectedSourceCount?: number }) {
@@ -134,11 +139,46 @@ function UserMessage({ controller, copy, latestMessageID }: { controller: ChatCo
 function AssistantMessage({ controller, copy }: { controller: ChatController; copy: ChatPanelCopy }) {
   const messageID = useAuiState((state) => state.message.id);
   const citations = controller.snapshot?.citations.filter((citation) => citation.message_id === messageID) ?? [];
+  const message = controller.snapshot?.messages.find((candidate) => candidate.id === messageID);
+  const sourceCitations = citations
+    .filter((citation) => citation.reference_kind === "source")
+    .sort((left, right) => (left.reference_ordinal ?? 0) - (right.reference_ordinal ?? 0));
+  const preciseCitations = citations.filter((citation) => citation.reference_kind !== "source");
   return (
     <MessagePrimitive.Root className="chat-message chat-message--assistant">
-      <MessagePrimitive.Parts />
-      {citations.length ? <div className="chat-citations">{citations.map((citation, index) => <CitationButton key={citation.id} citation={citation} number={index + 1} copy={copy} />)}</div> : null}
+      {sourceCitations.length && message ? <InlineSourceAnswer text={message.content} citations={sourceCitations} copy={copy} /> : <MessagePrimitive.Parts />}
+      {preciseCitations.length ? <div className="chat-citations">{preciseCitations.map((citation, index) => <CitationButton key={citation.id} citation={citation} number={index + 1} copy={copy} />)}</div> : null}
     </MessagePrimitive.Root>
+  );
+}
+
+function InlineSourceAnswer({ text, citations, copy }: { text: string; citations: Citation[]; copy: ChatPanelCopy }) {
+  const bySource = new Map(citations.map((citation) => [citation.source_id, citation]));
+  const parts: Array<{ text: string } | { citation: Citation }> = [];
+  const marker = /\[source:([A-Za-z0-9_.-]{1,255})\]/g;
+  let cursor = 0;
+  for (const match of text.matchAll(marker)) {
+    const index = match.index ?? 0;
+    if (index > cursor) parts.push({ text: text.slice(cursor, index) });
+    const citation = bySource.get(match[1]);
+    if (citation) parts.push({ citation });
+    cursor = index + match[0].length;
+  }
+  if (cursor < text.length) parts.push({ text: text.slice(cursor) });
+  return <p className="chat-inline-answer">{parts.map((part, index) => "text" in part
+    ? <span key={index}>{part.text}</span>
+    : <InlineSourceCitationButton key={`${part.citation.id}-${index}`} citation={part.citation} copy={copy} />)}</p>;
+}
+
+function InlineSourceCitationButton({ citation, copy }: { citation: Citation; copy: ChatPanelCopy }) {
+  const [open, setOpen] = useState(false);
+  const number = (citation.reference_ordinal ?? 0) + 1;
+  const sourceLabel = citation.source_title ?? citation.source_id;
+  return (
+    <>
+      <Button className="citation-chip citation-chip--inline" variant="outline" size="sm" aria-label={`${copy.citationLabel} ${number} for ${sourceLabel}`} onClick={() => setOpen(true)}>[{number}]</Button>
+      <SourceViewer sourceID={open ? citation.source_id : null} onOpenChange={setOpen} copy={copy} />
+    </>
   );
 }
 
@@ -170,7 +210,7 @@ function CitationButton({ citation, number, copy }: { citation: Citation; number
     <Dialog open={open} onOpenChange={setOpen}>
       <Tooltip open={previewOpen} onOpenChange={setPreviewOpen}>
         <TooltipTrigger asChild>
-          <Button className="citation-chip" variant="outline" size="sm" aria-label={`${copy.citationLabel} ${number} for ${citation.claim_text}`} onClick={() => setOpen(true)}>[{number}]</Button>
+          <Button className="citation-chip" variant="outline" size="sm" aria-label={`${copy.citationLabel} ${number} for ${citation.claim_text ?? citation.source_title ?? citation.source_id}`} onClick={() => setOpen(true)}>[{number}]</Button>
         </TooltipTrigger>
         <TooltipContent className="citation-hover-preview" side="top" sideOffset={8}>
           {view.isError ? <span role="alert">{copy.citationUnavailableLabel}</span> : null}

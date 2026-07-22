@@ -156,12 +156,8 @@ func TestActionResultAndFinalDraftCheckpointsEncodeTypedPayloads(t *testing.T) {
 	}
 }
 
-func TestFinalCheckpointPreservesTypedClaimEvidenceMapping(t *testing.T) {
-	draft := models.FinalDraft{Text: "The launch is 20 July.", Claims: []models.DraftClaim{{
-		Text: "The launch is 20 July.", Citations: []models.EvidenceAddress{{
-			SourceID: "src_a", EvidenceRevisionID: "evr_a", UnitID: "unit_a", StartRune: 0, EndRune: 27,
-		}},
-	}}}
+func TestFinalCheckpointPreservesInlineSourceMarkersAsText(t *testing.T) {
+	draft := models.FinalDraft{Text: "The launch is 20 July [source:src_a]."}
 	pending, err := NewFinalDraftCheckpoint(1, draft)
 	if err != nil {
 		t.Fatal(err)

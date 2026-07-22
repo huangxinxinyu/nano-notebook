@@ -18,8 +18,6 @@
     "degradation_policy_id": "hybrid-required-v1"
   },
   "composer_model": "qwen-plus",
-  "verifier_model": "qwen-plus",
-  "verifier_prompt_version": "claim-support-v1",
   "prompt_version": "agent-grounded-v1",
   "agent_config_id": "nano-research-v1"
 }

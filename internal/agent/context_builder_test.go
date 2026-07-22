@@ -4,49 +4,49 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-
-	"github.com/huangxinxinyu/nano-notebook/internal/models"
 )
 
-func TestGroundedSystemPromptDescribesEvidenceAwareFinalContract(t *testing.T) {
+func TestGroundedSystemPromptDescribesPlainTextSourceMarkerContract(t *testing.T) {
 	for _, required := range []string{
-		"Before any search_evidence result contains a citeable Evidence range",
-		"plain text",
-		"After any search_evidence result contains a citeable Evidence range",
-		"must be only JSON",
+		"always use search_evidence before answering",
+		"[source:<source_id>]",
+		"ordinary plain text",
+		"omit Source markers",
 	} {
 		if !strings.Contains(GroundedSystemPrompt, required) {
 			t.Fatalf("grounded prompt is missing %q", required)
 		}
 	}
-	if strings.Contains(GroundedSystemPrompt, "fresh Source-free fallback") {
-		t.Fatal("grounded prompt still describes the removed fallback call")
+	for _, forbidden := range []string{"claims", "must be only JSON", "verbatim"} {
+		if strings.Contains(GroundedSystemPrompt, forbidden) {
+			t.Fatalf("grounded prompt still contains %q", forbidden)
+		}
 	}
 }
 
-func TestGroundedFinalDraftFormatDependsOnCiteableEvidence(t *testing.T) {
+func TestGroundedRequiredActionDependsOnDurableSearchAttempt(t *testing.T) {
 	tests := []struct {
 		name   string
 		prefix CheckpointPrefix
 		want   string
 	}{
-		{name: "no search", want: models.FinalDraftFormatGroundedOptionalV1},
-		{name: "complete empty search", prefix: groundedSearchPrefix(t, true, false, nil), want: models.FinalDraftFormatGroundedOptionalV1},
-		{name: "degraded empty search", prefix: groundedSearchPrefix(t, false, true, nil), want: models.FinalDraftFormatGroundedOptionalV1},
+		{name: "no search", want: "search_evidence"},
+		{name: "complete empty search", prefix: groundedSearchPrefix(t, true, false, nil)},
+		{name: "degraded empty search", prefix: groundedSearchPrefix(t, false, true, nil)},
 		{name: "evidence metadata without citeable range", prefix: groundedSearchPrefix(t, false, false, []map[string]any{{
 			"source_id": "src_a", "evidence_revision_id": "evr_a", "evidence_ranges": []map[string]any{},
-		}}), want: models.FinalDraftFormatGroundedOptionalV1},
+		}})},
 		{name: "citeable evidence", prefix: groundedSearchPrefix(t, false, true, []map[string]any{{
 			"source_id": "src_a", "evidence_revision_id": "evr_a", "evidence_ranges": []map[string]any{{
 				"unit_id": "unit_a", "start_rune": 2, "end_rune": 9,
 			}},
-		}}), want: models.FinalDraftFormatGroundedV1},
+		}})},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := groundedFinalDraftFormat(tt.prefix)
+			got, err := groundedRequiredAction(tt.prefix)
 			if err != nil || got != tt.want {
-				t.Fatalf("format=%q err=%v, want %q", got, err, tt.want)
+				t.Fatalf("required action=%q err=%v, want %q", got, err, tt.want)
 			}
 		})
 	}

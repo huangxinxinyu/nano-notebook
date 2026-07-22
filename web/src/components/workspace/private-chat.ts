@@ -27,14 +27,17 @@ export type AgentRun = {
 export type Citation = {
   id: string;
   message_id: string;
-  claim_ordinal: number;
-  citation_ordinal: number;
-  claim_text: string;
+  reference_kind?: "precise" | "source";
+  reference_ordinal?: number;
+  claim_ordinal?: number;
+  citation_ordinal?: number;
+  claim_text?: string;
   source_id: string;
-  evidence_revision_id: string;
-  unit_id: string;
-  start_rune: number;
-  end_rune: number;
+  source_title?: string;
+  evidence_revision_id?: string;
+  unit_id?: string;
+  start_rune?: number;
+  end_rune?: number;
 };
 
 export type ChatSnapshot = {
@@ -234,7 +237,9 @@ function upsertRun(runs: AgentRun[], run: AgentRun) {
 function upsertCitations(current: Citation[], additions: Citation[]) {
   const result = new Map(current.map((citation) => [citation.id, citation]));
   for (const citation of additions) result.set(citation.id, citation);
-  return [...result.values()].sort((left, right) => left.claim_ordinal - right.claim_ordinal || left.citation_ordinal - right.citation_ordinal);
+  return [...result.values()].sort((left, right) =>
+    (left.reference_ordinal ?? left.claim_ordinal ?? 0) - (right.reference_ordinal ?? right.claim_ordinal ?? 0) ||
+    (left.citation_ordinal ?? 0) - (right.citation_ordinal ?? 0));
 }
 
 async function safeAdmissionError(response: Response, copy: ChatPanelCopy) {

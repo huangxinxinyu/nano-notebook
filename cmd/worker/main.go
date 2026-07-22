@@ -81,8 +81,6 @@ type workerConfig struct {
 	DocumentRenderDPI              int
 	DocumentRenderMaxPixelsPerPage int64
 	DocumentRenderMaxOutputBytes   int64
-	AgentVerifierModel             string
-	AgentVerifierPrompt            string
 	SourceProcessingMaxBytes       int64
 	SourceProcessingMaxRunes       int
 	AgentInteractiveConcurrency    int
@@ -238,9 +236,7 @@ func main() {
 		slog.Error("Agent Trace purge Sender invalid", "error", err)
 		os.Exit(1)
 	}
-	grounder := agent.NewGroundingService(db.Pool(), modelClient, agent.GroundingConfig{
-		VerifierModel: config.AgentVerifierModel, VerifierPromptVersion: config.AgentVerifierPrompt,
-	})
+	grounder := agent.NewGroundingService(db.Pool())
 	runtime := agent.NewPostgresRuntime(db.Pool(), agent.BareSystemPrompt, nil,
 		agent.WithTraceSink(traceExporter), agent.WithBestEffortTraceExporter(traceBridge),
 		agent.WithReplayStager(replayStager), agent.WithGroundingService(grounder))
@@ -608,8 +604,6 @@ func loadWorkerConfig() (workerConfig, error) {
 		DocumentRenderTimeout:        documentRenderTimeout, DocumentRenderMaxPages: documentRenderMaxPages,
 		DocumentRenderDPI: documentRenderDPI, DocumentRenderMaxPixelsPerPage: int64(documentRenderMaxPixels),
 		DocumentRenderMaxOutputBytes: int64(documentRenderMaxOutput),
-		AgentVerifierModel:           env("NANO_AGENT_VERIFIER_MODEL", "aliyun/qwen-flash"),
-		AgentVerifierPrompt:          env("NANO_AGENT_VERIFIER_PROMPT_VERSION", "claim-support-v1"),
 		SourceProcessingMaxBytes:     int64(sourceProcessingMaxBytes), SourceProcessingMaxRunes: sourceProcessingMaxRunes,
 		AgentInteractiveConcurrency: agentInteractiveConcurrency, SourceProcessingConcurrency: sourceProcessingConcurrency,
 		ReplayKeyID: env("NANO_REPLAY_KEY_ID", "nano-local-replay-key-v1"), ReplayKEK: replayKEK,
@@ -640,7 +634,6 @@ func loadWorkerConfig() (workerConfig, error) {
 		config.DocumentRenderMaxPages < 1 || config.DocumentRenderMaxPages > 500 || config.DocumentRenderDPI < 72 || config.DocumentRenderDPI > 300 ||
 		config.DocumentRenderMaxPixelsPerPage < 1 || config.DocumentRenderMaxPixelsPerPage > 100_000_000 ||
 		config.DocumentRenderMaxOutputBytes < 1 || config.DocumentRenderMaxOutputBytes > 2<<30 ||
-		strings.TrimSpace(config.AgentVerifierModel) == "" || strings.TrimSpace(config.AgentVerifierPrompt) == "" ||
 		config.SourceProcessingMaxBytes <= 0 || config.SourceProcessingMaxBytes > 100*1024*1024 || config.SourceProcessingMaxRunes <= 0 ||
 		workload.ValidateInteractiveCapacity(config.AgentInteractiveConcurrency, config.SourceProcessingConcurrency) != nil ||
 		strings.TrimSpace(config.ReplayKeyID) == "" || len(config.ReplayKEK) != 32 ||

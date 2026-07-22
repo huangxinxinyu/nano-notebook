@@ -40,7 +40,7 @@ func TestProductRunExecutorDerivesObservationFromDurableProductFacts(t *testing.
 	}{
 		{`insert into chat_chats(id,notebook_id,creator_user_id,title) values('chat_product_observer',$1,$2,'Eval')`, []any{notebookID, ownerID}},
 		{`insert into chat_messages(id,chat_id,role,content) values('msg_product_question','chat_product_observer','user','What is the launch date?')`, nil},
-		{`insert into chat_messages(id,chat_id,role,content) values('msg_product_answer','chat_product_observer','assistant','The launch date is 20 July.')`, nil},
+		{`insert into chat_messages(id,chat_id,role,content) values('msg_product_answer','chat_product_observer','assistant','The launch date is 20 July [source:src_product_fixture].')`, nil},
 		{`insert into source_sources(id,notebook_id,input_kind,format,title,media_type,byte_size,content_sha256,original_object_key,state) values('src_product_fixture',$1,'file','txt','Fixture','text/plain',10,$2,'sources/src_product_fixture/original','ready')`, []any{notebookID, fixtureSHA}},
 		{`insert into source_evidence_revisions(id,source_id,notebook_id,revision_no,extraction_config_id,artifact_schema_version,artifact_object_key,artifact_sha256,status,activated_at) values('evr_product_fixture','src_product_fixture',$1,1,'extract-eval-v1','nano.normalized-source.v1','sources/src_product_fixture/evidence/normalized.json',$2,'active',now())`, []any{notebookID, strings.Repeat("b", 64)}},
 		{`insert into source_evidence_coverage(revision_id,status,total_runes) values('evr_product_fixture','complete',27)`, nil},
@@ -48,9 +48,8 @@ func TestProductRunExecutorDerivesObservationFromDurableProductFacts(t *testing.
 		{`insert into retrieval_source_index_builds(revision_id,index_version_id,source_id,notebook_id,expected_points,projection_sha256,status,verified_at) values('evr_product_fixture',$1,'src_product_fixture',$2,1,$3,'verified',now())`, []any{version.ID, notebookID, strings.Repeat("c", 64)}},
 		{`insert into agent_runs(id,user_id,chat_id,input_message_id,output_message_id,status,model,prompt_version,agent_config_id,started_at,finished_at) values('run_product_observer',$1,'chat_product_observer','msg_product_question','msg_product_answer','completed','composer-eval',$2,'agent-eval-v1',now()-interval '120 milliseconds',now())`, []any{ownerID, agent.GroundedPromptVersion}},
 		{`insert into agent_run_evidence_set(run_id,ordinal,notebook_id,source_id,evidence_revision_id,index_version_id) values('run_product_observer',0,$1,'src_product_fixture','evr_product_fixture',$2)`, []any{notebookID, version.ID}},
-		{`insert into agent_run_grounding_plans(run_id,draft_sha256,outcome,research_complete,retrieval_degraded,verifier_model,verifier_prompt_version) values('run_product_observer',$1,'supported',true,false,'verifier-eval','claim-support-v1')`, []any{strings.Repeat("d", 64)}},
-		{`insert into agent_claim_support_records(run_id,claim_ordinal,claim_text,verdict) values('run_product_observer',0,'The launch date is 20 July.','supported')`, nil},
-		{`insert into chat_citations(message_id,citation_id,run_id,claim_ordinal,citation_ordinal,claim_text,notebook_id,source_id,evidence_revision_id,unit_id,start_rune,end_rune) values('msg_product_answer','cite_product','run_product_observer',0,0,'The launch date is 20 July.',$1,'src_product_fixture','evr_product_fixture','unit_product_launch',0,27)`, []any{notebookID}},
+		{`insert into agent_run_grounding_plans(run_id,draft_sha256,outcome,research_performed,research_complete,retrieval_degraded) values('run_product_observer',$1,'source_cited',true,true,false)`, []any{strings.Repeat("d", 64)}},
+		{`insert into chat_citations(message_id,citation_id,run_id,reference_kind,reference_ordinal,notebook_id,source_id) values('msg_product_answer','cite_product','run_product_observer','source',0,$1,'src_product_fixture')`, []any{notebookID}},
 		{`insert into agent_run_checkpoints(run_id,sequence_no,identity_key,kind,decision_no,payload,payload_sha256) values('run_product_observer',1,'decision:1','action_proposal',1,$1,$2)`, []any{`{"actions":[{"action_id":"decision:1/action:0","index":0,"name":"search_evidence","input":{"query":"launch date","purpose":"answer"}}]}`, strings.Repeat("e", 64)}},
 		{`insert into agent_run_checkpoints(run_id,sequence_no,identity_key,kind,decision_no,action_index,action_id,payload,payload_sha256) values('run_product_observer',2,'decision:1/action:0','action_result',1,0,'decision:1/action:0',$1,$2)`, []any{`{"action_id":"decision:1/action:0","status":"succeeded","output":{"complete_empty":false,"degraded":false,"degradations":[],"evidence":[{"source_id":"src_product_fixture","evidence_revision_id":"evr_product_fixture","source_title":"Fixture","preview":"The launch date is 20 July.","evidence_ranges":[{"unit_id":"unit_product_launch","start_rune":0,"end_rune":27}]}]}}`, strings.Repeat("f", 64)}},
 	}
@@ -77,12 +76,12 @@ func TestProductRunExecutorDerivesObservationFromDurableProductFacts(t *testing.
 	}
 	observation, err := executor.ExecuteCase(ctx, evalCase, rageval.PinnedConfig{
 		ExtractionConfigID: "extract-eval-v1", EvidenceSchemaVersion: 1, Index: config,
-		ComposerModel: "composer-eval", VerifierModel: "verifier-eval", VerifierPromptVersion: "claim-support-v1", PromptVersion: agent.GroundedPromptVersion, AgentConfigID: "agent-eval-v1",
+		ComposerModel: "composer-eval", PromptVersion: agent.GroundedPromptVersion, AgentConfigID: "agent-eval-v1",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !observation.CoveragePassed || len(observation.InvariantFailures) != 0 || len(observation.RetrievedEvidenceIDs) != 1 || observation.RetrievedEvidenceIDs[0] != "txt-launch-date" || len(observation.CitationEvidenceIDs) != 1 || observation.CitationEvidenceIDs[0] != "txt-launch-date" || observation.MaterialClaimCount != 1 || observation.CitedClaimCount != 1 || len(observation.RequiredFactsFound) != 1 || observation.LatencyMilliseconds < 1 {
+	if !observation.CoveragePassed || len(observation.InvariantFailures) != 0 || len(observation.RetrievedEvidenceIDs) != 1 || observation.RetrievedEvidenceIDs[0] != "txt-launch-date" || len(observation.CitationSourceIDs) != 1 || observation.CitationSourceIDs[0] != "txt-eval-v1" || len(observation.RequiredFactsFound) != 1 || observation.LatencyMilliseconds < 1 {
 		t.Fatalf("observation=%+v", observation)
 	}
 }
@@ -135,7 +134,7 @@ func TestLiveProductExecutorRunsCandidateThroughProductionAgentAndCitations(t *t
 	executor, err := rageval.NewLiveProductExecutor(api.db.Pool(), qdrant, model, rageval.ProductSourceManifest{
 		SchemaVersion: 1, IndexVersionID: version.ID, UserID: ownerID, NotebookID: notebookID,
 		Cases: []rageval.ProductSourceCase{{CaseID: "live-product", FixtureSources: map[string]string{"txt-live-v1": "src_live_fixture"}, EvidenceUnits: map[string][]string{"txt-launch-date": {"unit_live_launch"}}}},
-	}, "verifier-live", "claim-support-v1")
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,13 +145,13 @@ func TestLiveProductExecutorRunsCandidateThroughProductionAgentAndCitations(t *t
 	}
 	observation, err := executor.ExecuteCase(ctx, evalCase, rageval.PinnedConfig{
 		ExtractionConfigID: "extract-live-v1", EvidenceSchemaVersion: 1, Index: config,
-		ComposerModel: "composer-live", VerifierModel: "verifier-live", VerifierPromptVersion: "claim-support-v1",
+		ComposerModel: "composer-live",
 		PromptVersion: agent.GroundedPromptVersion, AgentConfigID: "agent-live-v1",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(observation.InvariantFailures) != 0 || !observation.CoveragePassed || observation.MaterialClaimCount != 1 || observation.CitedClaimCount != 1 || len(observation.RetrievedEvidenceIDs) != 1 || len(observation.CitationEvidenceIDs) != 1 {
+	if len(observation.InvariantFailures) != 0 || !observation.CoveragePassed || len(observation.RetrievedEvidenceIDs) != 1 || len(observation.CitationSourceIDs) != 1 || observation.CitationSourceIDs[0] != "txt-live-v1" {
 		t.Fatalf("observation=%+v", observation)
 	}
 	stored, err := retrieval.NewVersionStore(api.db.Pool()).ByID(ctx, version.ID)
@@ -181,28 +180,19 @@ func (liveEvalModel) Rerank(_ context.Context, request models.RerankRequest) (mo
 
 func (liveEvalModel) Decide(_ context.Context, request models.ModelRequest) (models.ModelOutcome, error) {
 	if len(request.Messages) == 2 {
-		if request.FinalDraftFormat != models.FinalDraftFormatGroundedOptionalV1 {
-			return models.ModelOutcome{}, fmt.Errorf("first grounded format = %q", request.FinalDraftFormat)
+		if request.RequiredActionName != "search_evidence" {
+			return models.ModelOutcome{}, fmt.Errorf("first required Action = %q", request.RequiredActionName)
 		}
 		return models.ModelOutcome{ModelDecision: models.ModelDecision{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{{
 			Name: "search_evidence", Input: json.RawMessage(`{"query":"launch date","purpose":"answer the question"}`),
 		}}}}, Metadata: liveEvalDecisionMetadata(request.Model, models.ModelResultActionProposal)}, nil
 	}
-	if request.FinalDraftFormat != models.FinalDraftFormatGroundedV1 {
-		return models.ModelOutcome{}, fmt.Errorf("evidence-bearing grounded format = %q", request.FinalDraftFormat)
+	if request.RequiredActionName != "" {
+		return models.ModelOutcome{}, fmt.Errorf("final required Action = %q", request.RequiredActionName)
 	}
-	claim := "The launch date is 20 July."
-	return models.ModelOutcome{ModelDecision: models.ModelDecision{Final: &models.FinalDraft{Text: claim, Claims: []models.DraftClaim{{
-		Text: claim, Citations: []models.EvidenceAddress{{SourceID: "src_live_fixture", EvidenceRevisionID: "evr_live_fixture", UnitID: "unit_live_launch", StartRune: 0, EndRune: 27}},
-	}}}}, Metadata: liveEvalDecisionMetadata(request.Model, models.ModelResultFinalDraft)}, nil
-}
-
-func (liveEvalModel) VerifyClaimSupport(_ context.Context, request models.ClaimSupportRequest) (models.ClaimSupportOutcome, error) {
-	verdicts := make([]models.ClaimSupportVerdict, len(request.Claims))
-	for index := range verdicts {
-		verdicts[index] = models.ClaimSupportVerdict{Ordinal: index, Supported: true}
-	}
-	return models.ClaimSupportOutcome{Verdicts: verdicts, Metadata: liveEvalCapabilityMetadata()}, nil
+	return models.ModelOutcome{ModelDecision: models.ModelDecision{Final: &models.FinalDraft{
+		Text: "The launch date is 20 July [source:src_live_fixture].",
+	}}, Metadata: liveEvalDecisionMetadata(request.Model, models.ModelResultFinalDraft)}, nil
 }
 
 func liveEvalCapabilityMetadata() models.CapabilityMetadata {

@@ -27,68 +27,6 @@ type ModelTraceOptions struct {
 	ReplayStager     ReplayStager
 }
 
-type ClaimSupportTraceOptions struct {
-	StartIdentity   string
-	RequestIdentity string
-	VerdictIdentity string
-	ReplayStager    ReplayStager
-}
-
-func InvokeClaimSupportVerifier(ctx context.Context, tracer *agentobs.Tracer, verifier ClaimSupportVerifier, request models.ClaimSupportRequest, optionValues ...ClaimSupportTraceOptions) (models.ClaimSupportOutcome, error) {
-	if verifier == nil {
-		return models.ClaimSupportOutcome{}, errors.New("nil Claim Support verifier")
-	}
-	var options ClaimSupportTraceOptions
-	if len(optionValues) > 0 {
-		options = optionValues[0]
-	}
-	evidenceCount := 0
-	for _, claim := range request.Claims {
-		evidenceCount += len(claim.Evidence)
-	}
-	startAttributes := []agentobs.Attribute{
-		agentobs.String(semconv.OperationNameKey, "claim_support"),
-		agentobs.String(semconv.ModelNameKey, request.Model),
-		agentobs.String(TraceKeyVerifierPromptVersion, request.PromptVersion),
-		agentobs.Int64(TraceKeyVerifierClaimCount, int64(len(request.Claims))),
-		agentobs.Int64(TraceKeyVerifierEvidenceCount, int64(evidenceCount)),
-	}
-	if options.ReplayStager != nil {
-		payload, err := EncodeClaimSupportRequestReplay(request)
-		if err != nil {
-			return models.ClaimSupportOutcome{}, &instrumentation.RecordingError{Phase: instrumentation.RecordingStart, Err: err}
-		}
-		attachmentID, err := stageReplayAttachment(ctx, options.ReplayStager, options.RequestIdentity, payload)
-		if err != nil {
-			return models.ClaimSupportOutcome{}, &instrumentation.RecordingError{Phase: instrumentation.RecordingStart, Err: err}
-		}
-		startAttributes = append(startAttributes, agentobs.String(replay.ModelRequestAttachmentKey, attachmentID))
-	}
-	var verdictAttachmentID string
-	return instrumentation.Invoke(ctx, tracer, agentobs.SpanStart{
-		IdentityKey: options.StartIdentity, Name: TraceSpanClaimSupport, Attributes: startAttributes,
-	}, func(callContext context.Context) (models.ClaimSupportOutcome, error) {
-		outcome, err := verifier.VerifyClaimSupport(callContext, request)
-		if err == nil && options.ReplayStager != nil {
-			payload, payloadErr := EncodeClaimSupportVerdictReplay(outcome)
-			if payloadErr != nil {
-				return outcome, &instrumentation.RecordingError{Phase: instrumentation.RecordingTerminal, Err: payloadErr}
-			}
-			verdictAttachmentID, payloadErr = stageReplayAttachment(callContext, options.ReplayStager, options.VerdictIdentity, payload)
-			if payloadErr != nil {
-				return outcome, &instrumentation.RecordingError{Phase: instrumentation.RecordingTerminal, Err: payloadErr}
-			}
-		}
-		return outcome, err
-	}, func(outcome models.ClaimSupportOutcome, callErr error) agentobs.SpanEnd {
-		terminal := claimSupportTerminal(outcome, callErr)
-		if verdictAttachmentID != "" {
-			terminal.Attributes = append(terminal.Attributes, agentobs.String(replay.ModelDecisionAttachmentKey, verdictAttachmentID))
-		}
-		return terminal
-	})
-}
-
 func InvokeDecisionModel(ctx context.Context, tracer *agentobs.Tracer, model DecisionModel, request models.ModelRequest, decisionOrdinal int, optionValues ...ModelTraceOptions) (models.ModelOutcome, error) {
 	if model == nil {
 		return models.ModelOutcome{}, errors.New("nil Decision Model")
@@ -302,58 +240,6 @@ func modelTerminal(metadata models.ModelCallMetadata, callErr error) agentobs.Sp
 		attributes = append(attributes, agentobs.String(semconv.ErrorKindKey, kind))
 	}
 	return agentobs.SpanEnd{Name: semconv.ModelCall, Status: status, Attributes: attributes}
-}
-
-func claimSupportTerminal(outcome models.ClaimSupportOutcome, callErr error) agentobs.SpanEnd {
-	status := agentobs.StatusOK
-	metadata := outcome.Metadata
-	attributes := []agentobs.Attribute{agentobs.Bool(semconv.CostKnownKey, metadata.Cost.Known)}
-	if metadata.Provider != "" {
-		attributes = append(attributes, agentobs.String(semconv.ModelProviderKey, metadata.Provider))
-	}
-	if metadata.Model != "" {
-		attributes = append(attributes, agentobs.String(semconv.ModelNameKey, metadata.Model))
-	}
-	if metadata.InputTokens != nil {
-		attributes = append(attributes, agentobs.Int64(semconv.TokenInputKey, *metadata.InputTokens))
-	}
-	if metadata.TotalTokens != nil {
-		attributes = append(attributes, agentobs.Int64(semconv.TokenTotalKey, *metadata.TotalTokens))
-	}
-	if metadata.Latency > 0 {
-		attributes = append(attributes, agentobs.Int64(semconv.DurationMillisecondsKey, metadata.Latency.Milliseconds()))
-	}
-	if metadata.Cost.Known && metadata.Cost.Amount != nil {
-		attributes = append(attributes,
-			agentobs.Float64(semconv.CostAmountKey, *metadata.Cost.Amount),
-			agentobs.String(semconv.CostCurrencyKey, metadata.Cost.Currency),
-			agentobs.String(semconv.CostSourceKey, metadata.Cost.Source),
-		)
-	}
-	if callErr == nil {
-		supported := int64(0)
-		for _, verdict := range outcome.Verdicts {
-			if verdict.Supported {
-				supported++
-			}
-		}
-		attributes = append(attributes,
-			agentobs.Int64(TraceKeyVerifierSupportedCount, supported),
-			agentobs.Int64(TraceKeyVerifierUnsupportedCount, int64(len(outcome.Verdicts))-supported+int64(len(outcome.UncoveredClaims))),
-		)
-	} else {
-		status = agentobs.StatusError
-		if errors.Is(callErr, context.Canceled) {
-			status = agentobs.StatusCancelled
-		}
-		kind := string(models.ErrorUnavailable)
-		var modelErr *models.ModelError
-		if errors.As(callErr, &modelErr) {
-			kind = string(modelErr.Kind)
-		}
-		attributes = append(attributes, agentobs.String(semconv.ErrorKindKey, kind))
-	}
-	return agentobs.SpanEnd{Name: TraceSpanClaimSupport, Status: status, Attributes: attributes}
 }
 
 func modelRequestHash(request models.ModelRequest) string {

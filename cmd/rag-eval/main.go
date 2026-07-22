@@ -134,7 +134,7 @@ func run(args []string, output io.Writer) error {
 				_, err = sourceprojection.NewReindexer(pool, vectors, model).ReindexVersion(context.Background(), *versionID)
 			}
 			if err == nil {
-				executor, err = rageval.NewLiveProductExecutor(pool, vectors, model, manifest, config.VerifierModel, config.VerifierPromptVersion)
+				executor, err = rageval.NewLiveProductExecutor(pool, vectors, model, manifest)
 			}
 		}
 	}

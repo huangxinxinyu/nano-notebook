@@ -177,63 +177,6 @@ func TestSearchEvidenceActionRecordsRAGMetadataWithoutQueryOrEvidenceBodies(t *t
 	}
 }
 
-func TestClaimSupportAdapterStagesReplayAndRecordsOnlySafeRAGMetadata(t *testing.T) {
-	tracer, exporter, ctx := instrumentationTestTracer(t)
-	stager := &recordingReplayStager{}
-	inputTokens, totalTokens := int64(31), int64(39)
-	request := models.ClaimSupportRequest{
-		Model: "aliyun/qwen-plus", PromptVersion: "claim-support-v1", Answer: "private answer",
-		Claims: []models.ClaimSupportInput{{
-			Ordinal: 0, Text: "private claim",
-			Evidence: []models.ClaimEvidence{{SourceID: "source-1", RevisionID: "revision-1", UnitID: "unit-1", StartRune: 0, EndRune: 14, Text: "private evidence"}},
-		}},
-	}
-	verifier := claimSupportVerifierFunc(func(context.Context, models.ClaimSupportRequest) (models.ClaimSupportOutcome, error) {
-		return models.ClaimSupportOutcome{
-			Verdicts: []models.ClaimSupportVerdict{{Ordinal: 0, Supported: false}}, UncoveredClaims: []string{"private omitted claim"},
-			Metadata: models.CapabilityMetadata{
-				RequestedModel: "aliyun/qwen-plus", Provider: "aliyun", Model: "qwen-plus",
-				InputTokens: &inputTokens, TotalTokens: &totalTokens,
-			},
-		}, nil
-	})
-	outcome, err := InvokeClaimSupportVerifier(ctx, tracer, verifier, request, ClaimSupportTraceOptions{
-		StartIdentity:   "run/run-1/attempt/1/grounding/verifier/start",
-		RequestIdentity: "run/run-1/attempt/1/grounding/verifier/replay/request",
-		VerdictIdentity: "run/run-1/attempt/1/grounding/verifier/replay/verdict",
-		ReplayStager:    stager,
-	})
-	if err != nil || len(outcome.Verdicts) != 1 {
-		t.Fatalf("InvokeClaimSupportVerifier = %#v, %v", outcome, err)
-	}
-	if len(stager.requests) != 2 || stager.requests[0].Payload.Class != replay.ClassModelRequest || stager.requests[1].Payload.Class != replay.ClassModelDecision {
-		t.Fatalf("staged Replay requests = %#v", stager.requests)
-	}
-	if !strings.Contains(string(stager.requests[1].Payload.Bytes), "private omitted claim") {
-		t.Fatalf("verdict Replay omitted uncovered claim: %s", stager.requests[1].Payload.Bytes)
-	}
-	if !strings.Contains(string(stager.requests[0].Payload.Bytes), "private answer") || !strings.Contains(string(stager.requests[0].Payload.Bytes), "private claim") || !strings.Contains(string(stager.requests[0].Payload.Bytes), "private evidence") {
-		t.Fatalf("request Replay omitted verifier inputs: %s", stager.requests[0].Payload.Bytes)
-	}
-	records := exporter.Records()
-	start, terminal := records[len(records)-2], records[len(records)-1]
-	if stringAttribute(start, TraceKeyVerifierPromptVersion) != "claim-support-v1" ||
-		int64Attribute(start, TraceKeyVerifierClaimCount) != 1 ||
-		int64Attribute(start, TraceKeyVerifierEvidenceCount) != 1 ||
-		int64Attribute(terminal, TraceKeyVerifierUnsupportedCount) != 2 {
-		t.Fatalf("claim support records = %#v", records)
-	}
-	for _, record := range records[len(records)-2:] {
-		payload, payloadErr := record.CanonicalPayload()
-		if payloadErr != nil {
-			t.Fatal(payloadErr)
-		}
-		if strings.Contains(string(payload), "private answer") || strings.Contains(string(payload), "private claim") || strings.Contains(string(payload), "private evidence") || strings.Contains(string(payload), "private omitted claim") {
-			t.Fatalf("sensitive verifier body entered Trace: %s", payload)
-		}
-	}
-}
-
 func TestModelAdapterClassifiesObservedErrors(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -307,12 +250,6 @@ func instrumentationTestTracer(t *testing.T) (*agentobs.Tracer, *memory.Exporter
 type outcomeModelFunc func(context.Context, models.ModelRequest) (models.ModelOutcome, error)
 
 func (f outcomeModelFunc) Decide(ctx context.Context, request models.ModelRequest) (models.ModelOutcome, error) {
-	return f(ctx, request)
-}
-
-type claimSupportVerifierFunc func(context.Context, models.ClaimSupportRequest) (models.ClaimSupportOutcome, error)
-
-func (f claimSupportVerifierFunc) VerifyClaimSupport(ctx context.Context, request models.ClaimSupportRequest) (models.ClaimSupportOutcome, error) {
 	return f(ctx, request)
 }
 

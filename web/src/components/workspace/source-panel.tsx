@@ -241,10 +241,14 @@ export function SourcePanelContent({ copy, notebookID, controller, canMaintain =
   );
 }
 
-function SourceViewer({ sourceID, onOpenChange, copy }: {
+export type SourceViewerCopy = Pick<SourcePanelCopy,
+  "closeLabel" | "sourcePreviewLabel" | "processingLabel" | "sourceUnavailableLabel" | "coverageWarningLabel"
+>;
+
+export function SourceViewer({ sourceID, onOpenChange, copy }: {
   sourceID: string | null;
   onOpenChange: (open: boolean) => void;
-  copy: SourcePanelCopy;
+  copy: SourceViewerCopy;
 }) {
   const view = useQuery({
     queryKey: ["source-view", sourceID],

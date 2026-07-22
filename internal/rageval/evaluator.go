@@ -57,7 +57,7 @@ type Case struct {
 	Question             string         `json:"question"`
 	ExpectedEvidenceSets [][]string     `json:"expected_evidence_sets"`
 	RequiredFacts        []string       `json:"required_facts"`
-	ForbiddenClaims      []string       `json:"forbidden_claims,omitempty"`
+	ForbiddenFacts       []string       `json:"forbidden_facts,omitempty"`
 	Rubric               []string       `json:"rubric,omitempty"`
 	Fixtures             []Fixture      `json:"fixtures"`
 }
@@ -70,13 +70,11 @@ type Fixture struct {
 }
 
 type Thresholds struct {
-	MinRecall                 float64 `json:"min_recall"`
-	MinMRR                    float64 `json:"min_mrr"`
-	MinCitationPrecision      float64 `json:"min_citation_precision"`
-	MinClaimCoverage          float64 `json:"min_claim_coverage"`
-	MaxUnsupportedClaimRate   float64 `json:"max_unsupported_claim_rate"`
-	MaxP95LatencyMilliseconds int64   `json:"max_p95_latency_milliseconds"`
-	MaxMeanCostUSD            float64 `json:"max_mean_cost_usd"`
+	MinRecall                   float64 `json:"min_recall"`
+	MinMRR                      float64 `json:"min_mrr"`
+	MinSourceReferencePrecision float64 `json:"min_source_reference_precision"`
+	MaxP95LatencyMilliseconds   int64   `json:"max_p95_latency_milliseconds"`
+	MaxMeanCostUSD              float64 `json:"max_mean_cost_usd"`
 }
 
 type Suite struct {
@@ -128,7 +126,7 @@ func (s Suite) Validate() error {
 				return ErrSuiteInvalid
 			}
 		}
-		if hasBlankOrDuplicate(evalCase.RequiredFacts) || hasBlankOrDuplicate(evalCase.ForbiddenClaims) || hasBlankOrDuplicate(evalCase.Rubric) {
+		if hasBlankOrDuplicate(evalCase.RequiredFacts) || hasBlankOrDuplicate(evalCase.ForbiddenFacts) || hasBlankOrDuplicate(evalCase.Rubric) {
 			return ErrSuiteInvalid
 		}
 	}
@@ -147,8 +145,8 @@ func (s Suite) Validate() error {
 
 func (t Thresholds) valid() bool {
 	unit := func(value float64) bool { return value >= 0 && value <= 1 && !math.IsNaN(value) }
-	return unit(t.MinRecall) && unit(t.MinMRR) && unit(t.MinCitationPrecision) && unit(t.MinClaimCoverage) &&
-		unit(t.MaxUnsupportedClaimRate) && t.MaxP95LatencyMilliseconds > 0 && t.MaxMeanCostUSD >= 0 && !math.IsNaN(t.MaxMeanCostUSD) && !math.IsInf(t.MaxMeanCostUSD, 0)
+	return unit(t.MinRecall) && unit(t.MinMRR) && unit(t.MinSourceReferencePrecision) &&
+		t.MaxP95LatencyMilliseconds > 0 && t.MaxMeanCostUSD >= 0 && !math.IsNaN(t.MaxMeanCostUSD) && !math.IsInf(t.MaxMeanCostUSD, 0)
 }
 
 func (s Suite) SHA256() (string, error) {
@@ -168,8 +166,6 @@ type PinnedConfig struct {
 	EvidenceSchemaVersion int                   `json:"evidence_schema_version"`
 	Index                 retrieval.IndexConfig `json:"index"`
 	ComposerModel         string                `json:"composer_model"`
-	VerifierModel         string                `json:"verifier_model"`
-	VerifierPromptVersion string                `json:"verifier_prompt_version"`
 	PromptVersion         string                `json:"prompt_version"`
 	AgentConfigID         string                `json:"agent_config_id"`
 }
@@ -178,29 +174,26 @@ func (c PinnedConfig) Validate() error {
 	if strings.TrimSpace(c.ExtractionConfigID) == "" || c.EvidenceSchemaVersion < 1 || strings.TrimSpace(c.Index.AnalyzerID) == "" ||
 		c.Index.Chunk.MaxRunes <= 0 || c.Index.DenseCandidates <= 0 || c.Index.SparseCandidates <= 0 || c.Index.RRFK <= 0 || c.Index.RerankCandidates <= 0 ||
 		strings.TrimSpace(c.Index.EmbeddingModel) == "" || c.Index.EmbeddingDimensions <= 0 || !retrieval.IsEmbeddingProfileID(c.Index.EmbeddingProfileID) || strings.TrimSpace(c.Index.RerankerID) == "" ||
-		strings.TrimSpace(c.ComposerModel) == "" || strings.TrimSpace(c.VerifierModel) == "" || strings.TrimSpace(c.VerifierPromptVersion) == "" || strings.TrimSpace(c.PromptVersion) == "" || strings.TrimSpace(c.AgentConfigID) == "" {
+		strings.TrimSpace(c.ComposerModel) == "" || strings.TrimSpace(c.PromptVersion) == "" || strings.TrimSpace(c.AgentConfigID) == "" {
 		return ErrConfigInvalid
 	}
 	return nil
 }
 
 type Observation struct {
-	CaseID                string            `json:"case_id"`
-	FixtureSHA256         map[string]string `json:"fixture_sha256"`
-	CoveragePassed        bool              `json:"coverage_passed"`
-	InvariantFailures     []string          `json:"invariant_failures,omitempty"`
-	RetrievedEvidenceIDs  []string          `json:"retrieved_evidence_ids"`
-	CitationEvidenceIDs   []string          `json:"citation_evidence_ids"`
-	MaterialClaimCount    int               `json:"material_claim_count"`
-	CitedClaimCount       int               `json:"cited_claim_count"`
-	UnsupportedClaimCount int               `json:"unsupported_claim_count"`
-	RequiredFactsFound    []string          `json:"required_facts_found"`
-	ForbiddenClaimsFound  []string          `json:"forbidden_claims_found,omitempty"`
-	LatencyMilliseconds   int64             `json:"latency_milliseconds"`
-	InputTokens           int64             `json:"input_tokens"`
-	TotalTokens           int64             `json:"total_tokens"`
-	EstimatedCostUSD      float64           `json:"estimated_cost_usd"`
-	JudgeScore            *float64          `json:"judge_score,omitempty"`
+	CaseID               string            `json:"case_id"`
+	FixtureSHA256        map[string]string `json:"fixture_sha256"`
+	CoveragePassed       bool              `json:"coverage_passed"`
+	InvariantFailures    []string          `json:"invariant_failures,omitempty"`
+	RetrievedEvidenceIDs []string          `json:"retrieved_evidence_ids"`
+	CitationSourceIDs    []string          `json:"citation_source_ids"`
+	RequiredFactsFound   []string          `json:"required_facts_found"`
+	ForbiddenFactsFound  []string          `json:"forbidden_facts_found,omitempty"`
+	LatencyMilliseconds  int64             `json:"latency_milliseconds"`
+	InputTokens          int64             `json:"input_tokens"`
+	TotalTokens          int64             `json:"total_tokens"`
+	EstimatedCostUSD     float64           `json:"estimated_cost_usd"`
+	JudgeScore           *float64          `json:"judge_score,omitempty"`
 }
 
 type Executor interface {
@@ -210,16 +203,14 @@ type Executor interface {
 }
 
 type Metrics struct {
-	Recall                 float64  `json:"recall"`
-	MRR                    float64  `json:"mrr"`
-	CitationPrecision      float64  `json:"citation_precision"`
-	ClaimCoverage          float64  `json:"claim_coverage"`
-	UnsupportedClaimRate   float64  `json:"unsupported_claim_rate"`
-	P95LatencyMilliseconds int64    `json:"p95_latency_milliseconds"`
-	MeanCostUSD            float64  `json:"mean_cost_usd"`
-	InputTokens            int64    `json:"input_tokens"`
-	TotalTokens            int64    `json:"total_tokens"`
-	MeanJudgeScore         *float64 `json:"mean_judge_score,omitempty"`
+	Recall                   float64  `json:"recall"`
+	MRR                      float64  `json:"mrr"`
+	SourceReferencePrecision float64  `json:"source_reference_precision"`
+	P95LatencyMilliseconds   int64    `json:"p95_latency_milliseconds"`
+	MeanCostUSD              float64  `json:"mean_cost_usd"`
+	InputTokens              int64    `json:"input_tokens"`
+	TotalTokens              int64    `json:"total_tokens"`
+	MeanJudgeScore           *float64 `json:"mean_judge_score,omitempty"`
 }
 
 type CaseResult struct {
@@ -260,7 +251,7 @@ func Evaluate(ctx context.Context, suite Suite, config PinnedConfig, executor Ex
 	}
 	report := Report{SchemaVersion: 1, SuiteID: suite.ID, FixtureSuiteSHA256: digest, PinnedConfig: config, Thresholds: suite.Thresholds, Status: retrieval.EvalPassed, Cases: make([]CaseResult, 0, len(suite.Cases))}
 	latencies := make([]int64, 0, len(suite.Cases))
-	var recall, mrr, citationHits, citationTotal, claims, cited, unsupported, cost, judge float64
+	var recall, mrr, citationHits, citationTotal, cost, judge float64
 	judgeCount := 0
 	for _, evalCase := range suite.Cases {
 		observation, executeErr := executor.ExecuteCase(ctx, evalCase, config)
@@ -273,18 +264,19 @@ func Evaluate(ctx context.Context, suite Suite, config PinnedConfig, executor Ex
 		if !fixturesMatch(evalCase.Fixtures, observation.FixtureSHA256) {
 			observation.InvariantFailures = append(observation.InvariantFailures, "fixture_identity_mismatch")
 		}
-		caseRecall, caseMRR, allowed := retrievalMetrics(evalCase, observation.RetrievedEvidenceIDs)
+		caseRecall, caseMRR, _ := retrievalMetrics(evalCase, observation.RetrievedEvidenceIDs)
 		recall += caseRecall
 		mrr += caseMRR
-		for _, id := range observation.CitationEvidenceIDs {
+		allowedSources := make(map[string]bool, len(evalCase.Fixtures))
+		for _, fixture := range evalCase.Fixtures {
+			allowedSources[fixture.ID] = true
+		}
+		for _, id := range observation.CitationSourceIDs {
 			citationTotal++
-			if allowed[id] {
+			if allowedSources[id] {
 				citationHits++
 			}
 		}
-		claims += float64(observation.MaterialClaimCount)
-		cited += float64(observation.CitedClaimCount)
-		unsupported += float64(observation.UnsupportedClaimCount)
 		latencies = append(latencies, observation.LatencyMilliseconds)
 		cost += observation.EstimatedCostUSD
 		report.Metrics.InputTokens += observation.InputTokens
@@ -293,7 +285,7 @@ func Evaluate(ctx context.Context, suite Suite, config PinnedConfig, executor Ex
 			judge += *observation.JudgeScore
 			judgeCount++
 		}
-		failures := caseFailures(evalCase, observation, caseRecall, citationPrecision(observation.CitationEvidenceIDs, allowed))
+		failures := caseFailures(evalCase, observation, caseRecall, citationPrecision(observation.CitationSourceIDs, allowedSources))
 		report.InvariantFailures += len(observation.InvariantFailures)
 		passed := len(failures) == 0
 		if evalCase.Critical && !passed {
@@ -305,11 +297,7 @@ func Evaluate(ctx context.Context, suite Suite, config PinnedConfig, executor Ex
 	report.Metrics.Recall = recall / count
 	report.Metrics.MRR = mrr / count
 	if citationTotal > 0 {
-		report.Metrics.CitationPrecision = citationHits / citationTotal
-	}
-	if claims > 0 {
-		report.Metrics.ClaimCoverage = cited / claims
-		report.Metrics.UnsupportedClaimRate = unsupported / claims
+		report.Metrics.SourceReferencePrecision = citationHits / citationTotal
 	}
 	report.Metrics.P95LatencyMilliseconds = percentile95(latencies)
 	report.Metrics.MeanCostUSD = cost / count
@@ -325,11 +313,10 @@ func Evaluate(ctx context.Context, suite Suite, config PinnedConfig, executor Ex
 }
 
 func validateObservation(evalCase Case, observation Observation) error {
-	if observation.CaseID != evalCase.ID || observation.MaterialClaimCount < 0 || observation.CitedClaimCount < 0 || observation.CitedClaimCount > observation.MaterialClaimCount ||
-		observation.UnsupportedClaimCount < 0 || observation.UnsupportedClaimCount > observation.MaterialClaimCount || observation.LatencyMilliseconds < 0 ||
+	if observation.CaseID != evalCase.ID || observation.LatencyMilliseconds < 0 ||
 		observation.InputTokens < 0 || observation.TotalTokens < observation.InputTokens || observation.EstimatedCostUSD < 0 || math.IsNaN(observation.EstimatedCostUSD) || math.IsInf(observation.EstimatedCostUSD, 0) ||
-		hasBlankOrDuplicate(observation.RetrievedEvidenceIDs) || hasBlankOrDuplicate(observation.CitationEvidenceIDs) || hasBlankOrDuplicate(observation.InvariantFailures) ||
-		hasBlankOrDuplicate(observation.RequiredFactsFound) || hasBlankOrDuplicate(observation.ForbiddenClaimsFound) {
+		hasBlankOrDuplicate(observation.RetrievedEvidenceIDs) || hasBlankOrDuplicate(observation.CitationSourceIDs) || hasBlankOrDuplicate(observation.InvariantFailures) ||
+		hasBlankOrDuplicate(observation.RequiredFactsFound) || hasBlankOrDuplicate(observation.ForbiddenFactsFound) {
 		return errors.New("RAG Eval observation is invalid")
 	}
 	if observation.JudgeScore != nil && (*observation.JudgeScore < 0 || *observation.JudgeScore > 1 || math.IsNaN(*observation.JudgeScore)) {
@@ -359,19 +346,13 @@ func caseFailures(evalCase Case, observation Observation, recall, precision floa
 		failures = append(failures, "expected_evidence")
 	}
 	if precision < 1 {
-		failures = append(failures, "citation_correctness")
-	}
-	if observation.MaterialClaimCount == 0 || observation.CitedClaimCount != observation.MaterialClaimCount {
-		failures = append(failures, "claim_coverage")
-	}
-	if observation.UnsupportedClaimCount != 0 {
-		failures = append(failures, "unsupported_claim")
+		failures = append(failures, "source_reference_correctness")
 	}
 	if !containsAll(observation.RequiredFactsFound, evalCase.RequiredFacts) {
 		failures = append(failures, "required_facts")
 	}
-	if len(observation.ForbiddenClaimsFound) != 0 {
-		failures = append(failures, "forbidden_claims")
+	if len(observation.ForbiddenFactsFound) != 0 {
+		failures = append(failures, "forbidden_facts")
 	}
 	return failures
 }
@@ -390,14 +371,8 @@ func aggregateFailures(report Report, thresholds Thresholds) []string {
 	if report.Metrics.MRR < thresholds.MinMRR {
 		failures = append(failures, "mrr")
 	}
-	if report.Metrics.CitationPrecision < thresholds.MinCitationPrecision {
-		failures = append(failures, "citation_precision")
-	}
-	if report.Metrics.ClaimCoverage < thresholds.MinClaimCoverage {
-		failures = append(failures, "claim_coverage")
-	}
-	if report.Metrics.UnsupportedClaimRate > thresholds.MaxUnsupportedClaimRate {
-		failures = append(failures, "unsupported_claim_rate")
+	if report.Metrics.SourceReferencePrecision < thresholds.MinSourceReferencePrecision {
+		failures = append(failures, "source_reference_precision")
 	}
 	if report.Metrics.P95LatencyMilliseconds > thresholds.MaxP95LatencyMilliseconds {
 		failures = append(failures, "p95_latency")

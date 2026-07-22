@@ -79,12 +79,16 @@ The versioned server-side limits on one Source's format expansion and processing
 _Avoid_: User quota, silent truncation, Worker capacity
 
 **Evidence Revision**:
-An immutable version of a Source's Normalized Source Artifact and its Evidence Unit address space. A Citation pins an Evidence Revision so later extraction, OCR, or transcription improvements cannot change the evidence originally cited.
+An immutable version of a Source's Normalized Source Artifact and its Evidence Unit address space. A legacy precise Citation pins an Evidence Revision so later extraction, OCR, or transcription improvements cannot change the evidence originally cited.
 _Avoid_: Source version, index version
 
 **Evidence Unit**:
-A stable, source-native addressable span within a Normalized Source Artifact, such as a page text range, slide element, transcript interval, or image region. Citations resolve to Evidence Units or ranges of them, never to retrieval-index records.
+A stable, source-native addressable span within a Normalized Source Artifact, such as a page text range, slide element, transcript interval, or image region. Legacy precise Citations resolve to Evidence Units or ranges of them, never to retrieval-index records.
 _Avoid_: Chunk, vector point when discussing citation identity
+
+**Source Reference**:
+An ordered, Source-level Citation declared by an inline `[source:<source_id>]` marker in a plain-text Final Draft. The Source must have returned structurally valid Evidence in an accepted search result for that Run, but the reference does not promise a page, Unit, excerpt, or rune range.
+_Avoid_: Claim citation, exact quote, Evidence range
 
 **Retrieval Chunk**:
 A rebuildable, possibly overlapping evidence window formed from one or more Evidence Units for candidate retrieval. Its boundaries and identifiers may change when retrieval policy changes without changing Citation identity.
@@ -121,7 +125,7 @@ The fixed set of immutable Sources and their active Evidence Revisions selected 
 _Avoid_: Current Sources, live Notebook contents
 
 **Grounding Outcome**:
-The Run-owned classification of a published answer as Source-grounded, `source_free`, or historical `zero_support`. It is determined from accepted Evidence ranges, verified Claim Support Records, and Citations rather than duplicated on the Assistant Message. Degraded research with Evidence remains grounded; degraded research without Evidence may remain `source_free`.
+The Run-owned classification of a newly published answer as `source_less`, `source_free`, or `source_cited`. Selected-Source Runs always attempt Evidence search; valid allowlisted Source markers determine `source_cited`, while their absence determines `source_free`. Historical outcomes remain readable but are not produced by new Runs.
 _Avoid_: Message answer mode, mixed answer, UI toggle
 
 **Agent Controller**:
@@ -153,7 +157,7 @@ The accepted typed outcome of one Agent Action, containing either success data o
 _Avoid_: Tool response, log entry, Trace Event
 
 **Final Draft**:
-An accepted model-produced candidate answer that may become an Assistant Message only through the Publication Barrier.
+An accepted model-produced plain-text candidate answer that may become an Assistant Message only through Source-marker normalization and the Publication Barrier.
 _Avoid_: Assistant Message, published answer, raw model response
 
 **Run Budget**:
@@ -169,12 +173,8 @@ The component that constructs the bounded input for the next model call from aut
 _Avoid_: Transcript replay, memory store, model snapshot
 
 **Publication Barrier**:
-The final transactional authorization, Source-availability, and Citation-validity check that alone may turn an Agent draft into a durable Assistant Message. Late or incomplete work cannot bypass it.
+The final transactional authorization, Source-availability, and Source-reference-validity check that alone may turn an Agent draft into a durable Assistant Message. It revalidates execution authority and provenance, not textual claim support. Late or incomplete work cannot bypass it.
 _Avoid_: Stream completion, model success
-
-**Claim Support Record**:
-A typed verification result that maps one factual or synthesized Final Draft claim to its cited Evidence handles and records whether that Evidence fully supports the claim. It contains no hidden model reasoning and cannot replace deterministic Citation identity and authorization checks.
-_Avoid_: Chain of thought, Citation marker, verifier prose
 
 **Retrieval Scope**:
 The server-constructed intersection of an authorized Notebook and a Run Evidence Set that every retrieval channel must enforce before returning candidates.

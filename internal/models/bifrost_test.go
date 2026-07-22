@@ -62,107 +62,28 @@ func TestBifrostClientReturnsANonStreamingFinalDecision(t *testing.T) {
 	}
 }
 
-func TestBifrostParsesGroundedFinalDraftAsTypedClaims(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var request struct {
-			ResponseFormat struct {
-				Type string `json:"type"`
-			} `json:"response_format"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			t.Fatal(err)
-		}
-		if request.ResponseFormat.Type != "json_object" {
-			t.Fatalf("response_format=%+v", request.ResponseFormat)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"text\":\"The launch is 20 July.\",\"claims\":[{\"text\":\"The launch is 20 July.\",\"citations\":[{\"source_id\":\"src_a\",\"evidence_revision_id\":\"evr_a\",\"unit_id\":\"unit_a\",\"start_rune\":0,\"end_rune\":27}]}]}"},"finish_reason":"stop"}]}`))
-	}))
-	defer server.Close()
-	outcome, err := NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
-		Model: "composer", FinalDraftFormat: FinalDraftFormatGroundedV1,
-		Messages: []ModelMessage{{Role: RoleSystem, Content: "Return grounded JSON."}, {Role: RoleUser, Content: "When?"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if outcome.Final == nil || len(outcome.Final.Claims) != 1 || outcome.Final.Claims[0].Citations[0].UnitID != "unit_a" {
-		t.Fatalf("outcome=%+v", outcome)
-	}
-}
-
-func TestBifrostOptionalGroundedFinalDecodesVoluntaryJSON(t *testing.T) {
+func TestBifrostTreatsJSONLookingAssistantContentAsPlainText(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request map[string]json.RawMessage
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatal(err)
 		}
 		if _, exists := request["response_format"]; exists {
-			t.Fatalf("optional grounded request enabled response_format: %s", request["response_format"])
+			t.Fatalf("conversational request enabled response_format: %s", request["response_format"])
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"text\":\"General knowledge answer.\",\"claims\":[]}"},"finish_reason":"stop"}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{\"text\":\"literal user-facing JSON\"}"},"finish_reason":"stop"}]}`))
 	}))
 	defer server.Close()
-
 	outcome, err := NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
-		Model: "composer", FinalDraftFormat: FinalDraftFormatGroundedOptionalV1,
-		Messages: []ModelMessage{{Role: RoleSystem, Content: "Use Sources only when needed."}, {Role: RoleUser, Content: "What can you do?"}},
+		Model:    "composer",
+		Messages: []ModelMessage{{Role: RoleSystem, Content: "Answer in plain text."}, {Role: RoleUser, Content: "Show JSON."}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if outcome.Final == nil || outcome.Final.Text != "General knowledge answer." || len(outcome.Final.Claims) != 0 {
+	if outcome.Final == nil || outcome.Final.Text != `{"text":"literal user-facing JSON"}` {
 		t.Fatalf("outcome=%+v", outcome)
-	}
-}
-
-func TestBifrostOptionalGroundedFinalAcceptsPlainText(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Ordinary conversational answer."},"finish_reason":"stop"}]}`))
-	}))
-	defer server.Close()
-
-	outcome, err := NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
-		Model: "composer", FinalDraftFormat: FinalDraftFormatGroundedOptionalV1,
-		Messages: []ModelMessage{{Role: RoleSystem, Content: "Use Sources only when needed."}, {Role: RoleUser, Content: "What can you do?"}},
-	})
-	if err != nil || outcome.Final == nil || outcome.Final.Text != "Ordinary conversational answer." || len(outcome.Final.Claims) != 0 {
-		t.Fatalf("outcome=%+v err=%v", outcome, err)
-	}
-}
-
-func TestBifrostOptionalGroundedFinalAcceptsMalformedJSONAsText(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"{not actually JSON}"},"finish_reason":"stop"}]}`))
-	}))
-	defer server.Close()
-
-	outcome, err := NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
-		Model: "composer", FinalDraftFormat: FinalDraftFormatGroundedOptionalV1,
-		Messages: []ModelMessage{{Role: RoleSystem, Content: "Use Sources only when needed."}, {Role: RoleUser, Content: "Show this notation."}},
-	})
-	if err != nil || outcome.Final == nil || outcome.Final.Text != "{not actually JSON}" || len(outcome.Final.Claims) != 0 {
-		t.Fatalf("outcome=%+v err=%v", outcome, err)
-	}
-}
-
-func TestBifrostRequiredGroundedFinalRejectsPlainText(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Unsupported plain text."},"finish_reason":"stop"}]}`))
-	}))
-	defer server.Close()
-
-	_, err := NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
-		Model: "composer", FinalDraftFormat: FinalDraftFormatGroundedV1,
-		Messages: []ModelMessage{{Role: RoleSystem, Content: "Return JSON."}, {Role: RoleUser, Content: "What do the Sources say?"}},
-	})
-	var modelErr *ModelError
-	if !errors.As(err, &modelErr) || modelErr.Kind != ErrorInvalidResponse {
-		t.Fatalf("error=%v", err)
 	}
 }
 
@@ -213,6 +134,74 @@ func TestBifrostClientEncodesDefinitionsAndDecodesOrderedActionProposals(t *test
 	first, second := decision.Proposal.Actions[0], decision.Proposal.Actions[1]
 	if first.Name != "current_time" || string(first.Input) != `{"time_zone":"Asia/Shanghai"}` || second.Name != "calculate" || string(second.Input) != `{"operation":"subtract","operands":["12.5","3.2"]}` {
 		t.Fatalf("ordered actions = %+v", decision.Proposal.Actions)
+	}
+}
+
+func TestBifrostClientForcesASpecificAction(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ToolChoice struct {
+				Type     string `json:"type"`
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tool_choice"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Fatal(err)
+		}
+		if request.ToolChoice.Type != "function" || request.ToolChoice.Function.Name != "search_evidence" {
+			t.Fatalf("tool choice = %+v", request.ToolChoice)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"search-call","type":"function","function":{"name":"search_evidence","arguments":"{\"query\":\"degree requirements\",\"purpose\":\"answer\"}"}}]},"finish_reason":"tool_calls"}]}`))
+	}))
+	defer server.Close()
+
+	outcome, err := NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
+		Model: "composer", RequiredActionName: "search_evidence",
+		Messages: []ModelMessage{{Role: RoleUser, Content: "What are the requirements?"}},
+		ActionDefinitions: []ActionDefinition{{
+			Name: "search_evidence", Description: "Search selected Sources.", InputSchema: json.RawMessage(`{"type":"object"}`),
+		}},
+	})
+	if err != nil || outcome.Proposal == nil || outcome.Proposal.Actions[0].Name != "search_evidence" {
+		t.Fatalf("outcome=%+v err=%v", outcome, err)
+	}
+}
+
+func TestBifrostClientRejectsAProviderProposalThatViolatesTheRequiredAction(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"wrong-call","type":"function","function":{"name":"calculate","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`))
+	}))
+	defer server.Close()
+
+	_, err := NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
+		Model: "composer", RequiredActionName: "search_evidence",
+		Messages: []ModelMessage{{Role: RoleUser, Content: "What are the requirements?"}},
+		ActionDefinitions: []ActionDefinition{
+			{Name: "search_evidence", Description: "Search selected Sources.", InputSchema: json.RawMessage(`{"type":"object"}`)},
+			{Name: "calculate", Description: "Calculate values.", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		},
+	})
+	requireModelErrorKind(t, err, ErrorInvalidResponse)
+}
+
+func TestBifrostClientAcceptsARequiredActionWhenTheGatewayReportsStop(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"search-call","type":"function","function":{"name":"search_evidence","arguments":"{\"query\":\"degree requirements\",\"purpose\":\"answer\"}"}}]},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	outcome, err := NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
+		Model: "composer", RequiredActionName: "search_evidence",
+		Messages: []ModelMessage{{Role: RoleUser, Content: "What are the requirements?"}},
+		ActionDefinitions: []ActionDefinition{{
+			Name: "search_evidence", Description: "Search selected Sources.", InputSchema: json.RawMessage(`{"type":"object"}`),
+		}},
+	})
+	if err != nil || outcome.Proposal == nil || outcome.Proposal.Actions[0].Name != "search_evidence" {
+		t.Fatalf("outcome=%+v err=%v", outcome, err)
 	}
 }
 

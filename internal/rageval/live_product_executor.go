@@ -31,24 +31,21 @@ type ProductSourceCase struct {
 
 type liveProductModel interface {
 	agent.DecisionModel
-	agent.ClaimSupportVerifier
 	Embed(context.Context, models.EmbeddingRequest) (models.EmbeddingOutcome, error)
 	Rerank(context.Context, models.RerankRequest) (models.RerankOutcome, error)
 }
 
 type LiveProductExecutor struct {
-	pool                  *pgxpool.Pool
-	manifest              ProductSourceManifest
-	caseByID              map[string]ProductSourceCase
-	controller            *agent.Controller
-	meter                 *meteredProductModel
-	verifierModel         string
-	verifierPromptVersion string
+	pool       *pgxpool.Pool
+	manifest   ProductSourceManifest
+	caseByID   map[string]ProductSourceCase
+	controller *agent.Controller
+	meter      *meteredProductModel
 }
 
-func NewLiveProductExecutor(pool *pgxpool.Pool, vectors *qdrantstore.Client, model liveProductModel, manifest ProductSourceManifest, verifierModel, verifierPromptVersion string) (*LiveProductExecutor, error) {
+func NewLiveProductExecutor(pool *pgxpool.Pool, vectors *qdrantstore.Client, model liveProductModel, manifest ProductSourceManifest) (*LiveProductExecutor, error) {
 	if pool == nil || vectors == nil || model == nil || manifest.SchemaVersion != 1 || strings.TrimSpace(manifest.IndexVersionID) == "" ||
-		strings.TrimSpace(manifest.UserID) == "" || strings.TrimSpace(manifest.NotebookID) == "" || len(manifest.Cases) == 0 || strings.TrimSpace(verifierModel) == "" || strings.TrimSpace(verifierPromptVersion) == "" {
+		strings.TrimSpace(manifest.UserID) == "" || strings.TrimSpace(manifest.NotebookID) == "" || len(manifest.Cases) == 0 {
 		return nil, errors.New("invalid live product Eval configuration")
 	}
 	caseByID := make(map[string]ProductSourceCase, len(manifest.Cases))
@@ -73,11 +70,10 @@ func NewLiveProductExecutor(pool *pgxpool.Pool, vectors *qdrantstore.Client, mod
 	if err != nil {
 		return nil, err
 	}
-	grounder := agent.NewGroundingService(pool, meter, agent.GroundingConfig{VerifierModel: verifierModel, VerifierPromptVersion: verifierPromptVersion})
+	grounder := agent.NewGroundingService(pool)
 	runtime := agent.NewPostgresRuntime(pool, agent.GroundedSystemPrompt, nil, agent.WithGroundingService(grounder))
 	return &LiveProductExecutor{
 		pool: pool, manifest: manifest, caseByID: caseByID, meter: meter,
-		verifierModel: verifierModel, verifierPromptVersion: verifierPromptVersion,
 		controller: agent.NewController(runtime, meter, registry),
 	}, nil
 }
@@ -92,9 +88,6 @@ func (e *LiveProductExecutor) ExecuteCase(ctx context.Context, evalCase Case, co
 	}
 	if config.PromptVersion != agent.GroundedPromptVersion {
 		return Observation{}, errors.New("live product Eval requires the grounded Agent prompt")
-	}
-	if config.VerifierModel != e.verifierModel || config.VerifierPromptVersion != e.verifierPromptVersion {
-		return Observation{}, errors.New("live product Eval verifier does not match pinned configuration")
 	}
 	if err := validateProductRunCase(evalCase, ProductRunCase{CaseID: evalCase.ID, RunID: "pending", FixtureSources: manifestCase.FixtureSources, EvidenceUnits: manifestCase.EvidenceUnits}); err != nil {
 		return Observation{}, err
@@ -186,12 +179,6 @@ func (m *meteredProductModel) add(input, total *int64, cost models.ModelCost) {
 
 func (m *meteredProductModel) Decide(ctx context.Context, request models.ModelRequest) (models.ModelOutcome, error) {
 	outcome, err := m.next.Decide(ctx, request)
-	m.add(outcome.Metadata.InputTokens, outcome.Metadata.TotalTokens, outcome.Metadata.Cost)
-	return outcome, err
-}
-
-func (m *meteredProductModel) VerifyClaimSupport(ctx context.Context, request models.ClaimSupportRequest) (models.ClaimSupportOutcome, error) {
-	outcome, err := m.next.VerifyClaimSupport(ctx, request)
 	m.add(outcome.Metadata.InputTokens, outcome.Metadata.TotalTokens, outcome.Metadata.Cost)
 	return outcome, err
 }
