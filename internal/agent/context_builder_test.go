@@ -9,6 +9,9 @@ import (
 func TestGroundedSystemPromptDescribesPlainTextSourceMarkerContract(t *testing.T) {
 	for _, required := range []string{
 		"always use search_evidence before answering",
+		"current request rather than continuing an older topic",
+		"not a reason to refuse",
+		"actually asks for information from selected Sources",
 		"[source:<source_id>]",
 		"ordinary plain text",
 		"omit Source markers",

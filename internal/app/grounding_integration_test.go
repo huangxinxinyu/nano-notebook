@@ -208,6 +208,109 @@ func TestControllerPublishesPlainTextAfterSearchReturnsNoEvidence(t *testing.T) 
 	}
 }
 
+func TestGroundedControllerBuildsQueryContextFromBoundedCompletedPairs(t *testing.T) {
+	api, attempt, _, _ := groundingFixture(t, "query-context-grounding@example.com", "src_query_context", "evr_query_context")
+	ctx := context.Background()
+	var chatID, userID string
+	var currentCreatedAt string
+	if err := api.db.Pool().QueryRow(ctx, `
+		select r.chat_id,r.user_id,to_char(m.created_at,'YYYY-MM-DD HH24:MI:SS.USOF')
+		from agent_runs r join chat_messages m on m.id=r.input_message_id where r.id=$1
+	`, attempt.RunID).Scan(&chatID, &userID, &currentCreatedAt); err != nil {
+		t.Fatal(err)
+	}
+	for index := 1; index <= 4; index++ {
+		userMessageID := fmt.Sprintf("msg_query_context_user_%d", index)
+		assistantMessageID := fmt.Sprintf("msg_query_context_assistant_%d", index)
+		answer := fmt.Sprintf("completed-answer-%d", index)
+		if index == 4 {
+			answer += " " + strings.Repeat("OLD_DEGREE_TOPIC ", 1000)
+		}
+		if _, err := api.db.Pool().Exec(ctx, `
+			insert into chat_messages(id,chat_id,role,content,created_at) values
+				($1,$3,'user',$4,$7::timestamptz-(($6::int+1)*interval '2 minutes')),
+				($2,$3,'assistant',$5,$7::timestamptz-(($6::int+1)*interval '2 minutes')+interval '1 second')
+		`, userMessageID, assistantMessageID, chatID, fmt.Sprintf("completed-question-%d", index), answer, 4-index, currentCreatedAt); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := api.db.Pool().Exec(ctx, `
+			insert into agent_runs(id,user_id,chat_id,input_message_id,output_message_id,status,model,prompt_version,agent_config_id,created_at,started_at,finished_at)
+			values($1,$2,$3,$4,$5,'completed','aliyun/qwen-flash',$6,'query-context-fixture',$7::timestamptz-(($8::int+1)*interval '2 minutes'),$7::timestamptz-(($8::int+1)*interval '2 minutes'),$7::timestamptz-(($8::int+1)*interval '2 minutes')+interval '1 second')
+		`, fmt.Sprintf("run_query_context_%d", index), userID, chatID, userMessageID, assistantMessageID,
+			agent.GroundedPromptVersion, currentCreatedAt, 4-index); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := api.db.Pool().Exec(ctx, `
+		insert into chat_messages(id,chat_id,role,content,created_at)
+		values('msg_query_context_unpaired',$1,'user','UNPAIRED_OLD_TOPIC',$2::timestamptz-interval '10 seconds')
+	`, chatID, currentCreatedAt); err != nil {
+		t.Fatal(err)
+	}
+
+	model := &sequenceDecisionModel{decisions: []models.ModelDecision{
+		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{{
+			Name: "search_evidence", Input: json.RawMessage(`{"query":"When is launch?","purpose":"answer the current request"}`),
+		}}}},
+		{Final: &models.FinalDraft{Text: "Hello after retrieval."}},
+	}}
+	grounder := agent.NewGroundingService(api.db.Pool())
+	runtime := agent.NewPostgresRuntime(api.db.Pool(), agent.BareSystemPrompt, nil, agent.WithGroundingService(grounder))
+	registry, err := agent.NewActionRegistry(agent.NewSearchEvidenceAction(emptyEvidenceBackend{result: retrieval.SearchResult{CompleteEmpty: true}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agent.NewController(runtime, model, registry).Execute(ctx, attempt); err != nil {
+		t.Fatal(err)
+	}
+	if len(model.requests) != 2 {
+		t.Fatalf("model request count = %d, want contextualizer + composer", len(model.requests))
+	}
+	queryRequest := model.requests[0]
+	if queryRequest.RequiredActionName != "search_evidence" || len(queryRequest.ActionDefinitions) != 1 ||
+		queryRequest.ActionDefinitions[0].Name != "search_evidence" || len(queryRequest.Messages) != 2 {
+		t.Fatalf("query contextualizer request = %+v", queryRequest)
+	}
+	queryContext := queryRequest.Messages[0].Content + "\n" + queryRequest.Messages[1].Content
+	for _, required := range []string{
+		"current Message is authoritative",
+		"preserve its key terms",
+		"Do not translate ambiguous terms",
+		"copy it rather than choose an interpretation",
+		"When is launch?",
+		"completed-question-2",
+		"completed-question-3",
+		"completed-question-4",
+	} {
+		if !strings.Contains(queryContext, required) {
+			t.Fatalf("query context is missing %q: %s", required, queryContext)
+		}
+	}
+	for _, forbidden := range []string{"completed-question-1", "UNPAIRED_OLD_TOPIC"} {
+		if strings.Contains(queryContext, forbidden) {
+			t.Fatalf("query context contains %q: %s", forbidden, queryContext)
+		}
+	}
+	if strings.Count(queryContext, "OLD_DEGREE_TOPIC") >= 1000 {
+		t.Fatalf("long prior answer was not bounded")
+	}
+	var composerContext strings.Builder
+	for _, message := range model.requests[1].Messages {
+		composerContext.WriteString(message.Content)
+		composerContext.WriteByte('\n')
+	}
+	for _, required := range []string{"When is launch?", "complete_empty"} {
+		if !strings.Contains(composerContext.String(), required) {
+			t.Fatalf("composer context is missing %q: %s", required, composerContext.String())
+		}
+	}
+	for _, forbidden := range []string{"completed-question-1", "completed-question-2", "completed-question-3", "completed-question-4", "UNPAIRED_OLD_TOPIC", "OLD_DEGREE_TOPIC"} {
+		if strings.Contains(composerContext.String(), forbidden) {
+			t.Fatalf("composer context contains %q: %s", forbidden, composerContext.String())
+		}
+	}
+}
+
 func TestPublicationAtomicallyCopiesSourceReferencesAndRejectsSourceDeletionRace(t *testing.T) {
 	for _, removeBeforePublish := range []bool{false, true} {
 		t.Run(map[bool]string{false: "publishes", true: "deletion fenced"}[removeBeforePublish], func(t *testing.T) {

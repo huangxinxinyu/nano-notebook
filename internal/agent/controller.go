@@ -41,6 +41,10 @@ type ReplayTraceRuntime interface {
 	ReplayStager() ReplayStager
 }
 
+type QueryContextRuntime interface {
+	BuildQueryContextRequest(context.Context, Execution, models.ActionDefinition) (models.ModelRequest, models.ActionProposal, int, error)
+}
+
 type FinalPreparationRuntime interface {
 	PrepareFinal(context.Context, Attempt, Execution, CheckpointPrefix, models.FinalDraft) (models.FinalDraft, error)
 }
@@ -104,6 +108,25 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		}
 		if !actionCapable && execution.FinalDecisionLimit < 1 {
 			return c.fail(ctx, attempt, ErrorAgentBudgetExhausted, errors.New("no reserved Final decision is available"))
+		}
+		if execution.PromptVersion == GroundedPromptVersion {
+			requiredAction, requiredErr := groundedRequiredAction(prefix)
+			if requiredErr != nil {
+				return c.fail(ctx, attempt, "context_failed", requiredErr)
+			}
+			if requiredAction != "" {
+				if !actionCapable {
+					return c.fail(ctx, attempt, ErrorAgentBudgetExhausted, ErrGroundingIncomplete)
+				}
+				definition, ok := actionDefinitionByName(definitions, requiredAction)
+				if !ok {
+					return c.fail(ctx, attempt, "context_failed", ErrGroundingIncomplete)
+				}
+				if err := c.acceptContextualizedSearch(ctx, tracer, attempt, execution, prefix, definition); err != nil {
+					return err
+				}
+				continue
+			}
 		}
 		request, err := c.runtime.BuildDecisionRequest(ctx, execution, prefix, definitions)
 		if err != nil {
@@ -191,6 +214,115 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		}
 		forceFinalDecision = false
 	}
+}
+
+func (c *Controller) acceptContextualizedSearch(
+	ctx context.Context,
+	tracer *agentobs.Tracer,
+	attempt Attempt,
+	execution Execution,
+	prefix CheckpointPrefix,
+	definition models.ActionDefinition,
+) error {
+	runtime, ok := c.runtime.(QueryContextRuntime)
+	if !ok {
+		return c.fail(ctx, attempt, "context_failed", errors.New("query contextualization is unavailable"))
+	}
+	request, fallback, historyPairCount, err := runtime.BuildQueryContextRequest(ctx, execution, definition)
+	if err != nil {
+		return c.fail(ctx, attempt, "context_failed", err)
+	}
+	if err := c.registry.ValidateProposal([]models.ActionProposal{fallback}); err != nil || fallback.Name != "search_evidence" {
+		if err == nil {
+			err = errors.New("query contextualization fallback must call search_evidence")
+		}
+		return c.fail(ctx, attempt, "context_failed", err)
+	}
+	if err := c.runtime.CheckAuthority(ctx, attempt); err != nil {
+		return c.handleRuntimeError(ctx, attempt, err)
+	}
+	contextualizationContext := ctx
+	if tracer != nil {
+		contextualizationContext, _, err = tracer.StartSpan(ctx, agentobs.SpanStart{
+			IdentityKey: TraceQueryContextStartIdentity(attempt.RunID, attempt.AttemptNo),
+			Name:        TraceSpanQueryContextualization,
+			Attributes: []agentobs.Attribute{
+				agentobs.Int64(TraceKeyQueryContextHistoryPairCount, int64(historyPairCount)),
+			},
+		})
+		if err != nil {
+			recordingErr := &instrumentation.RecordingError{Phase: instrumentation.RecordingStart, Err: err}
+			if _, result := c.handleRecordingError(ctx, attempt, recordingErr); result != nil {
+				return result
+			}
+			return recordingErr
+		}
+	}
+	decisionNo := prefix.AcceptedDecisions + 1
+	var outcome models.ModelOutcome
+	if tracer != nil {
+		modelIdentity := TraceQueryContextModelStartIdentity(attempt.RunID, attempt.AttemptNo, decisionNo)
+		outcome, err = InvokeDecisionModel(contextualizationContext, tracer, c.model, request, decisionNo, ModelTraceOptions{
+			StartIdentity: modelIdentity, RequestIdentity: modelIdentity + "/replay/request",
+			DecisionIdentity: modelIdentity + "/replay/decision", ReplayStager: c.replayStager(),
+			Phase: ModelPhaseQueryContextualization,
+		})
+	} else {
+		outcome, err = c.model.Decide(ctx, request)
+	}
+	if handled, result := c.handleRecordingError(ctx, attempt, err); handled {
+		return result
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if tracer != nil {
+			_ = tracer.EndSpan(contextualizationContext, agentobs.SpanEnd{Name: TraceSpanQueryContextualization, Status: agentobs.StatusCancelled})
+		}
+		return ctxErr
+	}
+	proposal := fallback
+	fallbackUsed := true
+	if err == nil {
+		decision := outcome.ModelDecision
+		if decision.Validate() == nil && decision.Proposal != nil && len(decision.Proposal.Actions) == 1 &&
+			decision.Proposal.Actions[0].Name == "search_evidence" && c.registry.ValidateProposal(decision.Proposal.Actions) == nil {
+			if preserved, preserveErr := preserveCurrentSearchQuery(decision.Proposal.Actions[0], fallback); preserveErr == nil {
+				proposal = preserved
+				fallbackUsed = false
+			}
+		}
+	}
+	if tracer != nil {
+		if traceErr := tracer.EndSpan(contextualizationContext, agentobs.SpanEnd{
+			Name: TraceSpanQueryContextualization, Status: agentobs.StatusOK,
+			Attributes: []agentobs.Attribute{agentobs.Bool(TraceKeyQueryContextFallbackUsed, fallbackUsed)},
+		}); traceErr != nil {
+			recordingErr := &instrumentation.RecordingError{Phase: instrumentation.RecordingTerminal, Err: traceErr}
+			if _, result := c.handleRecordingError(ctx, attempt, recordingErr); result != nil {
+				return result
+			}
+			return recordingErr
+		}
+	}
+	if err := c.runtime.CheckAuthority(ctx, attempt); err != nil {
+		return c.handleRuntimeError(ctx, attempt, err)
+	}
+	checkpoint, err := NewProposalCheckpoint(decisionNo, models.ActionProposalBatch{Actions: []models.ActionProposal{proposal}})
+	if err != nil {
+		return c.fail(ctx, attempt, "context_failed", err)
+	}
+	if _, err := c.runtime.AppendCheckpoint(ctx, attempt, checkpoint); err != nil {
+		return c.handleRuntimeError(ctx, attempt, err)
+	}
+	return nil
+}
+
+func actionDefinitionByName(definitions []models.ActionDefinition, name string) (models.ActionDefinition, bool) {
+	for _, definition := range definitions {
+		if definition.Name == name {
+			return definition, true
+		}
+	}
+	return models.ActionDefinition{}, false
 }
 
 func (c *Controller) executeAction(

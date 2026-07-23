@@ -26,7 +26,13 @@ func (r *PostgresRuntime) BuildDecisionRequest(
 	if prefix.Final != nil {
 		return models.ModelRequest{}, errors.New("Final Draft does not require another model decision")
 	}
-	request, err := r.Build(ctx, execution)
+	var request models.ModelRequest
+	var err error
+	if execution.PromptVersion == GroundedPromptVersion {
+		request, err = r.buildGroundedComposerRequest(ctx, execution)
+	} else {
+		request, err = r.Build(ctx, execution)
+	}
 	if err != nil {
 		return models.ModelRequest{}, err
 	}
@@ -63,7 +69,7 @@ func (r *PostgresRuntime) BuildDecisionRequest(
 		if err != nil {
 			return models.ModelRequest{}, err
 		}
-		if request.RequiredActionName != "" && !hasActionDefinition(request.ActionDefinitions, request.RequiredActionName) {
+		if request.RequiredActionName != "" {
 			return models.ModelRequest{}, ErrGroundingIncomplete
 		}
 	}
@@ -79,15 +85,6 @@ func groundedRequiredAction(prefix CheckpointPrefix) (string, error) {
 		return "search_evidence", nil
 	}
 	return "", nil
-}
-
-func hasActionDefinition(definitions []models.ActionDefinition, name string) bool {
-	for _, definition := range definitions {
-		if definition.Name == name {
-			return true
-		}
-	}
-	return false
 }
 
 func cloneActionDefinitions(definitions []models.ActionDefinition) []models.ActionDefinition {

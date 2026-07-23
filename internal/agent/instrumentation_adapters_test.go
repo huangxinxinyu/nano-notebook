@@ -50,6 +50,36 @@ func TestModelAdapterRecordsNormalizedMetadataWithoutContent(t *testing.T) {
 	}
 }
 
+func TestModelAdapterLabelsAnswerCompositionPhaseWithoutContent(t *testing.T) {
+	tracer, exporter, ctx := instrumentationTestTracer(t)
+	model := outcomeModelFunc(func(context.Context, models.ModelRequest) (models.ModelOutcome, error) {
+		return models.ModelOutcome{
+			ModelDecision: models.ModelDecision{Final: &models.FinalDraft{Text: "private response"}},
+			Metadata: models.ModelCallMetadata{
+				RequestedModel: "aliyun/qwen-flash", ResultKind: models.ModelResultFinalDraft,
+			},
+		}, nil
+	})
+	_, err := InvokeDecisionModel(ctx, tracer, model, models.ModelRequest{
+		Model: "aliyun/qwen-flash", Messages: []models.ModelMessage{{Role: models.RoleUser, Content: "private prompt"}},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := exporter.Records()
+	start := records[len(records)-2]
+	if got := stringAttribute(start, "nano.model.phase"); got != "answer_composition" {
+		t.Fatalf("model phase = %q, want answer_composition", got)
+	}
+	payload, err := start.CanonicalPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), "private prompt") {
+		t.Fatalf("model phase Trace leaked prompt: %s", payload)
+	}
+}
+
 func TestModelAdapterStagesReplayAndBindsBothSidesOfThePhysicalCall(t *testing.T) {
 	tracer, exporter, ctx := instrumentationTestTracer(t)
 	stager := &recordingReplayStager{}

@@ -9,10 +9,16 @@ import (
 const TraceSemanticConventionVersion = 1
 
 const (
-	TraceSpanAgentExecution = semconv.AgentExecution
-	TraceSpanJobAttempt     = "nano.job.attempt"
-	TraceSpanPublication    = "nano.publication"
-	TraceSpanGrounding      = "nano.grounding"
+	ModelPhaseAnswerComposition      = "answer_composition"
+	ModelPhaseQueryContextualization = "query_contextualization"
+)
+
+const (
+	TraceSpanAgentExecution         = semconv.AgentExecution
+	TraceSpanJobAttempt             = "nano.job.attempt"
+	TraceSpanPublication            = "nano.publication"
+	TraceSpanGrounding              = "nano.grounding"
+	TraceSpanQueryContextualization = "nano.rag.query_contextualization"
 )
 
 func TraceAttemptStartIdentity(runID string, attemptNo int) string {
@@ -25,6 +31,14 @@ func TraceActionStartIdentity(runID string, attemptNo int, logicalActionID strin
 
 func TraceModelStartIdentity(runID string, attemptNo, decisionNo int) string {
 	return fmt.Sprintf("run/%s/attempt/%d/model/%d/start", runID, attemptNo, decisionNo)
+}
+
+func TraceQueryContextModelStartIdentity(runID string, attemptNo, decisionNo int) string {
+	return fmt.Sprintf("run/%s/attempt/%d/query-context/model/%d/start", runID, attemptNo, decisionNo)
+}
+
+func TraceQueryContextStartIdentity(runID string, attemptNo int) string {
+	return fmt.Sprintf("run/%s/attempt/%d/query-context/start", runID, attemptNo)
 }
 
 const (
@@ -42,40 +56,43 @@ const (
 )
 
 const (
-	TraceKeyRunID                      = "nano.run.id"
-	TraceKeyRunStatus                  = "nano.run.status"
-	TraceKeyRunModel                   = "nano.run.model"
-	TraceKeyPromptVersion              = "nano.run.prompt_version"
-	TraceKeyJobID                      = "nano.job.id"
-	TraceKeyAttemptNumber              = "nano.attempt.number"
-	TraceKeyCheckpointKind             = "nano.checkpoint.kind"
-	TraceKeyDecisionNumber             = "nano.decision.number"
-	TraceKeyActionIndex                = "nano.action.index"
-	TraceKeyErrorCode                  = "nano.error.code"
-	TraceKeySearchPurpose              = "nano.rag.search.purpose"
-	TraceKeyDenseCompleted             = "nano.rag.dense.completed"
-	TraceKeyDenseCandidateCount        = "nano.rag.dense.candidate_count"
-	TraceKeyDenseCandidateIDs          = "nano.rag.dense.candidate_ids"
-	TraceKeyBM25Completed              = "nano.rag.bm25.completed"
-	TraceKeyBM25CandidateCount         = "nano.rag.bm25.candidate_count"
-	TraceKeyBM25CandidateIDs           = "nano.rag.bm25.candidate_ids"
-	TraceKeyRRFTransitionIDs           = "nano.rag.rrf.candidate_ids"
-	TraceKeyEvidenceLoadIDs            = "nano.rag.evidence_load.candidate_ids"
-	TraceKeyRerankTransitionIDs        = "nano.rag.rerank.candidate_ids"
-	TraceKeySelectedEvidenceCount      = "nano.rag.selected_evidence.count"
-	TraceKeyRetrievalDegraded          = "nano.rag.retrieval.degraded"
-	TraceKeyRetrievalDegradations      = "nano.rag.retrieval.degradations"
-	TraceKeyRetrievalCompleteEmpty     = "nano.rag.retrieval.complete_empty"
-	TraceKeyDenseDuration              = "nano.rag.dense.duration_ns"
-	TraceKeyBM25Duration               = "nano.rag.bm25.duration_ns"
-	TraceKeyRRFDuration                = "nano.rag.rrf.duration_ns"
-	TraceKeyEvidenceLoadDuration       = "nano.rag.evidence_load.duration_ns"
-	TraceKeyRerankDuration             = "nano.rag.rerank.duration_ns"
-	TraceKeyGroundingOutcome           = "nano.rag.grounding.outcome"
-	TraceKeyGroundingResearchPerformed = "nano.rag.grounding.research_performed"
-	TraceKeyGroundingResearchComplete  = "nano.rag.grounding.research_complete"
-	TraceKeyGroundingResearchDegraded  = "nano.rag.grounding.research_degraded"
-	TraceKeyEligibleSourceCount        = "nano.rag.source_reference.eligible_source_count"
-	TraceKeyValidSourceReferenceCount  = "nano.rag.source_reference.valid_count"
-	TraceKeyDiscardedSourceMarkerCount = "nano.rag.source_reference.discarded_marker_count"
+	TraceKeyRunID                        = "nano.run.id"
+	TraceKeyRunStatus                    = "nano.run.status"
+	TraceKeyRunModel                     = "nano.run.model"
+	TraceKeyModelPhase                   = "nano.model.phase"
+	TraceKeyQueryContextHistoryPairCount = "nano.rag.query_context.history_pair_count"
+	TraceKeyQueryContextFallbackUsed     = "nano.rag.query_context.fallback_used"
+	TraceKeyPromptVersion                = "nano.run.prompt_version"
+	TraceKeyJobID                        = "nano.job.id"
+	TraceKeyAttemptNumber                = "nano.attempt.number"
+	TraceKeyCheckpointKind               = "nano.checkpoint.kind"
+	TraceKeyDecisionNumber               = "nano.decision.number"
+	TraceKeyActionIndex                  = "nano.action.index"
+	TraceKeyErrorCode                    = "nano.error.code"
+	TraceKeySearchPurpose                = "nano.rag.search.purpose"
+	TraceKeyDenseCompleted               = "nano.rag.dense.completed"
+	TraceKeyDenseCandidateCount          = "nano.rag.dense.candidate_count"
+	TraceKeyDenseCandidateIDs            = "nano.rag.dense.candidate_ids"
+	TraceKeyBM25Completed                = "nano.rag.bm25.completed"
+	TraceKeyBM25CandidateCount           = "nano.rag.bm25.candidate_count"
+	TraceKeyBM25CandidateIDs             = "nano.rag.bm25.candidate_ids"
+	TraceKeyRRFTransitionIDs             = "nano.rag.rrf.candidate_ids"
+	TraceKeyEvidenceLoadIDs              = "nano.rag.evidence_load.candidate_ids"
+	TraceKeyRerankTransitionIDs          = "nano.rag.rerank.candidate_ids"
+	TraceKeySelectedEvidenceCount        = "nano.rag.selected_evidence.count"
+	TraceKeyRetrievalDegraded            = "nano.rag.retrieval.degraded"
+	TraceKeyRetrievalDegradations        = "nano.rag.retrieval.degradations"
+	TraceKeyRetrievalCompleteEmpty       = "nano.rag.retrieval.complete_empty"
+	TraceKeyDenseDuration                = "nano.rag.dense.duration_ns"
+	TraceKeyBM25Duration                 = "nano.rag.bm25.duration_ns"
+	TraceKeyRRFDuration                  = "nano.rag.rrf.duration_ns"
+	TraceKeyEvidenceLoadDuration         = "nano.rag.evidence_load.duration_ns"
+	TraceKeyRerankDuration               = "nano.rag.rerank.duration_ns"
+	TraceKeyGroundingOutcome             = "nano.rag.grounding.outcome"
+	TraceKeyGroundingResearchPerformed   = "nano.rag.grounding.research_performed"
+	TraceKeyGroundingResearchComplete    = "nano.rag.grounding.research_complete"
+	TraceKeyGroundingResearchDegraded    = "nano.rag.grounding.research_degraded"
+	TraceKeyEligibleSourceCount          = "nano.rag.source_reference.eligible_source_count"
+	TraceKeyValidSourceReferenceCount    = "nano.rag.source_reference.valid_count"
+	TraceKeyDiscardedSourceMarkerCount   = "nano.rag.source_reference.discarded_marker_count"
 )

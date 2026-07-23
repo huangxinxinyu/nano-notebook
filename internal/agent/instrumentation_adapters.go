@@ -25,6 +25,7 @@ type ModelTraceOptions struct {
 	RequestIdentity  string
 	DecisionIdentity string
 	ReplayStager     ReplayStager
+	Phase            string
 }
 
 func InvokeDecisionModel(ctx context.Context, tracer *agentobs.Tracer, model DecisionModel, request models.ModelRequest, decisionOrdinal int, optionValues ...ModelTraceOptions) (models.ModelOutcome, error) {
@@ -35,8 +36,13 @@ func InvokeDecisionModel(ctx context.Context, tracer *agentobs.Tracer, model Dec
 	if len(optionValues) > 0 {
 		options = optionValues[0]
 	}
+	phase := strings.TrimSpace(options.Phase)
+	if phase == "" {
+		phase = ModelPhaseAnswerComposition
+	}
 	startAttributes := []agentobs.Attribute{
 		agentobs.String(semconv.OperationNameKey, "decide"),
+		agentobs.String(TraceKeyModelPhase, phase),
 		agentobs.String(semconv.ModelNameKey, request.Model),
 		agentobs.Int64(semconv.DecisionOrdinalKey, int64(decisionOrdinal)),
 		agentobs.Int64(semconv.InputMessageCountKey, int64(len(request.Messages))),

@@ -37,10 +37,17 @@ If contextualization fails before an Action proposal is accepted, the Controller
 uses a bounded form of the current user Message as the deterministic search query.
 This fallback preserves always-RAG behavior and cannot resurrect an earlier topic.
 
-After retrieval, the Composer receives the original current question, bounded
-completed conversation context, and the durable Action result. The original user
-question remains the answering task; the contextualized query is retrieval input,
-not a replacement user message.
+Before accepting the proposal, the Controller ensures that the bounded current
+Message remains present in the contextualized query. If the model rewrites or
+translates away ambiguous wording, the current Message is prepended to the model's
+expansion. This deterministic preservation keeps the user's actual search terms
+while still allowing the model to append a resolved subject.
+
+After retrieval, the Composer receives only the original current question and the
+durable contextualized Action call/result, not prior Chat messages. The Action query
+carries any resolved referent needed for a follow-up. Excluding prior answers keeps
+the Composer from copying an earlier failure or treating an old answer as the
+current task.
 
 This design does not add a chat-versus-RAG router. Every selected-Source Run still
 retrieves. It also does not change the plain-text Source-marker citation contract.
@@ -80,8 +87,12 @@ raw sensitive text remains confined to Replay.
 
 - A request-builder test proves a prior Source-backed answer cannot replace a new
   self-contained current Message in the contextualizer input.
+- A Controller test proves the accepted search query preserves the bounded current
+  Message even when a model-authored expansion changes ambiguous wording.
 - Controller tests prove contextualizer failure falls back to the current Message
   and recovery does not duplicate the accepted search.
+- The Composer integration test proves prior Chat turns are excluded while the
+  current Message and durable search result remain present.
 - Integration tests cover a topic switch and a genuine follow-up in one Chat.
 - Replay/Trace tests distinguish contextualization from answer composition without
   exposing new plaintext in metadata.

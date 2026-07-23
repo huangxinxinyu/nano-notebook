@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 )
 
@@ -59,6 +60,252 @@ func TestControllerCheckpointsOrderedActionsThenFinalAndPublishesOnce(t *testing
 	}
 	if len(runtime.failed) != 0 {
 		t.Fatalf("terminal failures = %v", runtime.failed)
+	}
+}
+
+func TestControllerUsesIsolatedQueryContextBeforeGroundedComposer(t *testing.T) {
+	backend := &evidenceSearchStub{}
+	registry, err := NewActionRegistry(NewSearchEvidenceAction(backend))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := &controllerRuntimeStub{execution: defaultControllerExecution()}
+	base.execution.SelectedSourceCount = 1
+	base.execution.PromptVersion = GroundedPromptVersion
+	runtime := &queryContextControllerRuntimeStub{
+		controllerRuntimeStub: base,
+		queryRequest: models.ModelRequest{
+			Model: base.execution.Model,
+			Messages: []models.ModelMessage{
+				{Role: models.RoleSystem, Content: "query contextualizer"},
+				{Role: models.RoleUser, Content: "CURRENT MESSAGE: 你好"},
+			},
+			RequiredActionName: "search_evidence",
+		},
+		fallback:     models.ActionProposal{Name: "search_evidence", Input: json.RawMessage(`{"query":"你好","purpose":"answer the current request"}`)},
+		historyPairs: 1,
+	}
+	model := &decisionModelStub{decisions: []models.ModelDecision{
+		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{{
+			Name: "search_evidence", Input: json.RawMessage(`{"query":"你好","purpose":"answer the current request"}`),
+		}}}},
+		{Final: &models.FinalDraft{Text: "你好！"}},
+	}}
+
+	if err := NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.queryCalls != 1 || runtime.composerCalls != 1 {
+		t.Fatalf("contextualizer/composer calls = %d/%d, want 1/1", runtime.queryCalls, runtime.composerCalls)
+	}
+	if len(model.requests) != 2 || model.requests[0].RequiredActionName != "search_evidence" ||
+		len(model.requests[0].Messages) != 2 || model.requests[0].Messages[1].Content != "CURRENT MESSAGE: 你好" {
+		t.Fatalf("model requests = %+v", model.requests)
+	}
+	if backend.query != "你好" || backend.purpose != "answer the current request" {
+		t.Fatalf("retrieval input = %q/%q", backend.query, backend.purpose)
+	}
+}
+
+func TestControllerFallsBackToCurrentMessageWhenQueryContextualizerFails(t *testing.T) {
+	backend := &evidenceSearchStub{}
+	registry, err := NewActionRegistry(NewSearchEvidenceAction(backend))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := &controllerRuntimeStub{execution: defaultControllerExecution()}
+	base.execution.SelectedSourceCount = 1
+	base.execution.PromptVersion = GroundedPromptVersion
+	runtime := &queryContextControllerRuntimeStub{
+		controllerRuntimeStub: base,
+		queryRequest: models.ModelRequest{
+			Model:              base.execution.Model,
+			Messages:           []models.ModelMessage{{Role: models.RoleUser, Content: "CURRENT MESSAGE: 你有哪些工具"}},
+			RequiredActionName: "search_evidence",
+		},
+		fallback: models.ActionProposal{Name: "search_evidence", Input: json.RawMessage(`{"query":"你有哪些工具","purpose":"answer the current request"}`)},
+	}
+	model := &decisionModelStub{
+		decisions: []models.ModelDecision{{Final: &models.FinalDraft{Text: "我可以使用检索工具。"}}},
+		errors:    []error{errors.New("contextualizer unavailable")},
+	}
+
+	if err := NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.queryCalls != 1 || runtime.composerCalls != 1 || backend.query != "你有哪些工具" {
+		t.Fatalf("fallback contextualizer/composer/query = %d/%d/%q", runtime.queryCalls, runtime.composerCalls, backend.query)
+	}
+	if len(runtime.checkpoints) != 3 || runtime.checkpoints[0].Kind != CheckpointActionProposal ||
+		runtime.checkpoints[1].Kind != CheckpointActionResult || runtime.checkpoints[2].Kind != CheckpointFinalDraft {
+		t.Fatalf("fallback checkpoints = %+v", runtime.checkpoints)
+	}
+}
+
+func TestControllerFallsBackWhenQueryContextualizerAnswersInsteadOfCallingSearch(t *testing.T) {
+	backend := &evidenceSearchStub{}
+	registry, err := NewActionRegistry(NewSearchEvidenceAction(backend))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := &controllerRuntimeStub{execution: defaultControllerExecution()}
+	base.execution.SelectedSourceCount = 1
+	base.execution.PromptVersion = GroundedPromptVersion
+	runtime := &queryContextControllerRuntimeStub{
+		controllerRuntimeStub: base,
+		queryRequest: models.ModelRequest{
+			Model:              base.execution.Model,
+			Messages:           []models.ModelMessage{{Role: models.RoleUser, Content: "CURRENT MESSAGE: 你好"}},
+			RequiredActionName: "search_evidence",
+		},
+		fallback: models.ActionProposal{Name: "search_evidence", Input: json.RawMessage(`{"query":"你好","purpose":"answer the current request"}`)},
+	}
+	model := &decisionModelStub{decisions: []models.ModelDecision{
+		{Final: &models.FinalDraft{Text: "你好！"}},
+		{Final: &models.FinalDraft{Text: "你好！"}},
+	}}
+
+	if err := NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	if backend.query != "你好" || runtime.queryCalls != 1 || runtime.composerCalls != 1 {
+		t.Fatalf("fallback query/contextualizer/composer = %q/%d/%d", backend.query, runtime.queryCalls, runtime.composerCalls)
+	}
+}
+
+func TestControllerPreservesCurrentMessageInContextualizedSearchQuery(t *testing.T) {
+	backend := &evidenceSearchStub{}
+	registry, err := NewActionRegistry(NewSearchEvidenceAction(backend))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := &controllerRuntimeStub{execution: defaultControllerExecution()}
+	base.execution.SelectedSourceCount = 1
+	base.execution.PromptVersion = GroundedPromptVersion
+	runtime := &queryContextControllerRuntimeStub{
+		controllerRuntimeStub: base,
+		queryRequest: models.ModelRequest{
+			Model:              base.execution.Model,
+			Messages:           []models.ModelMessage{{Role: models.RoleUser, Content: "CURRENT MESSAGE: Plan II 的研究课上限呢？"}},
+			RequiredActionName: "search_evidence",
+		},
+		fallback: models.ActionProposal{Name: "search_evidence", Input: json.RawMessage(`{"query":"Plan II 的研究课上限呢？","purpose":"answer the current request"}`)},
+	}
+	model := &decisionModelStub{decisions: []models.ModelDecision{
+		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{{
+			Name: "search_evidence", Input: json.RawMessage(`{"query":"degree planner Plan II research course maximum people","purpose":"find the applicable limit"}`),
+		}}}},
+		{Final: &models.FinalDraft{Text: "No supported answer."}},
+	}}
+
+	if err := NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(backend.query, "Plan II 的研究课上限呢？") ||
+		!strings.Contains(backend.query, "degree planner Plan II research course maximum people") {
+		t.Fatalf("retrieval query = %q, want current Message followed by contextualized expansion", backend.query)
+	}
+}
+
+func TestControllerTracesQueryContextHistoryAndFallbackWithoutRawText(t *testing.T) {
+	tracer, exporter, traceContext := instrumentationTestTracer(t)
+	backend := &evidenceSearchStub{}
+	registry, err := NewActionRegistry(NewSearchEvidenceAction(backend))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := &controllerRuntimeStub{execution: defaultControllerExecution()}
+	base.execution.SelectedSourceCount = 1
+	base.execution.PromptVersion = GroundedPromptVersion
+	queryRuntime := &queryContextControllerRuntimeStub{
+		controllerRuntimeStub: base,
+		queryRequest: models.ModelRequest{
+			Model:              base.execution.Model,
+			Messages:           []models.ModelMessage{{Role: models.RoleUser, Content: "PRIVATE CURRENT MESSAGE"}},
+			RequiredActionName: "search_evidence",
+		},
+		fallback:     models.ActionProposal{Name: "search_evidence", Input: json.RawMessage(`{"query":"PRIVATE CURRENT MESSAGE","purpose":"answer the current request"}`)},
+		historyPairs: 2,
+	}
+	runtime := &queryContextTraceRuntimeStub{queryContextControllerRuntimeStub: queryRuntime, tracer: tracer, traceContext: traceContext}
+	model := &decisionModelStub{
+		decisions: []models.ModelDecision{{Final: &models.FinalDraft{Text: "Safe final."}}},
+		errors:    []error{errors.New("contextualizer unavailable")},
+	}
+	if err := NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+
+	var queryStart, queryEnd *agentobs.Record
+	for index := range exporter.Records() {
+		record := exporter.Records()[index]
+		if record.Name != "nano.rag.query_contextualization" {
+			continue
+		}
+		switch record.Kind {
+		case agentobs.RecordSpanStarted:
+			copy := record
+			queryStart = &copy
+		case agentobs.RecordSpanEnded:
+			copy := record
+			queryEnd = &copy
+		}
+	}
+	if queryStart == nil || queryEnd == nil {
+		t.Fatalf("query contextualization span missing: %#v", exporter.Records())
+	}
+	if got := int64Attribute(*queryStart, "nano.rag.query_context.history_pair_count"); got != 2 {
+		t.Fatalf("history pair count = %d, want 2", got)
+	}
+	if !boolRecordAttribute(*queryEnd, "nano.rag.query_context.fallback_used") {
+		t.Fatalf("fallback attribute missing: %#v", *queryEnd)
+	}
+	for _, record := range exporter.Records() {
+		payload, payloadErr := record.CanonicalPayload()
+		if payloadErr != nil {
+			t.Fatal(payloadErr)
+		}
+		if strings.Contains(string(payload), "PRIVATE CURRENT MESSAGE") {
+			t.Fatalf("query contextualization Trace leaked raw text: %s", payload)
+		}
+	}
+}
+
+func TestControllerRecoveryUsesAcceptedSearchProposalWithoutRecontextualizing(t *testing.T) {
+	backend := &evidenceSearchStub{}
+	registry, err := NewActionRegistry(NewSearchEvidenceAction(backend))
+	if err != nil {
+		t.Fatal(err)
+	}
+	proposal, err := NewProposalCheckpoint(1, models.ActionProposalBatch{Actions: []models.ActionProposal{{
+		Name: "search_evidence", Input: json.RawMessage(`{"query":"accepted current topic","purpose":"answer current request"}`),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := &controllerRuntimeStub{
+		execution:   defaultControllerExecution(),
+		checkpoints: []Checkpoint{{SequenceNo: 1, PendingCheckpoint: proposal}},
+	}
+	base.execution.SelectedSourceCount = 1
+	base.execution.PromptVersion = GroundedPromptVersion
+	runtime := &queryContextControllerRuntimeStub{
+		controllerRuntimeStub: base,
+		queryRequest: models.ModelRequest{
+			Model: base.execution.Model, RequiredActionName: "search_evidence",
+		},
+		fallback: models.ActionProposal{Name: "search_evidence", Input: json.RawMessage(`{"query":"must not be used","purpose":"must not be used"}`)},
+	}
+	model := &decisionModelStub{decisions: []models.ModelDecision{{Final: &models.FinalDraft{Text: "Recovered final."}}}}
+
+	if err := NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.queryCalls != 0 || runtime.composerCalls != 1 {
+		t.Fatalf("recovery contextualizer/composer calls = %d/%d, want 0/1", runtime.queryCalls, runtime.composerCalls)
+	}
+	if backend.query != "accepted current topic" || len(model.requests) != 1 || len(runtime.checkpoints) != 3 {
+		t.Fatalf("recovery query/model/checkpoints = %q/%d/%+v", backend.query, len(model.requests), runtime.checkpoints)
 	}
 }
 
@@ -419,6 +666,46 @@ type controllerRuntimeStub struct {
 	appendErrors    []error
 }
 
+type queryContextControllerRuntimeStub struct {
+	*controllerRuntimeStub
+	queryRequest  models.ModelRequest
+	fallback      models.ActionProposal
+	historyPairs  int
+	queryCalls    int
+	composerCalls int
+}
+
+type queryContextTraceRuntimeStub struct {
+	*queryContextControllerRuntimeStub
+	tracer       *agentobs.Tracer
+	traceContext context.Context
+}
+
+func (r *queryContextTraceRuntimeStub) StartAttemptTrace(context.Context, Attempt) (context.Context, *agentobs.Tracer, error) {
+	return r.traceContext, r.tracer, nil
+}
+
+func (r *queryContextControllerRuntimeStub) BuildQueryContextRequest(_ context.Context, _ Execution, definition models.ActionDefinition) (models.ModelRequest, models.ActionProposal, int, error) {
+	r.queryCalls++
+	request := r.queryRequest
+	request.ActionDefinitions = []models.ActionDefinition{definition}
+	return request, r.fallback, r.historyPairs, nil
+}
+
+func (r *queryContextControllerRuntimeStub) BuildDecisionRequest(_ context.Context, execution Execution, _ CheckpointPrefix, definitions []models.ActionDefinition) (models.ModelRequest, error) {
+	r.composerCalls++
+	return models.ModelRequest{
+		Model: execution.Model,
+		Messages: []models.ModelMessage{
+			{Role: models.RoleSystem, Content: GroundedSystemPrompt},
+			{Role: models.RoleUser, Content: "CS degree planner 里面有什么毕业要求"},
+			{Role: models.RoleAssistant, Content: "A very long answer about degree requirements."},
+			{Role: models.RoleUser, Content: "你好"},
+		},
+		ActionDefinitions: cloneActionDefinitions(definitions),
+	}, nil
+}
+
 type finalPreparationRuntimeStub struct {
 	*controllerRuntimeStub
 	prepared models.FinalDraft
@@ -476,10 +763,18 @@ type decisionModelStub struct {
 	decisions []models.ModelDecision
 	requests  []models.ModelRequest
 	err       error
+	errors    []error
 }
 
 func (m *decisionModelStub) Decide(_ context.Context, request models.ModelRequest) (models.ModelOutcome, error) {
 	m.requests = append(m.requests, request)
+	if len(m.errors) > 0 {
+		err := m.errors[0]
+		m.errors = m.errors[1:]
+		if err != nil {
+			return models.ModelOutcome{}, err
+		}
+	}
 	if m.err != nil {
 		return models.ModelOutcome{}, m.err
 	}
@@ -495,6 +790,15 @@ func (m *decisionModelStub) Decide(_ context.Context, request models.ModelReques
 	return models.ModelOutcome{ModelDecision: decision, Metadata: models.ModelCallMetadata{
 		RequestedModel: request.Model, ResultKind: resultKind,
 	}}, nil
+}
+
+func boolRecordAttribute(record agentobs.Record, key string) bool {
+	for _, item := range record.Attributes {
+		if item.Key == key && item.Value.Kind == agentobs.ValueBool {
+			return item.Value.Bool
+		}
+	}
+	return false
 }
 
 type recordingAction struct {
