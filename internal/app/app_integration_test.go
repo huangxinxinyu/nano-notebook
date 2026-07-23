@@ -1034,7 +1034,7 @@ func assertCookieAttrs(t *testing.T, cookie *http.Cookie, httpOnly bool, secure 
 
 func (api *testAPI) ownedNotebookCount(t *testing.T, cookie *http.Cookie) int {
 	t.Helper()
-	list := api.getWithCookie(t, "/api/v1/notebooks", cookie)
+	list := api.getWithCookie(t, "/api/v1/notebooks?page_size=100", cookie)
 	if list.Code != http.StatusOK {
 		t.Fatalf("list for count status = %d, body = %s", list.Code, list.Body.String())
 	}
