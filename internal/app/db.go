@@ -749,31 +749,21 @@ create index if not exists agent_run_evidence_set_scope_idx
 create table if not exists agent_run_grounding_plans (
 	run_id text primary key references agent_runs(id) on delete cascade,
 	draft_sha256 text not null check (draft_sha256 ~ '^[0-9a-f]{64}$'),
-	outcome text not null check (outcome in ('source_less','source_free','supported','insufficient_evidence','zero_support')),
+	outcome text not null check (outcome in ('source_less','source_free','source_cited','supported','insufficient_evidence','zero_support')),
+	research_performed boolean not null default false,
 	research_complete boolean not null,
 	retrieval_degraded boolean not null,
 	verifier_model text not null default '',
 	verifier_prompt_version text not null default '',
 	created_at timestamptz not null default now(),
 	constraint agent_run_grounding_plans_shape_check check (
-		(outcome='source_less' and research_complete=false and retrieval_degraded=false and verifier_model='' and verifier_prompt_version='')
+		(outcome='source_less' and research_performed=false and research_complete=false and retrieval_degraded=false and verifier_model='' and verifier_prompt_version='')
 		or (outcome='source_free' and verifier_model='' and verifier_prompt_version='')
+		or (outcome='source_cited' and research_performed=true and verifier_model='' and verifier_prompt_version='')
 		or (outcome='supported' and verifier_model<>'' and verifier_prompt_version<>'')
 		or (outcome='insufficient_evidence' and verifier_model<>'' and verifier_prompt_version<>'')
 		or (outcome='zero_support' and research_complete=true and retrieval_degraded=false and verifier_model='' and verifier_prompt_version='')
 	)
-);
-
-alter table agent_run_grounding_plans drop constraint if exists agent_run_grounding_plans_outcome_check;
-alter table agent_run_grounding_plans add constraint agent_run_grounding_plans_outcome_check
-	check (outcome in ('source_less','source_free','supported','insufficient_evidence','zero_support'));
-alter table agent_run_grounding_plans drop constraint if exists agent_run_grounding_plans_shape_check;
-alter table agent_run_grounding_plans add constraint agent_run_grounding_plans_shape_check check (
-	(outcome='source_less' and research_complete=false and retrieval_degraded=false and verifier_model='' and verifier_prompt_version='')
-	or (outcome='source_free' and verifier_model='' and verifier_prompt_version='')
-	or (outcome='supported' and verifier_model<>'' and verifier_prompt_version<>'')
-	or (outcome='insufficient_evidence' and verifier_model<>'' and verifier_prompt_version<>'')
-	or (outcome='zero_support' and research_complete=true and retrieval_degraded=false and verifier_model='' and verifier_prompt_version='')
 );
 
 alter table agent_run_grounding_plans add column if not exists research_performed boolean not null default false;

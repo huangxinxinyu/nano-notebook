@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
+	notebookapp "github.com/huangxinxinyu/nano-notebook/internal/app"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/retrieval"
@@ -72,6 +73,21 @@ func TestGroundingPersistsAllowlistedInlineSourceReferencesWithoutVerifier(t *te
 	}
 	if outcome != "source_cited" || !performed || sourceID != "src_marker" {
 		t.Fatalf("plan=%s performed=%t source=%s", outcome, performed, sourceID)
+	}
+}
+
+func TestMigrationsReapplyWithSourceCitedGroundingPlan(t *testing.T) {
+	api, attempt, _, _ := groundingFixture(t, "source-cited-migration@example.com", "src_migration_cited", "evr_migration_cited")
+	service := agent.NewGroundingService(api.db.Pool())
+	if _, err := service.Prepare(
+		context.Background(), attempt,
+		checkpointedEvidencePrefix("src_migration_cited", "evr_migration_cited", "unit_ground", 0, 27, false, false),
+		models.FinalDraft{Text: "The launch is 20 July [source:src_migration_cited]."},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := notebookapp.RunMigrations(context.Background(), api.db); err != nil {
+		t.Fatalf("reapply migrations with source_cited plan: %v", err)
 	}
 }
 
