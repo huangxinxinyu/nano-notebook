@@ -60,7 +60,12 @@ func TestWorkerClaimsBuildsContextAndPublishesOneAnswer(t *testing.T) {
 	}))
 	defer upstream.Close()
 	model := models.NewBifrostClient(upstream.URL, upstream.Client(), 2048)
-	runtime := agent.NewPostgresRuntime(api.db.Pool(), "System prompt for the bare agent.", func() string { return "msg_worker_answer" })
+	runtime := agent.NewPostgresRuntime(
+		api.db.Pool(),
+		"System prompt for the bare agent.",
+		func() string { return "msg_worker_answer" },
+		agent.WithGroundingService(agent.NewGroundingService(api.db.Pool())),
+	)
 	registry, err := agent.NewActionRegistry(agent.NewCalculateAction(), agent.NewCurrentTimeAction(nil))
 	if err != nil {
 		t.Fatal(err)

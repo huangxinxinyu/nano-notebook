@@ -319,6 +319,9 @@ func (s *GroundingService) persistSourcePlan(ctx context.Context, attempt Attemp
 }
 
 func sourceGroundingPlanSHA256(text string, references []string) (string, error) {
+	if len(references) == 0 {
+		references = nil
+	}
 	encoded, err := json.Marshal(struct {
 		Text       string   `json:"text"`
 		References []string `json:"source_references"`
