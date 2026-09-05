@@ -271,7 +271,7 @@ func TestActionAdapterProjectsLargeResultBeforeReplayStaging(t *testing.T) {
 
 func TestSearchEvidenceActionRecordsRAGMetadataWithoutQueryOrEvidenceBodies(t *testing.T) {
 	tracer, exporter, ctx := instrumentationTestTracer(t)
-	backend := &evidenceSearchStub{result: retrieval.SearchResult{
+	backend := &evidenceSearchStub{result: EvidenceSearchResult{SearchResult: retrieval.SearchResult{
 		Candidates: []retrieval.EvidenceCandidate{{ID: "chunk_a", SourceID: "src_a", RevisionID: "evr_a", Preview: "secret evidence"}},
 		Degraded:   true, Degradations: []string{"reranker_unavailable"},
 		Diagnostics: retrieval.SearchDiagnostics{
@@ -281,7 +281,7 @@ func TestSearchEvidenceActionRecordsRAGMetadataWithoutQueryOrEvidenceBodies(t *t
 			EvidenceLoad:      retrieval.SearchStageDiagnostics{Completed: true, CandidateIDs: []string{"chunk_a"}},
 			RelevanceFiltered: []string{"chunk_b"},
 		},
-	}}
+	}}}
 	action := NewSearchEvidenceAction(backend)
 	_, err := InvokeAgentAction(ctx, tracer, action, "decision:1/action:0", ActionRequest{
 		Input:   json.RawMessage(`{"query":"private query","purpose":"compare stated methods"}`),

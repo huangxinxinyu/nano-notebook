@@ -26,6 +26,8 @@ func preserveCurrentSearchQuery(proposal, fallback models.ActionProposal) (model
 	if !strings.Contains(contextualized.Query, current.Query) {
 		contextualized.Query = truncateRunes(strings.TrimSpace(current.Query+" "+contextualized.Query), searchQueryRuneLimit)
 	}
+	contextualized.SourceID = current.SourceID
+	contextualized.EntryID = current.EntryID
 	input, err := json.Marshal(contextualized)
 	if err != nil {
 		return models.ActionProposal{}, err

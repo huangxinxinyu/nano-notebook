@@ -40,8 +40,8 @@ type emptyEvidenceBackend struct {
 	result retrieval.SearchResult
 }
 
-func (b emptyEvidenceBackend) SearchEvidence(context.Context, agent.Attempt, string, string) (retrieval.SearchResult, error) {
-	return b.result, nil
+func (b emptyEvidenceBackend) SearchEvidenceScoped(context.Context, agent.Attempt, agent.EvidenceSearchRequest) (agent.EvidenceSearchResult, error) {
+	return agent.EvidenceSearchResult{SearchResult: b.result}, nil
 }
 
 func TestGroundingPersistsAllowlistedInlineSourceReferencesWithoutVerifier(t *testing.T) {

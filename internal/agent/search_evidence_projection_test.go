@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -88,7 +89,10 @@ func TestBuildSearchEvidenceModelOutputTruncatesTheTopPreviewBeforeDroppingAllEv
 func TestSourceFirstSearchEvidenceProjectionCarriesRevisionChunkRangeAndPDFPage(t *testing.T) {
 	manifest := searchEvidenceResult{
 		ResultVersion: SearchEvidenceResultVersion,
-		Evidence:      []searchEvidenceReference{{ChunkID: "chunk_pdf", SourceID: "src_pdf", EvidenceRevisionID: "evr_pdf"}},
+		Scope: &EvidenceSearchResolvedScope{
+			SourceID: "src_pdf", EntryID: "entry_conclusion", PageStart: 7, PageEnd: 8,
+		},
+		Evidence: []searchEvidenceReference{{ChunkID: "chunk_pdf", SourceID: "src_pdf", EvidenceRevisionID: "evr_pdf"}},
 	}
 	raw, err := json.Marshal(manifest)
 	if err != nil {
@@ -108,6 +112,7 @@ func TestSourceFirstSearchEvidenceProjectionCarriesRevisionChunkRangeAndPDFPage(
 		[]byte(`"source_id":"src_pdf"`), []byte(`"evidence_revision_id":"evr_pdf"`),
 		[]byte(`"chunk_id":"chunk_pdf"`), []byte(`"unit_id":"unit_pdf"`),
 		[]byte(`"kind":"pdf_region"`), []byte(`"page":7`), []byte("Page-aware evidence."),
+		[]byte(`"entry_id":"entry_conclusion"`), []byte(`"page_start":7`), []byte(`"page_end":8`),
 	} {
 		if !bytes.Contains(projected, required) {
 			t.Fatalf("source-first projection missing %s: %s", required, projected)
@@ -126,5 +131,34 @@ func TestDecodeSearchEvidenceResultAcceptsLegacyExpandedCheckpoint(t *testing.T)
 	}
 	if !decoded.Legacy || len(decoded.Evidence) != 1 || decoded.Evidence[0].SourceID != "src_old" || decoded.Evidence[0].Preview != "Old passage" {
 		t.Fatalf("decoded=%+v", decoded)
+	}
+}
+
+func TestDecodeSearchEvidenceResultRejectsEvidenceOutsideEchoedSourceScope(t *testing.T) {
+	_, err := decodeSearchEvidenceResult(json.RawMessage(`{
+		"result_version":2,
+		"scope":{"source_id":"src_scoped"},
+		"complete_empty":false,"degraded":false,"degradations":[],
+		"evidence":[{"chunk_id":"chunk_other","source_id":"src_other","evidence_revision_id":"evr_other"}]
+	}`))
+	if !errors.Is(err, ErrGroundingInvalid) {
+		t.Fatalf("cross-source scoped result error=%v", err)
+	}
+}
+
+func TestSourceFirstSearchEvidenceProjectionRejectsCandidateOutsideEntryPages(t *testing.T) {
+	manifest := searchEvidenceResult{
+		ResultVersion: SearchEvidenceResultVersion,
+		Scope: &EvidenceSearchResolvedScope{
+			SourceID: "src_pdf", EntryID: "entry_conclusion", PageStart: 7, PageEnd: 8,
+		},
+		Evidence: []searchEvidenceReference{{ChunkID: "chunk_pdf", SourceID: "src_pdf", EvidenceRevisionID: "evr_pdf"}},
+	}
+	_, err := buildSourceFirstSearchEvidenceModelOutput(manifest, []retrieval.EvidenceCandidate{{
+		ID: "chunk_pdf", SourceID: "src_pdf", RevisionID: "evr_pdf", Preview: "Wrong page.",
+		Coordinates: []retrieval.EvidenceCoordinate{{Kind: "pdf_region", Page: 2}},
+	}}, 8*1024)
+	if !errors.Is(err, ErrGroundingInvalid) {
+		t.Fatalf("out-of-entry projection error=%v", err)
 	}
 }

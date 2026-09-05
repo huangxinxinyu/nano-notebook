@@ -12,9 +12,13 @@ import (
 
 func TestResearchWorkflowSkillIsMandatoryOnlyForThresholdRuntime(t *testing.T) {
 	catalog := skillcatalog.MustLoadEmbedded()
-	guidance, err := researchWorkflowSkillPrompt(Execution{AgentConfigID: "research.executor@10"}, catalog)
-	if err != nil || !strings.Contains(guidance, "rewrite_todo_list") || !strings.Contains(guidance, "navigation only") {
-		t.Fatalf("guidance=%q err=%v", guidance, err)
+	guidanceV1, err := researchWorkflowSkillPrompt(Execution{AgentConfigID: "research.executor@16"}, catalog)
+	if err != nil || !strings.Contains(guidanceV1, "rewrite_todo_list") || !strings.Contains(guidanceV1, "navigation only") || strings.Contains(guidanceV1, "entry_id") {
+		t.Fatalf("v1 guidance=%q err=%v", guidanceV1, err)
+	}
+	guidanceV2, err := researchWorkflowSkillPrompt(Execution{AgentConfigID: "research.executor@17"}, catalog)
+	if err != nil || !strings.Contains(guidanceV2, "source_id") || !strings.Contains(guidanceV2, "entry_id") {
+		t.Fatalf("v2 guidance=%q err=%v", guidanceV2, err)
 	}
 	legacy, err := researchWorkflowSkillPrompt(Execution{AgentConfigID: "research.executor@9"}, catalog)
 	if err != nil || legacy != "" {

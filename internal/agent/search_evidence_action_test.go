@@ -14,9 +14,10 @@ import (
 
 type evidenceSearchStub struct {
 	attempt Attempt
+	request EvidenceSearchRequest
 	query   string
 	purpose string
-	result  retrieval.SearchResult
+	result  EvidenceSearchResult
 	err     error
 }
 
@@ -32,7 +33,7 @@ func TestSearchEvidenceCheckpointStaysSmallWhenAuthoritativeCandidatesAreLarge(t
 			SourceTitle: strings.Repeat("title", 100), Preview: strings.Repeat("large evidence body ", 1000), UnitRefs: refs,
 		})
 	}
-	result, err := NewSearchEvidenceAction(&evidenceSearchStub{result: retrieval.SearchResult{Candidates: candidates}}).Execute(
+	result, err := NewSearchEvidenceAction(&evidenceSearchStub{result: EvidenceSearchResult{SearchResult: retrieval.SearchResult{Candidates: candidates}}}).Execute(
 		context.Background(), ActionRequest{Input: json.RawMessage(`{"query":"q","purpose":"p"}`), Attempt: Attempt{RunID: "run"}},
 	)
 	if err != nil {
@@ -47,16 +48,16 @@ func TestSearchEvidenceCheckpointStaysSmallWhenAuthoritativeCandidatesAreLarge(t
 	}
 }
 
-func (s *evidenceSearchStub) SearchEvidence(_ context.Context, attempt Attempt, query, purpose string) (retrieval.SearchResult, error) {
-	s.attempt, s.query, s.purpose = attempt, query, purpose
+func (s *evidenceSearchStub) SearchEvidenceScoped(_ context.Context, attempt Attempt, request EvidenceSearchRequest) (EvidenceSearchResult, error) {
+	s.attempt, s.request, s.query, s.purpose = attempt, request, request.Query, request.Purpose
 	return s.result, s.err
 }
 
 func TestSearchEvidenceActionUsesServerBoundAttemptAndReturnsEvidenceAddresses(t *testing.T) {
-	backend := &evidenceSearchStub{result: retrieval.SearchResult{Candidates: []retrieval.EvidenceCandidate{{
+	backend := &evidenceSearchStub{result: EvidenceSearchResult{SearchResult: retrieval.SearchResult{Candidates: []retrieval.EvidenceCandidate{{
 		ID: "chunk_internal", SourceID: "src_a", RevisionID: "evr_a", SourceTitle: "Report",
 		Preview: "Grounded passage", UnitRefs: []retrieval.UnitRef{{UnitID: "unit_a", StartRune: 2, EndRune: 19}},
-	}}}}
+	}}}}}
 	action := NewSearchEvidenceAction(backend)
 	input := json.RawMessage(`{"query":"What changed?","purpose":"find the stated change"}`)
 	if err := action.ValidateInput(input); err != nil {
@@ -67,7 +68,7 @@ func TestSearchEvidenceActionUsesServerBoundAttemptAndReturnsEvidenceAddresses(t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != ActionSucceeded || backend.attempt != attempt || backend.query != "What changed?" || backend.purpose != "find the stated change" {
+	if result.Status != ActionSucceeded || backend.attempt != attempt || backend.request.Query != "What changed?" || backend.request.Purpose != "find the stated change" {
 		t.Fatalf("result/backend=%+v/%+v", result, backend)
 	}
 	var output struct {
@@ -105,13 +106,37 @@ func TestSearchEvidenceActionReportsCompleteEmptyAndDegradationWithoutInventingE
 		{name: "unavailable", err: retrieval.ErrRetrievalUnavailable, status: ActionDomainError, code: "retrieval_unavailable"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			result, err := NewSearchEvidenceAction(&evidenceSearchStub{result: test.result, err: test.err}).Execute(context.Background(), ActionRequest{
+			result, err := NewSearchEvidenceAction(&evidenceSearchStub{result: EvidenceSearchResult{SearchResult: test.result}, err: test.err}).Execute(context.Background(), ActionRequest{
 				Input: json.RawMessage(`{"query":"q","purpose":"p"}`), Attempt: Attempt{RunID: "run"},
 			})
 			if err != nil || result.Status != test.status || result.ErrorCode != test.code {
 				t.Fatalf("result=%+v err=%v", result, err)
 			}
 		})
+	}
+}
+
+func TestSearchEvidenceActionPassesNavigationScopeAndHidesUnavailableLocator(t *testing.T) {
+	backend := &evidenceSearchStub{result: EvidenceSearchResult{Scope: &EvidenceSearchResolvedScope{
+		SourceID: "src_ready", EntryID: "entry_conclusion", PageStart: 14, PageEnd: 16,
+	}}}
+	action := NewSearchEvidenceAction(backend)
+	input := json.RawMessage(`{"query":"conclusion","purpose":"summarize","source_id":"src_ready","entry_id":"entry_conclusion"}`)
+	result, err := action.Execute(context.Background(), ActionRequest{Input: input, Attempt: Attempt{RunID: "run_ready"}})
+	if err != nil || result.Status != ActionSucceeded || backend.request.SourceID != "src_ready" || backend.request.EntryID != "entry_conclusion" {
+		t.Fatalf("result=%+v request=%+v err=%v", result, backend.request, err)
+	}
+	var output struct {
+		Scope *EvidenceSearchResolvedScope `json:"scope"`
+	}
+	if json.Unmarshal(result.Output, &output) != nil || output.Scope == nil || *output.Scope != *backend.result.Scope {
+		t.Fatalf("resolved scope missing from output: %s", result.Output)
+	}
+
+	backend.err = ErrEvidenceScopeUnavailable
+	result, err = action.Execute(context.Background(), ActionRequest{Input: input, Attempt: Attempt{RunID: "run_ready"}})
+	if err != nil || result.Status != ActionDomainError || result.ErrorCode != "evidence_scope_unavailable" {
+		t.Fatalf("scope failure result=%+v err=%v", result, err)
 	}
 }
 
@@ -129,6 +154,30 @@ func TestSearchEvidenceActionRejectsModelSuppliedScopeAndMalformedInput(t *testi
 	}
 	if _, err := NewSearchEvidenceAction(nil).Execute(context.Background(), ActionRequest{Input: json.RawMessage(`{"query":"q","purpose":"p"}`)}); !errors.Is(err, ErrSearchEvidenceUnavailable) {
 		t.Fatalf("nil backend error=%v", err)
+	}
+}
+
+func TestSearchEvidenceActionAcceptsSourceAndEntryScopeButRequiresTheirHierarchy(t *testing.T) {
+	action := NewSearchEvidenceAction(&evidenceSearchStub{})
+	for _, input := range []string{
+		`{"query":"conclusion","purpose":"summarize the paper","source_id":"src_ready"}`,
+		`{"query":"limitations","purpose":"summarize the section","source_id":"src_ready","entry_id":"entry_conclusion"}`,
+	} {
+		if err := action.ValidateInput(json.RawMessage(input)); err != nil {
+			t.Fatalf("rejected scoped input %s: %v", input, err)
+		}
+	}
+	if err := action.ValidateInput(json.RawMessage(`{"query":"conclusion","purpose":"summarize","entry_id":"entry_conclusion"}`)); err == nil {
+		t.Fatal("accepted entry_id without source_id")
+	}
+
+	var schema map[string]any
+	if err := json.Unmarshal(action.Definition().InputSchema, &schema); err != nil {
+		t.Fatal(err)
+	}
+	properties := schema["properties"].(map[string]any)
+	if properties["source_id"] == nil || properties["entry_id"] == nil {
+		t.Fatalf("scope properties missing from schema: %s", action.Definition().InputSchema)
 	}
 }
 

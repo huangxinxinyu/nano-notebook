@@ -35,6 +35,18 @@ func TestEmbeddedCatalogContainsResearchWorkflow(t *testing.T) {
 	}
 }
 
+func TestResearchWorkflowV2TeachesScopedInspectionSearch(t *testing.T) {
+	skill, ok := MustLoadEmbedded().Resolve("skill.research-workflow", 2)
+	if !ok {
+		t.Fatal("missing skill.research-workflow@2")
+	}
+	for _, required := range []string{"inspect_source", "search_evidence", "source_id", "entry_id", "navigation only"} {
+		if !strings.Contains(skill.Body, required) {
+			t.Fatalf("Research workflow v2 is missing %q", required)
+		}
+	}
+}
+
 func TestCanonicalSHA256NormalizesSkillContent(t *testing.T) {
 	left := SkillVersion{Identity: "skill.test", Version: 2, Name: "Test Skill", Description: "Useful test skill", Body: "alpha\r\nbeta"}
 	right := SkillVersion{Identity: "skill.test", Version: 2, Name: "Test Skill", Description: "Useful test skill", Body: "alpha\nbeta\n"}

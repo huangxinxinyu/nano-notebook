@@ -44,7 +44,7 @@ func TestLoadWorkerConfigDefaultsToGeminiEmbeddingCollection(t *testing.T) {
 		config.SourceMapParserServiceToken != "nano-local-source-map-parser-token" {
 		t.Fatalf("Source Map parser defaults=%q/%s/%q", config.SourceMapParserURL, config.SourceMapParserTimeout, config.SourceMapParserServiceToken)
 	}
-	if config.AgentRelease.String() != "nano.default@25" {
+	if config.AgentRelease.String() != "nano.default@26" {
 		t.Fatalf("Agent release default=%q", config.AgentRelease)
 	}
 	if config.ToolResultRedisURL != "redis://:nano-tool-results@127.0.0.1:56379/0" || config.ToolResultKeyPrefix != "nano:tool-result:v2:" ||

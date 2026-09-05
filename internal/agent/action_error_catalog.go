@@ -32,6 +32,10 @@ var actionErrorCatalog = map[string]ActionError{
 		Kind: "domain", Code: "retrieval_unavailable", Retryable: true,
 		Message: "Selected-source retrieval is currently unavailable.", Suggestion: "Retry once later or continue without claiming source support.",
 	},
+	"evidence_scope_unavailable": {
+		Kind: "domain", Code: "evidence_scope_unavailable",
+		Message: "The requested Evidence scope is unavailable in this Research Run.", Suggestion: "Inspect an available Source again and use the exact source_id and entry_id it returns.",
+	},
 	"web_search_unavailable": {
 		Kind: "domain", Code: "web_search_unavailable", Retryable: true,
 		Message: "Web search is currently unavailable.", Suggestion: "Retry later or use another available evidence source.",

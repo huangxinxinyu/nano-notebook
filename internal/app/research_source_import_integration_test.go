@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -977,6 +978,15 @@ func TestResearchPDFImportReadyExtendsRunScopeAndReturnsPageAwareEvidence(t *tes
 		strings.Contains(string(inspection), "Parser orientation page") {
 		t.Fatalf("inspection=%s err=%v", inspection, err)
 	}
+	var inspected struct {
+		Entries []struct {
+			EntryID string `json:"entry_id"`
+			Heading string `json:"heading"`
+		} `json:"entries"`
+	}
+	if json.Unmarshal(inspection, &inspected) != nil || len(inspected.Entries) != 1 || inspected.Entries[0].EntryID == "" {
+		t.Fatalf("inspection navigation=%s", inspection)
+	}
 	if _, err := api.db.Pool().Exec(context.Background(), `
 		insert into source_sources(
 			id,notebook_id,input_kind,format,title,media_type,byte_size,content_sha256,original_object_key,state
@@ -1057,9 +1067,20 @@ func TestResearchPDFImportReadyExtendsRunScopeAndReturnsPageAwareEvidence(t *tes
 		t.Fatal(err)
 	}
 	vectors := &evidenceVectorSearchStub{candidateID: chunks[0].ID}
-	result, err := agent.NewEvidenceSearchService(api.db.Pool(), vectors, &evidenceModelsStub{}).
-		SearchEvidence(context.Background(), attemptFromClaim(replayed), searchQuery, "cite the imported PDF")
-	if err != nil || len(result.Candidates) != 1 {
+	searchService := agent.NewEvidenceSearchService(api.db.Pool(), vectors, &evidenceModelsStub{}).WithSourceMapObjects(objects)
+	for _, unavailable := range []agent.EvidenceSearchRequest{
+		{Query: searchQuery, Purpose: "hide unpinned Source", SourceID: "src_ready_not_pinned"},
+		{Query: searchQuery, Purpose: "hide missing entry", SourceID: imported.SourceID, EntryID: "entry_missing"},
+	} {
+		if _, err := searchService.SearchEvidenceScoped(context.Background(), attemptFromClaim(replayed), unavailable); !errors.Is(err, agent.ErrEvidenceScopeUnavailable) {
+			t.Fatalf("unavailable scope %+v error=%v", unavailable, err)
+		}
+	}
+	result, err := searchService.SearchEvidenceScoped(context.Background(), attemptFromClaim(replayed), agent.EvidenceSearchRequest{
+		Query: searchQuery, Purpose: "cite the imported PDF", SourceID: imported.SourceID, EntryID: inspected.Entries[0].EntryID,
+	})
+	if err != nil || len(result.Candidates) != 1 || result.Scope == nil || result.Scope.SourceID != imported.SourceID ||
+		result.Scope.EntryID != inspected.Entries[0].EntryID || result.Scope.PageStart != 7 || result.Scope.PageEnd != 7 {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 	candidate := result.Candidates[0]
@@ -1067,6 +1088,11 @@ func TestResearchPDFImportReadyExtendsRunScopeAndReturnsPageAwareEvidence(t *tes
 		candidate.Preview != unitText || len(candidate.Coordinates) != 1 || candidate.Coordinates[0].Page != 7 ||
 		candidate.Coordinates[0].Kind != "pdf_region" {
 		t.Fatalf("candidate=%+v", candidate)
+	}
+	for _, scope := range vectors.scopes {
+		if !slices.Contains(scope.AllowedChunkIDs, chunks[0].ID) {
+			t.Fatalf("entry chunk filter missing from Qdrant scope: %+v", scope)
+		}
 	}
 	prompts, err := promptcatalog.LoadEmbedded()
 	if err != nil {

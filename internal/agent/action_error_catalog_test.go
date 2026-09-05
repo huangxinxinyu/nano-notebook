@@ -34,3 +34,13 @@ func TestEnrichActionDomainErrorPreservesExplicitlySafeDetail(t *testing.T) {
 		t.Fatalf("explicit detail was replaced: %+v", result)
 	}
 }
+
+func TestEvidenceScopeUnavailableHasSafeActionableCatalogEntry(t *testing.T) {
+	result := enrichActionDomainError(ActionResult{Status: ActionDomainError, ErrorCode: "evidence_scope_unavailable"})
+	if result.Error == nil || result.Error.Code != "evidence_scope_unavailable" || result.Error.Message == "" || result.Error.Suggestion == "" {
+		t.Fatalf("scoped Evidence error = %#v", result)
+	}
+	if result.Error.Retryable {
+		t.Fatalf("scope locator error must not be retryable: %#v", result.Error)
+	}
+}

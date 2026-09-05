@@ -297,9 +297,14 @@ func researchWorkflowSkillPrompt(execution Execution, skills skillcatalog.Catalo
 	if !isThresholdResearchExecution(execution) {
 		return "", nil
 	}
-	skill, ok := skills.Resolve("skill.research-workflow", 1)
+	version := 1
+	reference, err := agentcatalog.ParseReference(execution.AgentConfigID)
+	if err == nil && reference.Identity == "research.executor" && reference.Version >= 17 {
+		version = 2
+	}
+	skill, ok := skills.Resolve("skill.research-workflow", version)
 	if !ok {
-		return "", errors.New("Research workflow Skill skill.research-workflow@1 is missing")
+		return "", fmt.Errorf("Research workflow Skill skill.research-workflow@%d is missing", version)
 	}
 	return strings.TrimSpace(skill.Body), nil
 }

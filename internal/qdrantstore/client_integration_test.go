@@ -68,7 +68,7 @@ func TestQdrantProjectionEnforcesIndexedServerBuiltScope(t *testing.T) {
 	if details.SparseModifier != "idf" {
 		t.Fatalf("sparse modifier=%q", details.SparseModifier)
 	}
-	for _, field := range []string{"notebook_id", "source_id", "revision_id", "index_version_id"} {
+	for _, field := range []string{"chunk_id", "notebook_id", "source_id", "revision_id", "index_version_id"} {
 		if details.PayloadIndexes[field] != "keyword" {
 			t.Fatalf("payload index %q = %q", field, details.PayloadIndexes[field])
 		}

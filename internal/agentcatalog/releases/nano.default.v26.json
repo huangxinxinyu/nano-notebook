@@ -1,0 +1,13 @@
+{
+  "identity": "nano.default",
+  "version": 26,
+  "roots": {
+    "chat": "chat.leader@6",
+    "research_planner": "research.planner@7",
+    "research": "research.executor@17",
+    "studio_report": "studio.report@2",
+    "studio_flashcards": "studio.flashcards@2",
+    "studio_mind_map": "studio.mind-map@2",
+    "studio_data_table": "studio.data-table@2"
+  }
+}

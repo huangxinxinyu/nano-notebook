@@ -45,8 +45,8 @@ type fixedEvidenceSearchBackend struct {
 	result retrieval.SearchResult
 }
 
-func (b fixedEvidenceSearchBackend) SearchEvidence(context.Context, agent.Attempt, string, string) (retrieval.SearchResult, error) {
-	return b.result, nil
+func (b fixedEvidenceSearchBackend) SearchEvidenceScoped(context.Context, agent.Attempt, agent.EvidenceSearchRequest) (agent.EvidenceSearchResult, error) {
+	return agent.EvidenceSearchResult{SearchResult: b.result}, nil
 }
 
 func (s *evidenceModelsStub) Embed(_ context.Context, request models.EmbeddingRequest) (models.EmbeddingOutcome, error) {

@@ -29,10 +29,11 @@ type evidenceModelCapabilities interface {
 }
 
 type EvidenceSearchService struct {
-	pool    *pgxpool.Pool
-	vectors evidenceVectorSearcher
-	models  evidenceModelCapabilities
-	metrics *TaskMetricsRecorder
+	pool        *pgxpool.Pool
+	vectors     evidenceVectorSearcher
+	models      evidenceModelCapabilities
+	entryScopes evidenceEntryScopeResolver
+	metrics     *TaskMetricsRecorder
 }
 
 type RetrievalSearchOverrides struct {
@@ -57,17 +58,65 @@ type pinnedEvidence struct {
 }
 
 type pinnedSearchScope struct {
-	NotebookID string
-	Version    retrieval.IndexVersion
-	Evidence   []pinnedEvidence
+	NotebookID      string
+	Version         retrieval.IndexVersion
+	Evidence        []pinnedEvidence
+	AllowedChunkIDs []string
+	ResolvedScope   *EvidenceSearchResolvedScope
 }
 
 func NewEvidenceSearchService(pool *pgxpool.Pool, vectors evidenceVectorSearcher, modelCapabilities evidenceModelCapabilities) *EvidenceSearchService {
 	return &EvidenceSearchService{pool: pool, vectors: vectors, models: modelCapabilities}
 }
 
+func (s *EvidenceSearchService) WithSourceMapObjects(objects sourceInspectionObjectReader) *EvidenceSearchService {
+	if s != nil {
+		s.entryScopes = &postgresEvidenceEntryScopeResolver{service: s, objects: objects}
+	}
+	return s
+}
+
 func (s *EvidenceSearchService) SearchEvidence(ctx context.Context, attempt Attempt, query, _ string) (retrieval.SearchResult, error) {
 	return s.searchEvidence(ctx, attempt, query, RetrievalSearchOverrides{}, true)
+}
+
+func (s *EvidenceSearchService) SearchEvidenceScoped(ctx context.Context, attempt Attempt, request EvidenceSearchRequest) (EvidenceSearchResult, error) {
+	if strings.TrimSpace(request.EntryID) != "" && strings.TrimSpace(request.SourceID) == "" {
+		return EvidenceSearchResult{}, ErrEvidenceScopeUnavailable
+	}
+	if strings.TrimSpace(request.SourceID) == "" {
+		result, err := s.searchEvidence(ctx, attempt, request.Query, RetrievalSearchOverrides{}, true)
+		return EvidenceSearchResult{SearchResult: result}, err
+	}
+	if s == nil || s.pool == nil || s.vectors == nil || s.models == nil || strings.TrimSpace(request.Query) == "" {
+		return EvidenceSearchResult{}, ErrSearchEvidenceUnavailable
+	}
+	scope, err := s.loadPinnedScope(ctx, attempt)
+	if err != nil {
+		return EvidenceSearchResult{}, err
+	}
+	scope, err = resolveRequestedSearchScope(ctx, scope, request, s.entryScopes)
+	if err != nil {
+		return EvidenceSearchResult{}, err
+	}
+	result, err := s.searchEvidenceScope(ctx, scope, request.Query, RetrievalSearchOverrides{}, true)
+	return EvidenceSearchResult{
+		SearchResult: result,
+		Scope:        cloneEvidenceSearchResolvedScope(scope.ResolvedScope),
+	}, err
+}
+
+func narrowPinnedSearchScope(scope pinnedSearchScope, sourceID string) (pinnedSearchScope, error) {
+	sourceID = strings.TrimSpace(sourceID)
+	for _, item := range scope.Evidence {
+		if item.SourceID != sourceID {
+			continue
+		}
+		narrowed := scope
+		narrowed.Evidence = []pinnedEvidence{item}
+		return narrowed, nil
+	}
+	return pinnedSearchScope{}, ErrEvidenceScopeUnavailable
 }
 
 // SearchEvidenceWithOverrides runs the same production retrieval pipeline as
@@ -115,7 +164,11 @@ func (s *EvidenceSearchService) searchEvidenceScope(ctx context.Context, scope p
 	if err != nil {
 		return retrieval.SearchResult{}, fmt.Errorf("%w: sparse query encoding: %v", retrieval.ErrRetrievalUnavailable, err)
 	}
-	qdrantScope := qdrantstore.Scope{NotebookID: scope.NotebookID, IndexVersionID: scope.Version.ID, Evidence: make([]qdrantstore.EvidenceRef, 0, len(scope.Evidence))}
+	qdrantScope := qdrantstore.Scope{
+		NotebookID: scope.NotebookID, IndexVersionID: scope.Version.ID,
+		Evidence:        make([]qdrantstore.EvidenceRef, 0, len(scope.Evidence)),
+		AllowedChunkIDs: append([]string(nil), scope.AllowedChunkIDs...),
+	}
 	sourceIDs := make([]string, 0, len(scope.Evidence))
 	revisionIDs := make([]string, 0, len(scope.Evidence))
 	for _, item := range scope.Evidence {
@@ -359,6 +412,10 @@ func (s *EvidenceSearchService) reloadCandidates(ctx context.Context, scope pinn
 			if _, ok := wanted[chunk.ID]; !ok {
 				continue
 			}
+			if scope.ResolvedScope != nil && scope.ResolvedScope.EntryID != "" &&
+				!chunkOverlapsResolvedEntry(chunk, coordinates, *scope.ResolvedScope) {
+				continue
+			}
 			result = append(result, retrieval.EvidenceCandidate{
 				ID: chunk.ID, SourceID: evidence.SourceID, RevisionID: evidence.RevisionID,
 				SourceTitle: evidence.Title, Preview: chunk.Text, UnitRefs: append([]retrieval.UnitRef(nil), chunk.UnitRefs...),
@@ -370,6 +427,16 @@ func (s *EvidenceSearchService) reloadCandidates(ctx context.Context, scope pinn
 		return nil, err
 	}
 	return result, nil
+}
+
+func chunkOverlapsResolvedEntry(chunk retrieval.Chunk, coordinates map[string]retrieval.EvidenceCoordinate, scope EvidenceSearchResolvedScope) bool {
+	for _, ref := range chunk.UnitRefs {
+		coordinate, ok := coordinates[ref.UnitID]
+		if ok && coordinate.Kind == "pdf_region" && coordinate.Page >= scope.PageStart && coordinate.Page <= scope.PageEnd {
+			return true
+		}
+	}
+	return false
 }
 
 func evidenceCoordinatesForRefs(refs []retrieval.UnitRef, byUnit map[string]retrieval.EvidenceCoordinate) []retrieval.EvidenceCoordinate {

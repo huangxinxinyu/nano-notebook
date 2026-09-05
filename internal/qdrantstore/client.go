@@ -35,9 +35,10 @@ type EvidenceRef struct {
 }
 
 type Scope struct {
-	NotebookID     string
-	IndexVersionID string
-	Evidence       []EvidenceRef
+	NotebookID      string
+	IndexVersionID  string
+	Evidence        []EvidenceRef
+	AllowedChunkIDs []string
 }
 
 type Point struct {
@@ -114,7 +115,7 @@ func (c *Client) EnsureCollection(ctx context.Context) error {
 			return err
 		}
 	}
-	for _, field := range []string{"notebook_id", "source_id", "revision_id", "index_version_id"} {
+	for _, field := range []string{"chunk_id", "notebook_id", "source_id", "revision_id", "index_version_id"} {
 		if err := c.doJSON(ctx, http.MethodPut, c.collectionPath()+"/index?wait=true", map[string]any{
 			"field_name": field, "field_schema": "keyword",
 		}, nil); err != nil {
@@ -131,7 +132,7 @@ func (c *Client) EnsureCollection(ctx context.Context) error {
 	if details.SparseModifier != "idf" {
 		return errors.New("Qdrant BM25 sparse vector must use the IDF modifier")
 	}
-	for _, field := range []string{"notebook_id", "source_id", "revision_id", "index_version_id"} {
+	for _, field := range []string{"chunk_id", "notebook_id", "source_id", "revision_id", "index_version_id"} {
 		if details.PayloadIndexes[field] != "keyword" {
 			return fmt.Errorf("Qdrant payload index %q is missing", field)
 		}
@@ -250,6 +251,7 @@ func (c *Client) search(ctx context.Context, query any, vectorName string, scope
 	for _, point := range response.Result.Points {
 		if point.Payload.NotebookID != scope.NotebookID || point.Payload.IndexVersionID != scope.IndexVersionID ||
 			!pairs[point.Payload.SourceID+"\x00"+point.Payload.RevisionID] || strings.TrimSpace(point.Payload.ChunkID) == "" ||
+			!scopeAllowsChunk(scope.AllowedChunkIDs, point.Payload.ChunkID) ||
 			math.IsNaN(point.Score) || math.IsInf(point.Score, 0) {
 			return nil, errors.New("Qdrant returned a forged or out-of-scope point")
 		}
@@ -369,14 +371,41 @@ func buildFilter(scope Scope) (map[string]any, map[string]bool, error) {
 			fieldMatch("source_id", ref.SourceID), fieldMatch("revision_id", ref.RevisionID),
 		}})
 	}
+	must := []any{fieldMatch("notebook_id", scope.NotebookID), fieldMatch("index_version_id", scope.IndexVersionID)}
+	if len(scope.AllowedChunkIDs) > 0 {
+		chunks := append([]string(nil), scope.AllowedChunkIDs...)
+		sort.Strings(chunks)
+		for index, chunkID := range chunks {
+			if strings.TrimSpace(chunkID) == "" || (index > 0 && chunks[index-1] == chunkID) {
+				return nil, nil, errors.New("invalid Qdrant Retrieval Scope")
+			}
+		}
+		must = append(must, fieldMatchAny("chunk_id", chunks))
+	}
 	return map[string]any{
-		"must":       []any{fieldMatch("notebook_id", scope.NotebookID), fieldMatch("index_version_id", scope.IndexVersionID)},
+		"must":       must,
 		"min_should": map[string]any{"conditions": conditions, "min_count": 1},
 	}, pairs, nil
 }
 
 func fieldMatch(key, value string) map[string]any {
 	return map[string]any{"key": key, "match": map[string]any{"value": value}}
+}
+
+func fieldMatchAny(key string, values []string) map[string]any {
+	return map[string]any{"key": key, "match": map[string]any{"any": values}}
+}
+
+func scopeAllowsChunk(allowed []string, chunkID string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	for _, allowedID := range allowed {
+		if allowedID == chunkID {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) collectionPath() string {

@@ -500,7 +500,9 @@ func main() {
 	runtime := agent.NewPostgresRuntime(db.Pool(), agent.BareSystemPrompt, nil,
 		agent.WithTraceSink(traceSink), agent.WithBestEffortTraceExporter(traceBridge),
 		agent.WithReplayStager(replayStager), agent.WithGroundingService(grounder), agent.WithTaskMetrics(taskMetrics))
-	evidenceSearch := agent.NewEvidenceSearchService(db.Pool(), qdrant, modelClient).WithMetrics(taskMetrics)
+	evidenceSearch := agent.NewEvidenceSearchService(db.Pool(), qdrant, modelClient).
+		WithSourceMapObjects(sourceObjects).
+		WithMetrics(taskMetrics)
 	candidateValidator := sourcediscovery.NewImportabilityValidator(webReaderAdapter, sourcediscovery.ImportabilityValidatorConfig{
 		ExtractionConfigID: config.SourceExtractionConfigID,
 		MaxBytes:           config.SourceProcessingMaxBytes, MaxNormalizedRunes: config.SourceProcessingMaxRunes,
@@ -859,7 +861,7 @@ func prepareRetrievalAuthority(ctx context.Context, authority retrievalAuthority
 }
 
 func loadWorkerConfig() (workerConfig, error) {
-	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@25"))
+	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@26"))
 	if err != nil {
 		return workerConfig{}, fmt.Errorf("parse NANO_AGENT_RELEASE: %w", err)
 	}

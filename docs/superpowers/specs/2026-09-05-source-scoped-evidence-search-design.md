@@ -141,8 +141,9 @@ inspect_source(source_id)
 
 This is a backward-compatible input extension, but Research behavior and tool
 guidance change. Publish a new immutable `research.executor` Definition and a
-new release pin rather than mutating version 16. Older pinned Runs retain the
-two-field `search_evidence` contract and unscoped retrieval behavior.
+new release pin rather than mutating version 16. Older pinned Runs retain their
+existing guidance, and their two-field `search_evidence` calls retain unscoped
+retrieval behavior; the optional additive schema is shared by the Tool runtime.
 
 ## Testing
 

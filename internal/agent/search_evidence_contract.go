@@ -22,17 +22,19 @@ type searchEvidenceReference struct {
 }
 
 type searchEvidenceResult struct {
-	ResultVersion int                       `json:"result_version,omitempty"`
-	CompleteEmpty bool                      `json:"complete_empty"`
-	Degraded      bool                      `json:"degraded"`
-	Degradations  []string                  `json:"degradations"`
-	Evidence      []searchEvidenceReference `json:"evidence"`
-	Legacy        bool                      `json:"-"`
+	ResultVersion int                          `json:"result_version,omitempty"`
+	Scope         *EvidenceSearchResolvedScope `json:"scope,omitempty"`
+	CompleteEmpty bool                         `json:"complete_empty"`
+	Degraded      bool                         `json:"degraded"`
+	Degradations  []string                     `json:"degradations"`
+	Evidence      []searchEvidenceReference    `json:"evidence"`
+	Legacy        bool                         `json:"-"`
 }
 
-func newSearchEvidenceResult(result retrieval.SearchResult) (searchEvidenceResult, error) {
+func newSearchEvidenceResult(result retrieval.SearchResult, scope *EvidenceSearchResolvedScope) (searchEvidenceResult, error) {
 	output := searchEvidenceResult{
 		ResultVersion: SearchEvidenceResultVersion,
+		Scope:         cloneEvidenceSearchResolvedScope(scope),
 		CompleteEmpty: result.CompleteEmpty,
 		Degraded:      result.Degraded,
 		Degradations:  append([]string(nil), result.Degradations...),
@@ -71,6 +73,11 @@ func decodeSearchEvidenceResult(raw json.RawMessage) (searchEvidenceResult, erro
 }
 
 func validateSearchEvidenceResult(output searchEvidenceResult) error {
+	if output.Scope != nil {
+		if !validSearchEvidenceScope(*output.Scope) {
+			return ErrGroundingInvalid
+		}
+	}
 	if len(output.Evidence) > maxSearchEvidenceCandidates {
 		return ErrGroundingInvalid
 	}
@@ -85,6 +92,9 @@ func validateSearchEvidenceResult(output searchEvidenceResult) error {
 	seenChunks := make(map[string]struct{}, len(output.Evidence))
 	for _, evidence := range output.Evidence {
 		if strings.TrimSpace(evidence.SourceID) == "" || strings.TrimSpace(evidence.EvidenceRevisionID) == "" {
+			return ErrGroundingInvalid
+		}
+		if output.Scope != nil && evidence.SourceID != output.Scope.SourceID {
 			return ErrGroundingInvalid
 		}
 		if !output.Legacy {
@@ -105,6 +115,25 @@ func validateSearchEvidenceResult(output searchEvidenceResult) error {
 		}
 	}
 	return nil
+}
+
+func validSearchEvidenceScope(scope EvidenceSearchResolvedScope) bool {
+	if !validSearchEvidenceIdentity(scope.SourceID) || utf8.RuneCountInString(scope.SourceID) > 128 {
+		return false
+	}
+	if scope.EntryID == "" {
+		return scope.PageStart == 0 && scope.PageEnd == 0
+	}
+	return validSearchEvidenceIdentity(scope.EntryID) && utf8.RuneCountInString(scope.EntryID) <= 128 &&
+		scope.PageStart >= 1 && scope.PageEnd >= scope.PageStart
+}
+
+func cloneEvidenceSearchResolvedScope(scope *EvidenceSearchResolvedScope) *EvidenceSearchResolvedScope {
+	if scope == nil {
+		return nil
+	}
+	copy := *scope
+	return &copy
 }
 
 func validSearchEvidenceIdentity(value string) bool {
@@ -139,6 +168,7 @@ type sourceFirstSearchEvidenceModelItem struct {
 }
 
 type sourceFirstSearchEvidenceModelOutput struct {
+	Scope         *EvidenceSearchResolvedScope         `json:"scope,omitempty"`
 	CompleteEmpty bool                                 `json:"complete_empty"`
 	Degraded      bool                                 `json:"degraded"`
 	Degradations  []string                             `json:"degradations"`
@@ -161,6 +191,9 @@ func buildSourceFirstSearchEvidenceModelOutput(manifest searchEvidenceResult, ca
 		if !ok || candidate.SourceID != reference.SourceID || candidate.RevisionID != reference.EvidenceRevisionID {
 			return nil, fmt.Errorf("%w: source-first search evidence manifest no longer resolves", ErrGroundingInvalid)
 		}
+		if manifest.Scope != nil && manifest.Scope.EntryID != "" && !candidateOverlapsEvidenceScope(candidate, *manifest.Scope) {
+			return nil, fmt.Errorf("%w: source-first search evidence candidate is outside the resolved entry", ErrGroundingInvalid)
+		}
 		items = append(items, sourceFirstSearchEvidenceModelItem{
 			SourceID: candidate.SourceID, SourceTitle: candidate.SourceTitle,
 			EvidenceRevisionID: candidate.RevisionID, ChunkID: candidate.ID, Preview: candidate.Preview,
@@ -170,6 +203,7 @@ func buildSourceFirstSearchEvidenceModelOutput(manifest searchEvidenceResult, ca
 	}
 	encode := func(projected []sourceFirstSearchEvidenceModelItem, truncated bool, omitted int) (json.RawMessage, error) {
 		return json.Marshal(sourceFirstSearchEvidenceModelOutput{
+			Scope:         cloneEvidenceSearchResolvedScope(manifest.Scope),
 			CompleteEmpty: manifest.CompleteEmpty, Degraded: manifest.Degraded,
 			Degradations: append([]string(nil), manifest.Degradations...), Evidence: projected,
 			Truncated: truncated, OmittedCount: omitted,
@@ -216,6 +250,15 @@ func buildSourceFirstSearchEvidenceModelOutput(manifest searchEvidenceResult, ca
 		return nil, errors.New("source-first search evidence model projection byte limit is too small")
 	}
 	return encoded, nil
+}
+
+func candidateOverlapsEvidenceScope(candidate retrieval.EvidenceCandidate, scope EvidenceSearchResolvedScope) bool {
+	for _, coordinate := range candidate.Coordinates {
+		if coordinate.Kind == "pdf_region" && coordinate.Page >= scope.PageStart && coordinate.Page <= scope.PageEnd {
+			return true
+		}
+	}
+	return false
 }
 
 func buildSearchEvidenceModelOutput(manifest searchEvidenceResult, candidates []retrieval.EvidenceCandidate, byteLimit int) (json.RawMessage, error) {
