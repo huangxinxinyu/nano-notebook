@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "id": "nano-research-baseline-v1",
+  "release": "nano.default@25",
+  "repeats": 5,
+  "protocol": {
+    "fixed_source_instruction": "仅研究所选论文，材料版本以Notebook中的文件为准，无需寻找补充资料。请用中文回答，关键论断引用所选资料；区分原文结论与自己的推断。",
+    "open_instruction": "面向熟悉后端和大模型基础的工程师，用中文完成一份约1200至1800字的专题研究报告。信息范围截至2026年9月5日。自主检索并阅读至少3份一手资料，重要结论给出直接来源链接；区分实证结果、作者主张和你的工程推断。不要只罗列链接。研究范围已确定，请直接拟定可执行计划供确认。",
+    "plan_confirmation": "Accept the first valid plan without editing or providing extra information. If clarification is still required, the trial fails under this fixed interaction protocol.",
+    "retries": "No experiment-level retries of an admitted trial. Product-internal retries remain unchanged.",
+    "grading": "Every task-specific rubric item, citation support, and absence of material fabrication must pass. Incomplete or ungraded trials cannot be reported as success."
+  },
+  "sources": {
+    "react": {"title":"ReAct: Synergizing Reasoning and Acting in Language Models","url":"https://arxiv.org/pdf/2210.03629v3"},
+    "reflexion": {"title":"Reflexion: Language Agents with Verbal Reinforcement Learning","url":"https://arxiv.org/pdf/2303.11366v4"},
+    "lats": {"title":"Language Agent Tree Search Unifies Reasoning Acting and Planning in Language Models","url":"https://arxiv.org/pdf/2310.04406v3"},
+    "lost-middle": {"title":"Lost in the Middle: How Language Models Use Long Contexts","url":"https://arxiv.org/pdf/2307.03172v3"},
+    "self-rag": {"title":"Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection","url":"https://arxiv.org/pdf/2310.11511v1"},
+    "crag": {"title":"Corrective Retrieval Augmented Generation","url":"https://arxiv.org/pdf/2401.15884v1"},
+    "toolformer": {"title":"Toolformer: Language Models Can Teach Themselves to Use Tools","url":"https://arxiv.org/pdf/2302.04761v1"},
+    "rag": {"title":"Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks","url":"https://arxiv.org/pdf/2005.11401v1"}
+  },
+  "cases": [
+    {"id":"single-react","category":"single","mode":"chat","sources":["react"],"prompt":"精读ReAct：它针对推理与行动分离的什么问题？解释一次reasoning/action/observation交互如何推进任务；分别说明知识任务和交互任务的实验设置及主要发现；找出至少一个论文揭示的失败情形。不能把示例轨迹当作所有任务的性能证明。","rubric":["准确解释推理与行动交错、通过环境观察补充信息和调整后续行为。","覆盖HotpotQA/FEVER与ALFWorld/WebShop两类任务，说明至少一项具体实验比较而非仅列名字。","指出有原文依据的失败或限制，并不宣称能消除全部幻觉。"]},
+    {"id":"single-reflexion","category":"single","mode":"chat","sources":["reflexion"],"prompt":"精读Reflexion：解释Actor、Evaluator与Self-Reflection各自职责、反思内容如何影响下一次尝试，以及它是否更新模型权重。结合一项实验和一项消融，判断结果支持什么、不支持什么。","rubric":["区分执行、反馈评估和生成文字反思，并解释跨尝试的反思记忆。","明确通过语言反馈和上下文改进而不是梯度更新模型权重。","准确讨论至少一项实验和一项消融，不把多次尝试收益误述为不增加预算的单次能力提升。"]},
+    {"id":"single-lats","category":"single","mode":"chat","sources":["lats"],"prompt":"精读LATS：描述一次树搜索的选择、扩展、评估和回传过程，说明语言模型、环境反馈和反思各自参与哪里。选一个实验解释指标及比较对象，并分析搜索预算带来的实际限制。","rubric":["准确说明基于MCTS的轨迹搜索以及选择、扩展、评估/模拟、回传的关系。","区分模型生成/价值判断、环境反馈与反思，不把它说成仅多写几条思维链。","给出原文支持的实验比较，指出搜索额外开销且不把多路径搜索当成一次普通模型调用。"]},
+    {"id":"single-lost-middle","category":"single","mode":"chat","sources":["lost-middle"],"prompt":"精读Lost in the Middle：作者如何通过多文档问答和键值检索检验长上下文利用能力？位置和长度分别如何影响结果？据此给研究助手的资料组织提出两条建议，并明确哪些是论文发现、哪些是你的推断。","rubric":["正确描述多文档问答和键值检索，以及改变相关信息位置的实验方法。","说明相关信息处于中间时常出现性能下降，支持长窗口不等于有效利用全部上下文；不泛化为所有模型所有任务必然如此。","提出两条与结果相关的资料组织建议，并明确工程建议是推断而非论文直接验证。"]},
+    {"id":"compare-feedback","category":"comparison","mode":"chat","sources":["react","reflexion","lats"],"prompt":"比较ReAct、Reflexion和LATS利用反馈的时机、保存的信息和改变决策的方式。以研究助手搜索失败为例说明三者可能如何应对，并说明为什么不能直接按三篇论文的最高成绩给方法排名。","rubric":["区分ReAct轨迹内观察、Reflexion跨尝试文字反思、LATS搜索分支评估和反思。","以搜索失败为例给出与机制一致的应对，并标记为应用推演。","明确模型、任务、工具或搜索/重试预算差异阻止直接跨论文排名。"]},
+    {"id":"compare-tool-learning","category":"comparison","mode":"chat","sources":["react","toolformer"],"prompt":"对照ReAct和Toolformer：它们如何获得工具使用能力，是否需要模型训练，工具返回结果如何进入生成过程？如果只能调用闭源模型API且不能微调，应如何借鉴两篇论文？说明依据和限制。","rubric":["区分ReAct提示与交互范式和Toolformer通过采样、筛选API调用示例再训练的办法；承认ReAct论文也探索微调而非断言永不训练。","准确说明两者如何利用工具返回，不把Toolformer当作单纯手写工具提示。","给出闭源API约束下的可行选择，明确哪些训练步骤无法直接复现。"]},
+    {"id":"compare-retrieval-control","category":"comparison","mode":"chat","sources":["rag","self-rag","crag"],"prompt":"比较原始RAG、Self-RAG和CRAG对何时检索、检索结果质量、生成后评价的处理。为文档研究助手提出可借鉴的控制流程，说明哪些机制要求训练、哪些可作为工程类比，并避免把所有方法概括为同一种自我反思。","rubric":["区分原始RAG检索与生成结合、Self-RAG的检索/反思标记、CRAG的检索质量评估与纠正策略。","正确区分机制中的学习要求与可用提示/规则近似的工程方案，不声称等价复现。","给出可理解的控制流程，说明其依据和未被这些论文直接验证的部分。"]},
+    {"id":"compare-context-retrieval","category":"comparison","mode":"chat","sources":["lost-middle","rag"],"prompt":"结合Lost in the Middle和RAG讨论：把所有论文塞入长上下文，是否足以替代检索？比较相关性筛选、信息位置、遗漏风险和证据追溯。给出适用条件，不要从两篇论文推出通用胜负结论。","rubric":["准确结合位置敏感性与检索选择外部资料的机制。","同时讨论长上下文的信息利用问题和检索漏召回问题，不把检索视为无损。","给出有条件的选择或组合方案，明确两篇论文不是同条件下长上下文对RAG的直接对照。"]},
+    {"id":"compare-trial-search","category":"comparison","mode":"chat","sources":["reflexion","lats"],"prompt":"比较Reflexion的跨尝试改进与LATS的树搜索。说明反馈是否可靠、环境是否可重置、尝试预算如何影响适用性，并设计一个公平比较两者的最小实验方案。实验方案是你的设计，不得伪称论文结果。","rubric":["正确区分跨尝试记忆和树内多分支探索。","讨论反馈质量、环境重置/分支执行条件和计算预算。","比较方案固定任务、底座模型、工具和预算，定义可验证结果，明确方案是新设计。"]},
+    {"id":"compare-correction","category":"comparison","mode":"chat","sources":["self-rag","crag"],"prompt":"对照Self-RAG和CRAG，分析一批召回文档里同时存在相关、无关和相互冲突材料时，两种方法有什么机制可以利用、又有什么不能保证。依据原文给出至少一个实验或消融证据，并区分相关性与事实真实性。","rubric":["正确描述Self-RAG反思评价与CRAG检索质量分类/纠正，不混淆两种机制。","明确相关性或模型自评不等于事实真实性，不能保证自动解决所有矛盾。","引用并准确解释至少一个原文实验或消融，限制结论到实验支持范围。"]},
+    {"id":"open-context","category":"open","mode":"research","sources":[],"prompt":"为需要连续处理多篇论文的长任务研究助手调研上下文管理方案。至少比较保留近期窗口、摘要压缩、外部持久化后按需检索三条路线；说明什么信息容易丢失、如何保持来源可追溯，并给出适用条件。","rubric":["三条路线均有准确机制和一手依据，不把持久化存储等同于自动被模型记住。","分析压缩遗漏、检索遗漏及早期约束/证据来源保留问题。","给出按任务条件选择或组合的建议，清楚区分资料结论和建议。"]},
+    {"id":"open-memory","category":"open","mode":"research","sources":[],"prompt":"调研Agent的跨会话记忆设计。比较直接保存历史、结构化事实记忆、可检索的情景记忆，分析更新、冲突、过时信息和删除问题；针对个人研究助手给出有条件的选择建议。","rubric":["至少比较三种指定记忆表示及读写过程，区分当前上下文和跨会话存储。","讨论冲突、时效性与删除，而不只是罗列框架名称。","建议能对应研究助手场景，并有一手资料支持且承认未验证的权衡。"]},
+    {"id":"open-evaluation","category":"open","mode":"research","sources":[],"prompt":"为研究型Agent设计任务完成质量评测。调研pass@k、pass^k、基于评分准则的模型评委和引用支持性检查，解释各自衡量什么与可能误导之处，给出一个小规模可实施实验协议。","rubric":["正确区分至少一次成功和全部成功，说明重复次数及独立性/初始状态口径。","说明开放式研究需要任务评分准则和证据核查，模型评委不是天然真值。","协议冻结任务、配置和评分规则，并处理缺失/未判分运行，不只给理论公式。"]},
+    {"id":"open-agentic-rag","category":"open","mode":"research","sources":[],"prompt":"研究助手何时值得从单次检索生成升级为迭代检索？调研至少三种有一手资料的方法，比较查询改写、证据缺口判断、补充检索和停止条件，并讨论可能没有收益的情形。","rubric":["介绍至少三种可验证方法，具体解释检索控制差异。","覆盖改写、缺口、补充和停止，避免把重复调用检索本身当质量保证。","同时分析收益条件和额外检索引入的噪声/错误风险，不虚构统一实验排名。"]},
+    {"id":"open-injection","category":"open","mode":"research","sources":[],"prompt":"调研研究助手阅读网页和PDF时的间接提示注入风险。解释一条从不可信资料到错误行动的攻击链，比较输入过滤、指令与数据隔离、工具权限限制三类防御，分析证据支持的效果与残余风险。","rubric":["清楚解释来自外部内容的指令如何越过信任边界，不混同普通事实错误。","三类防御均给出机制、适用边界和一手依据。","不承诺某个提示或过滤器能完全消除风险，区分已评估效果与推断。"]},
+    {"id":"open-tool-interface","category":"open","mode":"research","sources":[],"prompt":"调研研究Agent接入外部工具时，直接函数工具接口和MCP分别负责什么。比较工具发现、输入输出约束、权限边界与失败反馈；说明统一协议能解决和不能解决的问题，避免把协议当作Agent规划算法。","rubric":["准确区分工具接入协议/接口与Agent决策执行逻辑。","覆盖发现、结构约束、权限和错误反馈，至少一个具体调用生命周期。","说明协议互通不保证语义正确、授权正确或任务成功，有官方资料支撑。"]},
+    {"id":"open-durable","category":"open","mode":"research","sources":[],"prompt":"调研长任务Agent在进程中断后恢复执行的方案。比较保存对话历史、步骤检查点和持久化工作流，特别分析外部工具已经执行但结果未保存的情况，并提出针对只读研究任务的设计建议。","rubric":["区分对话历史、步骤检查点和工作流运行状态，不混为同一种持久化。","准确分析外部副作用与结果落盘之间的不确定窗口，不宣称检查点天然保证exactly-once。","给出只读研究场景下的恢复与重试方案，明确可复用结果和需要重做的工作。"]},
+    {"id":"open-research-workflow","category":"open","mode":"research","sources":[],"prompt":"调研深度研究助手如何从用户问题形成有证据支持的报告。比较至少三种公开方案在问题分解、资料发现、正文阅读、证据整合和报告检查上的做法，区分产品宣传与公开可验证的机制。","rubric":["比较至少三种有一手资料的公开方案，覆盖五个指定环节。","区分候选搜索结果和读过正文后的证据，不以链接数量替代支撑性。","明确哪些机制公开可核查、哪些未披露或仅为宣传，给出有条件的总结。"]},
+    {"id":"open-multiagent","category":"open","mode":"research","sources":[],"prompt":"研究复杂文献调研是否需要多个Agent。比较单Agent迭代、并行独立子研究、带共享状态的协作三种模式，分析任务拆分、信息重复、观点冲突和最终汇总，并说明什么情况下应保持单Agent。","rubric":["三种模式机制清楚，有公开论文或官方工程资料支持。","分析拆分、重复、冲突与汇总中的具体问题，不把增加Agent数量当成必然改进。","明确保留单Agent的条件及多Agent证据的实验/场景边界。"]},
+    {"id":"open-citations","category":"open","mode":"research","sources":[],"prompt":"调研有引用的生成式研究报告应如何验证可信度。区分引用存在、引用正确、论断被支持、重要论断覆盖四个层次；比较自动验证和人工核查方法，提出适合Notebook研究助手的最小检查流程。","rubric":["准确区分引用可访问/存在、指向正确、内容支持与论断覆盖，不把有链接当作有证据。","比较自动与人工方法及模型评审局限，引用一手研究或官方方案。","给出能落地到论断与原文对应关系的检查流程，并处理不支持或找不到原文的情况。"]}
+  ]
+}
