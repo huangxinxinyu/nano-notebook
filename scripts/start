@@ -5,14 +5,16 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 # The Worker runs natively while local provider credentials live beside the
-# Compose topology. Import only the accepted Brave key without evaluating the
-# rest of the dotenv file as shell code.
-if [ -z "${NANO_BRAVE_SEARCH_API_KEY:-}" ] && [ -f "$ROOT/infra/compose/.env" ]; then
-  nano_brave_env_line="$(grep -m1 '^NANO_BRAVE_SEARCH_API_KEY=' "$ROOT/infra/compose/.env" || true)"
-  if [ -n "$nano_brave_env_line" ]; then
-    export NANO_BRAVE_SEARCH_API_KEY="${nano_brave_env_line#*=}"
+# Compose topology. Import only the accepted provider keys without evaluating
+# the rest of the dotenv file as shell code.
+for nano_provider_key in NANO_BRAVE_SEARCH_API_KEY NANO_E2B_API_KEY; do
+  if [ -z "${!nano_provider_key:-}" ] && [ -f "$ROOT/infra/compose/.env" ]; then
+    nano_provider_env_line="$(grep -m1 "^${nano_provider_key}=" "$ROOT/infra/compose/.env" || true)"
+    if [ -n "$nano_provider_env_line" ]; then
+      export "${nano_provider_key}=${nano_provider_env_line#*=}"
+    fi
   fi
-fi
+done
 
 export NANO_DATABASE_URL="${NANO_DATABASE_URL:-postgres://nano:nano@localhost:55432/nano?sslmode=disable}"
 export NANO_CONTROL_PLANE_ADDR="${NANO_CONTROL_PLANE_ADDR:-:8080}"

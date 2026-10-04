@@ -21,6 +21,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs/otelbridge"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentoutbox"
 	"github.com/huangxinxinyu/nano-notebook/internal/app"
+	"github.com/huangxinxinyu/nano-notebook/internal/codesandbox"
 	"github.com/huangxinxinyu/nano-notebook/internal/documentreading"
 	"github.com/huangxinxinyu/nano-notebook/internal/documentrender"
 	"github.com/huangxinxinyu/nano-notebook/internal/evidence"
@@ -115,6 +116,9 @@ type workerConfig struct {
 	SourceAdmissionMode            sourceadmission.Mode
 	SourceAdmissionQueryTimeout    time.Duration
 	BraveSearchAPIKey              string
+	E2BAPIKey                      string
+	E2BTemplate                    string
+	E2BDomain                      string
 	SourceDiscoveryLease           time.Duration
 	SourceDiscoveryPoll            time.Duration
 	AgentInteractiveConcurrency    int
@@ -540,9 +544,23 @@ func main() {
 		slog.Error("Research workspace Tools invalid", "error", err)
 		os.Exit(1)
 	}
+	// Without a key the Tool stays registered but unavailable, so pinned
+	// definitions still resolve and the model never sees it.
+	var codeRunner codesandbox.Runner
+	if config.E2BAPIKey != "" {
+		codeRunner, err = codesandbox.NewE2BRunner(codesandbox.E2BConfig{
+			APIKey: config.E2BAPIKey, Template: config.E2BTemplate, Domain: config.E2BDomain,
+			HTTPClient: &http.Client{Transport: otelhttp.NewTransport(http.DefaultTransport)},
+		})
+		if err != nil {
+			slog.Error("E2B Code Sandbox invalid", "error", err)
+			os.Exit(1)
+		}
+	}
+	runPythonTool := agent.NewResearchRunPythonAction(codeRunner, db.Pool(), workspaceObjects)
 	registryTools := []agent.Action{
 		calculateTool, currentTimeTool, discoverSourcesTool, rewriteTodoListTool, inspectSourceTool, searchEvidenceTool, updateTodoStatusTool,
-		webSearchTool, readSkillTool, readToolResultTool, readURLTool, readDocumentPagesTool, saveURLAsSourceTool,
+		webSearchTool, readSkillTool, readToolResultTool, readURLTool, readDocumentPagesTool, saveURLAsSourceTool, runPythonTool,
 	}
 	registryTools = append(registryTools, workspaceTools...)
 	runtimeSubagentTools := agent.NewRuntimeSubagentToolRegistrations(db.Pool(), traceSink)
@@ -568,6 +586,7 @@ func main() {
 		agent.MCPToolRegistration{Action: readURLTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: readDocumentPagesTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: saveURLAsSourceTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: runPythonTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
 	}
 	for _, workspaceTool := range workspaceTools {
 		scheduling := agentcatalog.ToolParallel
@@ -1104,6 +1123,9 @@ func loadWorkerConfig() (workerConfig, error) {
 		SourceAdmissionMode:         sourceadmission.Mode(strings.ToLower(strings.TrimSpace(env("NANO_SOURCE_ADMISSION_MODE", "shadow")))),
 		SourceAdmissionQueryTimeout: sourceAdmissionQueryTimeout,
 		BraveSearchAPIKey:           strings.TrimSpace(os.Getenv("NANO_BRAVE_SEARCH_API_KEY")),
+		E2BAPIKey:                   strings.TrimSpace(os.Getenv("NANO_E2B_API_KEY")),
+		E2BTemplate:                 strings.TrimSpace(os.Getenv("NANO_E2B_TEMPLATE")),
+		E2BDomain:                   strings.TrimSpace(os.Getenv("NANO_E2B_DOMAIN")),
 		SourceDiscoveryLease:        sourceDiscoveryLease, SourceDiscoveryPoll: sourceDiscoveryPoll,
 		AgentInteractiveConcurrency: agentInteractiveConcurrency, SourceProcessingConcurrency: sourceProcessingConcurrency,
 		ReplayKeyID: env("NANO_REPLAY_KEY_ID", "nano-local-replay-key-v1"), ReplayKEK: replayKEK,

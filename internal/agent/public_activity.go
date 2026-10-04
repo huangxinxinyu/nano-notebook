@@ -70,6 +70,11 @@ func projectPublicActivity(action AcceptedAction, startedAt time.Time, context p
 		if json.Unmarshal(action.Input, &input) == nil {
 			activity.Kind = "calculating"
 		}
+	case runPythonActionName:
+		var input runPythonInput
+		if json.Unmarshal(action.Input, &input) == nil {
+			activity.Kind = "calculating"
+		}
 	case "rewrite_todo_list":
 		var input rewriteTodoListInput
 		if json.Unmarshal(action.Input, &input) == nil {

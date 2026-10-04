@@ -52,6 +52,18 @@ var actionErrorCatalog = map[string]ActionError{
 		Kind: "domain", Code: "web_search_invalid_response", Retryable: true,
 		Message: "Web search returned an unusable response.", Suggestion: "Retry once with a simpler query or use another source.",
 	},
+	"code_sandbox_unavailable": {
+		Kind: "domain", Code: "code_sandbox_unavailable", Retryable: true,
+		Message: "The Python sandbox is currently unavailable.", Suggestion: "Retry once later or continue without computed results.",
+	},
+	"code_sandbox_rate_limited": {
+		Kind: "domain", Code: "code_sandbox_rate_limited", Retryable: true,
+		Message: "The Python sandbox is temporarily rate limited.", Suggestion: "Wait before retrying or continue without computed results.",
+	},
+	"code_sandbox_request_invalid": {
+		Kind: "domain", Code: "code_sandbox_request_invalid",
+		Message: "The Python code or input files exceed the sandbox limits.", Suggestion: "Use fewer or smaller input files and shorter code.",
+	},
 	"read_url_unavailable": {
 		Kind: "domain", Code: "read_url_unavailable", Retryable: true,
 		Message: "Page reading is currently unavailable.", Suggestion: "Retry later or use another accessible source.",

@@ -24,8 +24,8 @@ const (
 
 var researchWorkspaceNestedPathPattern = regexp.MustCompile(`^(?:notes|sections)/[a-z0-9][a-z0-9._-]{0,79}\.md$`)
 
-// Data files hold tabular or structured intermediate results; they are never
-// report sections.
+// Data files hold tabular or structured intermediate results, written directly
+// or saved from run_python output; they are never report sections.
 var researchWorkspaceDataPathPattern = regexp.MustCompile(`^data/[a-z0-9][a-z0-9._-]{0,79}\.(?:csv|json|txt|md)$`)
 
 type researchWorkspaceFileOutput struct {
@@ -102,8 +102,23 @@ func researchWorkspaceSnapshotFromPrefix(prefix CheckpointPrefix) researchWorksp
 	snapshot := researchWorkspaceSnapshot{Files: make(map[string]researchWorkspaceFile)}
 	for _, proposal := range prefix.Proposals {
 		for _, action := range proposal.Actions {
-			if action.Result == nil || action.Result.Status != ActionSucceeded ||
-				(action.Name != "write_research_file" && action.Name != "assemble_research_report") {
+			if action.Result == nil || action.Result.Status != ActionSucceeded {
+				continue
+			}
+			if action.Name == runPythonActionName {
+				var output struct {
+					Files []researchWorkspaceFile `json:"files"`
+				}
+				if json.Unmarshal(action.Result.Output, &output) == nil {
+					for _, file := range output.Files {
+						if validateResearchWorkspaceFile(file) == nil && researchWorkspaceDataPathPattern.MatchString(file.Path) {
+							snapshot.Files[file.Path] = file
+						}
+					}
+				}
+				continue
+			}
+			if action.Name != "write_research_file" && action.Name != "assemble_research_report" {
 				continue
 			}
 			var file researchWorkspaceFile
