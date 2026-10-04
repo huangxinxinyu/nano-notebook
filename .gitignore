@@ -13,7 +13,7 @@ test-results/
 playwright-report/
 .DS_Store
 infra/compose/.env
-infra/bifrost/config.json
+infra/bifrost/logs/
 .superpowers
 .claude
 .trae-html-share-packages/

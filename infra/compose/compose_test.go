@@ -333,3 +333,18 @@ func contains(values []string, want string) bool {
 	}
 	return false
 }
+
+func TestProductionBifrostMountsInternationalConfig(t *testing.T) {
+	data, err := os.ReadFile("compose.prod.yaml")
+	if err != nil {
+		t.Fatalf("read compose.prod.yaml: %v", err)
+	}
+	var file composeFile
+	if err := yaml.Unmarshal(data, &file); err != nil {
+		t.Fatalf("parse compose.prod.yaml: %v", err)
+	}
+	bifrost := file.Services["bifrost"]
+	if !contains(bifrost.Volumes, "../bifrost/config.prod.json:/app/data/config.json:ro") {
+		t.Fatalf("production Bifrost does not mount config.prod.json: %v", bifrost.Volumes)
+	}
+}

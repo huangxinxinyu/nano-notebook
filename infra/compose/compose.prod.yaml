@@ -426,6 +426,8 @@ services:
       LOG_STYLE: json
     volumes:
       - ../bifrost:/app/data
+      # Production reaches DashScope through its international endpoint.
+      - ../bifrost/config.prod.json:/app/data/config.json:ro
     restart: unless-stopped
 
   mailpit:

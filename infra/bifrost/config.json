@@ -41,12 +41,32 @@
         "default_request_timeout_in_seconds": 60,
         "max_retries": 2
       }
+    },
+    "cohere": {
+      "keys": [
+        {
+          "name": "cohere-rerank-local",
+          "value": "env.COHERE_API_KEY",
+          "models": [
+            "rerank-v4.0-pro"
+          ],
+          "weight": 1
+        }
+      ],
+      "network_config": {
+        "default_request_timeout_in_seconds": 60,
+        "max_retries": 2
+      }
     }
   },
   "config_store": {
     "enabled": false
   },
   "logs_store": {
-    "enabled": false
+    "enabled": true,
+    "type": "sqlite",
+    "config": {
+      "path": "./logs.db"
+    }
   }
 }

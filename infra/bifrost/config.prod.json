@@ -1,0 +1,72 @@
+{
+  "$schema": "https://www.getbifrost.ai/schema",
+  "providers": {
+    "aliyun": {
+      "keys": [
+        {
+          "name": "dashscope-prod",
+          "value": "env.DASHSCOPE_API_KEY",
+          "models": [
+            "qwen-plus",
+            "qwen-flash"
+          ],
+          "weight": 1
+        }
+      ],
+      "network_config": {
+        "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode",
+        "default_request_timeout_in_seconds": 180,
+        "max_retries": 2
+      },
+      "custom_provider_config": {
+        "base_provider_type": "openai",
+        "allowed_requests": {
+          "chat_completion": true,
+          "chat_completion_stream": true
+        }
+      }
+    },
+    "gemini": {
+      "keys": [
+        {
+          "name": "gemini-embedding-prod",
+          "value": "env.GEMINI_API_KEY",
+          "models": [
+            "gemini-embedding-2"
+          ],
+          "weight": 1
+        }
+      ],
+      "network_config": {
+        "default_request_timeout_in_seconds": 60,
+        "max_retries": 2
+      }
+    },
+    "cohere": {
+      "keys": [
+        {
+          "name": "cohere-rerank-prod",
+          "value": "env.COHERE_API_KEY",
+          "models": [
+            "rerank-v4.0-pro"
+          ],
+          "weight": 1
+        }
+      ],
+      "network_config": {
+        "default_request_timeout_in_seconds": 60,
+        "max_retries": 2
+      }
+    }
+  },
+  "config_store": {
+    "enabled": false
+  },
+  "logs_store": {
+    "enabled": true,
+    "type": "sqlite",
+    "config": {
+      "path": "./logs.db"
+    }
+  }
+}
