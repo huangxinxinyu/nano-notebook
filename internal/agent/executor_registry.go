@@ -154,6 +154,9 @@ func (r *ExecutorRegistry) Resolve(reference agentcatalog.Reference) (ResolvedEx
 // concurrent calls to it needs its own rate-limit accounting first.
 func NanoToolCapabilities() map[string]agentcatalog.ToolCapability {
 	return map[string]agentcatalog.ToolCapability{
+		"spawn_agent":              {Scheduling: agentcatalog.ToolOrderedSync},
+		"wait_agent":               {Scheduling: agentcatalog.ToolOrderedSync},
+		"list_agents":              {Scheduling: agentcatalog.ToolParallel},
 		"assemble_research_report": {Scheduling: agentcatalog.ToolOrderedSync},
 		"calculate":                {Scheduling: agentcatalog.ToolParallel},
 		"current_time":             {Scheduling: agentcatalog.ToolParallel},
@@ -241,6 +244,7 @@ func ResearchRootExecutorCapability() agentcatalog.ExecutorCapability {
 			agentcatalog.MustParseReference("skill.research-workflow@2"): true,
 		},
 		Tools: map[string]bool{
+			"spawn_agent": true, "wait_agent": true, "list_agents": true,
 			"assemble_research_report": true, "list_research_files": true, "read_research_file": true,
 			"inspect_source": true, "read_document_pages": true, "read_tool_result": true, "read_url": true, "save_url_as_source": true,
 			"rewrite_todo_list": true, "search_evidence": true, "update_todo_status": true,

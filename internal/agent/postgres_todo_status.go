@@ -28,7 +28,8 @@ func (r *PostgresRuntime) LoadTodoActionState(ctx context.Context, attempt Attem
 		select coalesce(r.input_message_id,product.input_message_id),checkpoint.created_at
 		from agent_runs r
 		join agent_jobs job on job.run_id=r.id
-		left join chat_runs product on product.root_agent_run_id=r.id
+		left join agent_trees tree on tree.id=r.tree_id
+		left join chat_runs product on product.root_agent_run_id=tree.root_agent_run_id
 		join agent_run_checkpoints checkpoint on checkpoint.run_id=r.id
 		where r.id=$1 and job.id=$2 and job.lease_token=$3::uuid and job.attempt_no=$4
 		  and r.status='running' and job.status='running' and job.lease_expires_at>now()
@@ -82,12 +83,13 @@ func loadTodoScopePrefixes(ctx context.Context, tx pgx.Tx, currentRunID, inputMe
 		with current_run as (
 			select coalesce(r.chat_id,product.chat_id) chat_id,r.created_at,r.id,
 				r.runtime_kind current_runtime_kind,r.executor_identity current_executor_identity
-			from agent_runs r left join chat_runs product on product.root_agent_run_id=r.id
+			from agent_runs r left join agent_trees tree on tree.id=r.tree_id left join chat_runs product on product.root_agent_run_id=tree.root_agent_run_id
 			where r.id=$1
 		)
 		select r.id
 		from agent_runs r
-		left join chat_runs product on product.root_agent_run_id=r.id
+		left join agent_trees tree on tree.id=r.tree_id
+		left join chat_runs product on product.root_agent_run_id=tree.root_agent_run_id
 		cross join current_run current
 		where coalesce(r.input_message_id,product.input_message_id)=$2
 		  and coalesce(r.chat_id,product.chat_id)=current.chat_id

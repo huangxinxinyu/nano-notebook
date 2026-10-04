@@ -50,9 +50,19 @@ func (r *ResearchRuntime) WithToolResultReader(reader ToolResultReader) *Researc
 	return r
 }
 
+func (r *ResearchRuntime) WithTraceSink(sink TraceSink) *ResearchRuntime {
+	if r != nil {
+		r.base.traceSink = sink
+	}
+	return r
+}
+
 func (*ResearchRuntime) InvalidModelResponseRetryLimit() int { return 5 }
 
 func (*ResearchRuntime) PrepareDecisionResponse(_ context.Context, execution Execution, prefix CheckpointPrefix, decision models.ModelDecision) (models.ModelDecision, error) {
+	if execution.ParentRunID != "" {
+		return decision, nil
+	}
 	sourceFirst := isSourceFirstResearchExecution(execution)
 	if decision.Final == nil || (!sourceFirst && !isResearchCompletionSignal(decision.Final.Text)) {
 		return decision, nil
@@ -170,9 +180,9 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 		from research_sessions session
 		join chat_messages message on message.id=session.input_message_id
 		join research_plan_versions plan on plan.session_id=session.id and plan.version=session.accepted_plan_version
-		join agent_runs run on run.id=session.execution_run_id
+		join agent_runs run on run.id=$1
 		join agent_definition_versions definition on definition.definition_identity=run.definition_identity and definition.definition_version=run.definition_version
-		where session.execution_run_id=$1 and session.status in ('running','publishing')
+		where session.execution_run_id=nano_research_root_run($1) and session.status in ('running','publishing')
 	`, execution.RunID).Scan(&sessionID, &originalRequest, &planJSON, &executorReference, &reporterReference)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return models.ModelRequest{}, ErrLeaseLost
@@ -189,6 +199,10 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 		return models.ModelRequest{}, err
 	}
 	system := strings.TrimSpace(executorPrompt.Content) + "\n\nFinal report requirements:\n" + strings.TrimSpace(reporterPrompt.Content)
+	if execution.ParentRunID != "" {
+		system = strings.TrimSpace(executorPrompt.Content)
+		originalRequest = execution.SubagentTask
+	}
 	system += "\n\n" + researchExecutionControlPrompt(execution.ActionBatchLimit)
 	workflow, err := researchWorkflowSkillPrompt(execution, r.skills)
 	if err != nil {
@@ -196,6 +210,9 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 	}
 	if workflow != "" {
 		system += "\n\nMandatory Research workflow Skill:\n" + workflow
+	}
+	if execution.ParentRunID != "" {
+		system += "\n\n" + runtimeSubagentInstructions
 	}
 	if isSourceFirstResearchExecution(execution) {
 		projection, err := r.loadResearchSourceImportProjection(ctx, execution.RunID)
@@ -318,7 +335,7 @@ func (r *ResearchRuntime) loadReadResearchURLSet(ctx context.Context, runID stri
 		select ledger.url,coalesce(ledger.final_url,'')
 		from research_evidence_ledger ledger
 		join research_sessions session on session.id=ledger.session_id
-		where session.execution_run_id=$1 and ledger.status='read'
+		where session.execution_run_id=nano_research_root_run($1) and ledger.status='read'
 	`, runID)
 	if err != nil {
 		return nil, err
@@ -356,6 +373,9 @@ func researchFinalOnlyPrompt() string {
 func (r *ResearchRuntime) PrepareFinal(ctx context.Context, _ Attempt, execution Execution, prefix CheckpointPrefix, draft models.FinalDraft) (models.FinalDraft, error) {
 	if err := draft.Validate(); err != nil {
 		return models.FinalDraft{}, err
+	}
+	if execution.ParentRunID != "" {
+		return draft, nil
 	}
 	assembled, ok, err := loadAssembledResearchReport(ctx, r.workspace, prefix)
 	if err != nil {
@@ -511,6 +531,13 @@ func selectUnattemptedResearchURLs(candidates []string, attempted map[string]boo
 }
 
 func (r *ResearchRuntime) PublishFinal(ctx context.Context, attempt Attempt, draft models.FinalDraft) error {
+	child, err := r.base.IsSubagent(ctx, attempt)
+	if err != nil {
+		return err
+	}
+	if child {
+		return r.publishRuntimeSubagentFinal(ctx, attempt, draft)
+	}
 	if err := draft.Validate(); err != nil {
 		return err
 	}
@@ -657,7 +684,7 @@ func (r *ResearchRuntime) materializeCompletedResearchEvidence(ctx context.Conte
 	}
 	defer tx.Rollback(ctx)
 	var sessionID string
-	if err := tx.QueryRow(ctx, `select id from research_sessions where execution_run_id=$1 and status='running'`, attempt.RunID).Scan(&sessionID); err != nil {
+	if err := tx.QueryRow(ctx, `select id from research_sessions where execution_run_id=nano_research_root_run($1) and status='running'`, attempt.RunID).Scan(&sessionID); err != nil {
 		return err
 	}
 	for _, action := range proposal.Actions {
@@ -718,7 +745,7 @@ func (r *ResearchRuntime) materializeCompletedStep(ctx context.Context, attempt 
 	}
 	defer tx.Rollback(ctx)
 	var sessionID string
-	if err := tx.QueryRow(ctx, `select id from research_sessions where execution_run_id=$1 and status='running'`, attempt.RunID).Scan(&sessionID); err != nil {
+	if err := tx.QueryRow(ctx, `select id from research_sessions where execution_run_id=nano_research_root_run($1) and status='running'`, attempt.RunID).Scan(&sessionID); err != nil {
 		return err
 	}
 	var startSeq, endSeq int
@@ -1223,7 +1250,43 @@ func sanitizeResearchReportLinks(ctx context.Context, tx pgx.Tx, sessionID, repo
 	if err != nil {
 		return "", nil, err
 	}
-	for reference := range searchedResearchSourceEvidence(prefix) {
+	searched := searchedResearchSourceEvidence(prefix)
+	// A completed child's accepted retrieval proves the same shared Source
+	// authority as the root's retrieval. Free-form child prose proves nothing.
+	childRows, err := tx.Query(ctx, `select child.id from agent_subagents s
+		join agent_runs child on child.id=s.child_run_id
+		where s.parent_run_id=$1 and child.status='completed' order by child.id`, runID)
+	if err != nil {
+		return "", nil, err
+	}
+	var childIDs []string
+	for childRows.Next() {
+		var id string
+		if err := childRows.Scan(&id); err != nil {
+			childRows.Close()
+			return "", nil, err
+		}
+		childIDs = append(childIDs, id)
+	}
+	err = childRows.Err()
+	childRows.Close()
+	if err != nil {
+		return "", nil, err
+	}
+	for _, childID := range childIDs {
+		childCheckpoints, err := loadRunCheckpoints(ctx, tx, childID)
+		if err != nil {
+			return "", nil, err
+		}
+		childPrefix, err := LoadCheckpointPrefix(ctx, childCheckpoints)
+		if err != nil {
+			return "", nil, err
+		}
+		for reference := range searchedResearchSourceEvidence(childPrefix) {
+			searched[reference] = struct{}{}
+		}
+	}
+	for reference := range searched {
 		sourceRows, err := tx.Query(ctx, `
 			select imported.requested_url,coalesce(imported.final_url_identity,''),
 				coalesce(source.origin_url,''),coalesce(source.final_url,'')

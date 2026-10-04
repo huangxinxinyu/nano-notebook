@@ -146,8 +146,12 @@ func (s *Store) ExpireIfOverdueWithMetrics(ctx context.Context, userID, runID st
 			and ($1 = '' or coalesce(r.user_id,product.user_id) = $1)
 			and ($2 = '' or r.id = $2 or exists(
 				select 1 from agent_run_delegations d where d.parent_run_id=$2 and d.child_run_id=r.id
+			) or exists(
+				select 1 from agent_subagents d where d.parent_run_id=$2 and d.child_run_id=r.id
 			))
-		order by r.id
+		-- Expire children before their root so root cleanup cannot cancel a
+		-- child already selected for deadline expiration in this transaction.
+		order by exists(select 1 from agent_subagents d where d.child_run_id=r.id) desc,r.id
 		for update of r, j`, userID, runID)
 	if err != nil {
 		return 0, err

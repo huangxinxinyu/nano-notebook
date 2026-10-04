@@ -26,6 +26,9 @@ func TestNanoToolCapabilitiesSchedulesOnlySideEffectFreeToolsInParallel(t *testi
 	capabilities := NanoToolCapabilities()
 	want := map[string]agentcatalog.ToolScheduling{
 		"assemble_research_report": agentcatalog.ToolOrderedSync,
+		"spawn_agent":              agentcatalog.ToolOrderedSync,
+		"wait_agent":               agentcatalog.ToolOrderedSync,
+		"list_agents":              agentcatalog.ToolParallel,
 		"calculate":                agentcatalog.ToolParallel,
 		"current_time":             agentcatalog.ToolParallel,
 		"discover_sources":         agentcatalog.ToolParallel,
@@ -181,6 +184,9 @@ func newTestExecutorRegistry(t *testing.T) *ExecutorRegistry {
 func productionToolCapabilities() map[string]agentcatalog.ToolCapability {
 	return map[string]agentcatalog.ToolCapability{
 		"assemble_research_report": {Scheduling: agentcatalog.ToolOrderedSync},
+		"spawn_agent":              {Scheduling: agentcatalog.ToolOrderedSync},
+		"wait_agent":               {Scheduling: agentcatalog.ToolOrderedSync},
+		"list_agents":              {Scheduling: agentcatalog.ToolParallel},
 		"calculate":                {Scheduling: agentcatalog.ToolOrderedSync},
 		"current_time":             {Scheduling: agentcatalog.ToolOrderedSync},
 		"discover_sources":         {Scheduling: agentcatalog.ToolOrderedSync},

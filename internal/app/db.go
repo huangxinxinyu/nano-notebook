@@ -3720,4 +3720,4 @@ create policy agent_jobs_worker on agent_jobs
 	for all to nano_worker
 	using (true)
 	with check (true);
-`
+` + runtimeSubagentSQL

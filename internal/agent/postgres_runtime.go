@@ -172,11 +172,12 @@ const executionSelectFrom = `
 		context_policy.pinned_max_output_tokens,context_policy.soft_input_limit_tokens,
 		context_policy.estimation_safety_tokens,context_policy.keep_recent_tokens,
 		context_policy.summary_max_output_tokens,context_policy.overflow_retry_limit,
-		coalesce(r.deadline_at,tree.absolute_deadline) > now()
+		coalesce(r.deadline_at,tree.absolute_deadline) > now(),coalesce(subagent.parent_run_id,''),coalesce(subagent.message,'')
 	from agent_runs r
 	join agent_jobs j on j.run_id = r.id
-	left join chat_runs product on product.root_agent_run_id=r.id
 	left join agent_trees tree on tree.id=r.tree_id
+	left join chat_runs product on product.root_agent_run_id=tree.root_agent_run_id
+	left join agent_subagents subagent on subagent.child_run_id=r.id
 	left join agent_definition_versions definition on definition.definition_identity=r.definition_identity and definition.definition_version=r.definition_version
 	left join agent_model_policy_versions policy
 		on policy.policy_identity=r.model_policy_identity and policy.policy_version=r.model_policy_version
@@ -232,7 +233,7 @@ func (r *PostgresRuntime) loadExecutionRow(ctx context.Context, tx pgx.Tx, where
 		&resolvedModel, &contextWindow, &providerMaxInput, &providerMaxOutput,
 		&tokenizerIdentity, &tokenizerVersion, &invocationMode,
 		&pinnedOutput, &softInput, &safety, &keepRecent, &summaryOutput, &overflowLimit,
-		&deadlineValid,
+		&deadlineValid, &execution.ParentRunID, &execution.SubagentTask,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Execution{}, false, ErrLeaseLost

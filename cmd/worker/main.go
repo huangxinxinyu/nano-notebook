@@ -542,6 +542,10 @@ func main() {
 		webSearchTool, readSkillTool, readToolResultTool, readURLTool, readDocumentPagesTool, saveURLAsSourceTool,
 	}
 	registryTools = append(registryTools, workspaceTools...)
+	runtimeSubagentTools := agent.NewRuntimeSubagentToolRegistrations(db.Pool(), traceSink)
+	for _, registration := range runtimeSubagentTools {
+		registryTools = append(registryTools, registration.Action)
+	}
 	registry, err := agent.NewActionRegistry(registryTools...)
 	if err != nil {
 		slog.Error("worker Action registry invalid", "error", err)
@@ -577,6 +581,7 @@ func main() {
 		os.Exit(1)
 	}
 	mcpToolRegistrations = append(mcpToolRegistrations, configuredDelegationTools...)
+	mcpToolRegistrations = append(mcpToolRegistrations, runtimeSubagentTools...)
 	mcpToolRegistry, err := agent.NewMCPToolRegistry(mcpToolRegistrations...)
 	if err != nil {
 		slog.Error("worker MCP Tool Registry invalid", "error", err)
@@ -600,7 +605,7 @@ func main() {
 		slog.Error("Research Runtime invalid", "error", err)
 		os.Exit(1)
 	}
-	researchRuntime.WithToolResultReader(toolResultReader)
+	researchRuntime.WithToolResultReader(toolResultReader).WithTraceSink(traceSink)
 	researchPlanningController := agent.NewMCPController(
 		researchPlanningRuntime, modelClient, registry, mcpToolHost, researchPlannerRoot,
 	).WithControllerMetrics(taskMetrics).WithToolResultCache(toolResultExternalizer, config.ToolResultInlineBytes)
@@ -865,7 +870,7 @@ func prepareRetrievalAuthority(ctx context.Context, authority retrievalAuthority
 }
 
 func loadWorkerConfig() (workerConfig, error) {
-	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@26"))
+	agentRelease, err := agentcatalog.ParseReference(env("NANO_AGENT_RELEASE", "nano.default@27"))
 	if err != nil {
 		return workerConfig{}, fmt.Errorf("parse NANO_AGENT_RELEASE: %w", err)
 	}

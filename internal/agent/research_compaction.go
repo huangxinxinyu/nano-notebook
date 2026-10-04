@@ -522,7 +522,7 @@ func (r *ResearchRuntime) appendResearchTaskMemory(ctx context.Context, executio
 		return err
 	}
 	var sessionID string
-	if err := tx.QueryRow(ctx, `select id from research_sessions where execution_run_id=$1 and status='running' for update`, execution.RunID).Scan(&sessionID); err != nil {
+	if err := tx.QueryRow(ctx, `select id from research_sessions where execution_run_id=nano_research_root_run($1) and status='running' for update`, execution.RunID).Scan(&sessionID); err != nil {
 		return err
 	}
 	id := researchArtifactIdentity("rmem_", execution.RunID, fmt.Sprint(memory.StartCheckpointSeq), fmt.Sprint(memory.EndCheckpointSeq), memory.SourceCapsulesSHA256, execution.ModelContext.Policy.SHA256)
@@ -631,9 +631,12 @@ func (r *ResearchRuntime) loadResearchArchivalSteps(ctx context.Context, runID s
 func (r *ResearchRuntime) loadResearchCompactionState(ctx context.Context, runID string) (string, string, error) {
 	var plan string
 	err := r.pool.QueryRow(ctx, `
-		select plan.plan_json::text from research_sessions session
+		select case when subagent.child_run_id is null then plan.plan_json
+			else jsonb_build_object('assigned_task',subagent.message,'parent_plan',plan.plan_json) end::text
+		from research_sessions session
 		join research_plan_versions plan on plan.session_id=session.id and plan.version=session.accepted_plan_version
-		where session.execution_run_id=$1 and session.status in ('running','publishing')
+		left join agent_subagents subagent on subagent.child_run_id=$1
+		where session.execution_run_id=nano_research_root_run($1) and session.status in ('running','publishing')
 	`, runID).Scan(&plan)
 	return plan, "execution", err
 }
@@ -714,7 +717,7 @@ func (r *ResearchRuntime) appendResearchArchivalCapsules(ctx context.Context, ex
 		return err
 	}
 	var sessionID string
-	if err := tx.QueryRow(ctx, `select id from research_sessions where execution_run_id=$1 and status='running' for update`, execution.RunID).Scan(&sessionID); err != nil {
+	if err := tx.QueryRow(ctx, `select id from research_sessions where execution_run_id=nano_research_root_run($1) and status='running' for update`, execution.RunID).Scan(&sessionID); err != nil {
 		return err
 	}
 	for _, capsule := range capsules {
@@ -761,7 +764,7 @@ func (r *ResearchRuntime) recordResearchCompactionFailure(ctx context.Context, e
 			id,session_id,run_id,attempt_no,layer,reason_code,start_checkpoint_seq,end_checkpoint_seq,
 			before_tokens,after_tokens,model_context_policy_identity,model_context_policy_version,model_context_policy_sha256
 		) select $1,session.id,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12
-		from research_sessions session where session.execution_run_id=$2
+		from research_sessions session where session.execution_run_id=nano_research_root_run($2)
 		on conflict(id) do nothing
 	`, identity, execution.RunID, execution.AttemptNo, layer, reason, start, end, before, after,
 		execution.ModelContext.Policy.Identity, execution.ModelContext.Policy.Version, execution.ModelContext.Policy.SHA256); err == nil {

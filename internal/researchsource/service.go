@@ -264,7 +264,7 @@ func resolveAuthority(ctx context.Context, tx pgx.Tx, attempt agent.Attempt) (im
 	err := tx.QueryRow(ctx, `
 		select session.id,session.user_id,session.chat_id,chat.notebook_id
 		from agent_runs run
-		join research_sessions session on session.execution_run_id=run.id
+		join research_sessions session on session.execution_run_id=nano_research_root_run(run.id)
 		join chat_chats chat on chat.id=session.chat_id
 		join notebook_memberships member on member.notebook_id=chat.notebook_id and member.user_id=session.user_id
 		join agent_jobs job on job.run_id=run.id

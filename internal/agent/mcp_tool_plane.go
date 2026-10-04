@@ -252,6 +252,24 @@ func (h *MCPToolHost) OpenAttempt(ctx context.Context, scope AttemptToolScope) (
 		}
 		toolNames = append(toolNames, name)
 	}
+	if loader, ok := h.authority.(interface {
+		IsSubagent(context.Context, Attempt) (bool, error)
+	}); ok {
+		child, err := loader.IsSubagent(ctx, scope.Attempt)
+		if err != nil {
+			return nil, err
+		}
+		if child {
+			inherited := toolNames[:0]
+			for _, name := range toolNames {
+				if name == "spawn_agent" || name == "wait_agent" || name == "list_agents" || strings.HasPrefix(name, "delegate.") {
+					continue
+				}
+				inherited = append(inherited, name)
+			}
+			toolNames = inherited
+		}
+	}
 	tools, err := h.registry.Scoped(toolNames)
 	if err != nil {
 		return nil, &ToolCallError{Kind: ToolErrorInvariant, Code: "tool_scope_invalid", Cause: err}

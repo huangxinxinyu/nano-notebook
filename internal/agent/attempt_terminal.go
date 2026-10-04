@@ -17,7 +17,10 @@ func TerminalizeAttemptStateInTx(ctx context.Context, tx pgx.Tx, attempt Attempt
 	var runtimeKind string
 	var role *AgentRole
 	var executorIdentity *string
-	if err := tx.QueryRow(ctx, `select runtime_kind,agent_role,executor_identity from agent_runs where id=$1`, attempt.RunID).Scan(&runtimeKind, &role, &executorIdentity); err != nil {
+	var runtimeSubagent bool
+	if err := tx.QueryRow(ctx, `select runtime_kind,agent_role,executor_identity,
+		exists(select 1 from agent_subagents where child_run_id=$1)
+		from agent_runs where id=$1`, attempt.RunID).Scan(&runtimeKind, &role, &executorIdentity, &runtimeSubagent); err != nil {
 		return err
 	}
 	isResearch := (runtimeKind == "legacy_role" && role != nil && *role == RoleResearch) ||
@@ -53,7 +56,7 @@ func TerminalizeAttemptStateInTx(ctx context.Context, tx pgx.Tx, attempt Attempt
 		if jobTag.RowsAffected() != 1 || runTag.RowsAffected() != 1 {
 			return ErrLeaseLost
 		}
-		if isConfiguredResearch {
+		if isConfiguredResearch && !runtimeSubagent {
 			sessionTag, err := tx.Exec(ctx, `
 				update research_sessions set status='failed',error_code=$2,updated_at=now()
 				where (planning_run_id=$1 and status='planning')

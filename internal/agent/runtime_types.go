@@ -28,6 +28,8 @@ type Execution struct {
 	ActionResultsByteLimit int
 	SelectedSourceCount    int
 	MemberRole             string
+	ParentRunID            string
+	SubagentTask           string
 	ExistingChildCount     int
 
 	// ReplayOnly marks an Execution reconstructed by LoadForReplay (offline

@@ -54,7 +54,7 @@ func (b postgresResearchSourceImportBarrier) WaitIfPending(ctx context.Context, 
 		from research_source_imports imported
 		join source_sources source on source.id=imported.source_id
 		join source_processing_jobs job on job.id=imported.processing_job_id
-		where imported.run_id=$1
+		where (imported.run_id=$1 or (nano_research_root_run($1)=$1 and nano_research_root_run(imported.run_id)=$1))
 		order by source.id,job.id
 		for update of imported,source,job
 	`, request.Attempt.RunID)
@@ -99,7 +99,7 @@ func (b postgresResearchSourceImportBarrier) WaitIfPending(ctx context.Context, 
 	if _, err := tx.Exec(ctx, `
 		update research_source_imports
 		set barrier_observed_attempt_no=$2
-		where run_id=$1 and barrier_observed_attempt_no is null
+		where (run_id=$1 or (nano_research_root_run($1)=$1 and nano_research_root_run(run_id)=$1)) and barrier_observed_attempt_no is null
 	`, request.Attempt.RunID, request.Attempt.AttemptNo); err != nil {
 		return false, err
 	}
@@ -172,10 +172,28 @@ func AttachResearchSourceEvidenceInTx(ctx context.Context, tx pgx.Tx, sourceID, 
 	`, sourceID, revisionID).Scan(&notebookID, &indexVersionID); err != nil {
 		return err
 	}
+	// Serialize scope expansion with spawn_agent's root lock. A new child
+	// either copies the committed pins or participates in this expansion.
+	// Without this lock, a child spawned after the family snapshot could miss
+	// verified Sources forever. Root-first locking also orders concurrent imports.
+	rootRows, err := tx.Query(ctx, `select run.id from agent_runs run
+		where run.id in (select nano_research_root_run(imported.run_id)
+			from research_source_imports imported where imported.source_id=$1)
+		order by run.id for update of run`, sourceID)
+	if err != nil {
+		return err
+	}
+	for rootRows.Next() {
+	}
+	err = rootRows.Err()
+	rootRows.Close()
+	if err != nil {
+		return err
+	}
 	rows, err := tx.Query(ctx, `
 		select distinct run.id
 		from research_source_imports imported
-		join agent_runs run on run.id=imported.run_id
+		join agent_runs run on nano_research_root_run(run.id)=nano_research_root_run(imported.run_id)
 		where imported.source_id=$1 and run.runtime_kind='configured'
 			and run.definition_identity='research.executor' and run.definition_version>=9
 			and run.executor_identity='research_root' and run.status in ('queued','running')
@@ -250,7 +268,9 @@ func WakeResearchSourceImportWaitersInTx(ctx context.Context, tx pgx.Tx, sourceI
 	if tx == nil || strings.TrimSpace(sourceID) == "" {
 		return errors.New("Research Source waiter wake is incomplete")
 	}
-	rows, err := tx.Query(ctx, `select distinct run_id from research_source_imports where source_id=$1 order by run_id`, sourceID)
+	rows, err := tx.Query(ctx, `select distinct run.id from research_source_imports imported
+		join agent_runs run on run.id=imported.run_id or run.id=nano_research_root_run(imported.run_id)
+		where imported.source_id=$1 order by run.id`, sourceID)
 	if err != nil {
 		return err
 	}
@@ -271,13 +291,13 @@ func WakeResearchSourceImportWaitersInTx(ctx context.Context, tx pgx.Tx, sourceI
 	for _, runID := range runIDs {
 		var allTerminal bool
 		if err := tx.QueryRow(ctx, `
-			select exists(select 1 from research_source_imports where run_id=$1)
+			select exists(select 1 from research_source_imports imported where (imported.run_id=$1 or (nano_research_root_run($1)=$1 and nano_research_root_run(imported.run_id)=$1)))
 			and not exists(
 				select 1
 				from research_source_imports imported
 				left join source_sources source on source.id=imported.source_id
 				left join source_processing_jobs job on job.id=imported.processing_job_id
-				where imported.run_id=$1 and not (
+				where (imported.run_id=$1 or (nano_research_root_run($1)=$1 and nano_research_root_run(imported.run_id)=$1)) and not (
 					imported.source_id is null or source.state in ('ready','failed') or
 					(source.state='qualifying' and job.status='succeeded')
 				)

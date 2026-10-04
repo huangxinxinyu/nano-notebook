@@ -26,12 +26,12 @@ func (r *ResearchRuntime) loadResearchSourceImportProjection(ctx context.Context
 					and revision.source_id=evidence.source_id and revision.status='active'
 				join retrieval_source_index_builds build on build.revision_id=revision.id
 					and build.source_id=evidence.source_id and build.index_version_id=evidence.index_version_id and build.status='verified'
-				where evidence.run_id=imported.run_id and evidence.source_id=imported.source_id
+				where evidence.run_id=$1 and evidence.source_id=imported.source_id
 			),coalesce(imported.retrieval_error_code,'')
 		from research_source_imports imported
 		left join source_sources source on source.id=imported.source_id
 		left join source_processing_jobs job on job.id=imported.processing_job_id
-		where imported.run_id=$1
+		where nano_research_root_run(imported.run_id)=nano_research_root_run($1)
 		order by imported.created_at,imported.action_id
 	`, runID)
 	if err != nil {

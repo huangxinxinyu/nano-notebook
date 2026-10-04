@@ -185,7 +185,10 @@ func RecordRunTerminalInTx(ctx context.Context, tx pgx.Tx, runID string, termina
 	}); err != nil {
 		return err
 	}
-	return tracer.EndSpan(rootContext, agentobs.SpanEnd{
+	if err := tracer.EndSpan(rootContext, agentobs.SpanEnd{
 		Name: TraceSpanAgentExecution, Status: terminal.SpanStatus, Attributes: terminalAttributes,
-	})
+	}); err != nil {
+		return err
+	}
+	return recordCancelledRuntimeSubagentsInTx(ctx, tx, runID)
 }
