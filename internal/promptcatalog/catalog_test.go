@@ -203,3 +203,29 @@ func TestMarkdownParserRejectsDuplicateMetadata(t *testing.T) {
 		t.Fatal("accepted duplicate identity metadata")
 	}
 }
+
+func TestArchivedPromptsRemainResolvableWithoutAppearingInActiveCatalog(t *testing.T) {
+	catalog := MustLoadEmbedded()
+	for _, reference := range []struct {
+		identity string
+		version  int
+	}{
+		{"agent.research-planner", 1},
+		{"agent.deep-research-step-compactor", 1},
+		{"agent.deep-research-executor", 5},
+	} {
+		prompt, ok := catalog.Resolve(reference.identity, reference.version)
+		if !ok || !prompt.Archived || !strings.HasPrefix(prompt.SourcePath, "prompts/") {
+			t.Fatalf("archived prompt lost stable identity/path: %+v ok=%v", prompt, ok)
+		}
+	}
+	for _, prompt := range catalog.ActiveVersions() {
+		if prompt.Archived || prompt.Identity == "agent.research-planner" {
+			t.Fatalf("historical prompt exposed as current: %+v", prompt)
+		}
+	}
+	current, ok := catalog.Resolve("agent.deep-research-executor", 6)
+	if !ok || current.Archived {
+		t.Fatalf("runtime subagent executor is not current: %+v", current)
+	}
+}

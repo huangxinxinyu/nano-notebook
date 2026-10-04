@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
+	"github.com/huangxinxinyu/nano-notebook/internal/promptcatalog"
 )
 
 func TestResearchRootSupportsRuntimeSubagentTools(t *testing.T) {
@@ -88,6 +89,21 @@ func TestRuntimeSubagentReleaseDoesNotRequirePredefinedChildren(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("runtime subagent Research definition omits %q", name)
+		}
+	}
+}
+
+func TestCurrentReleaseDoesNotBindArchivedPrompts(t *testing.T) {
+	catalog := agentcatalog.MustLoadEmbedded()
+	prompts := promptcatalog.MustLoadEmbedded()
+	release, _ := catalog.ResolveRelease(agentcatalog.MustParseReference("nano.default@27"))
+	for _, root := range release.Roots {
+		definition, _ := catalog.ResolveDefinition(root)
+		for _, reference := range definition.Prompts {
+			prompt, ok := prompts.Resolve(reference.Identity, reference.Version)
+			if !ok || prompt.Archived {
+				t.Fatalf("current root %s binds historical prompt %s", root, reference)
+			}
 		}
 	}
 }

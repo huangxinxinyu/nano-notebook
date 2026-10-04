@@ -572,3 +572,20 @@ func cloneMapFS(source fstest.MapFS) fstest.MapFS {
 	}
 	return cloned
 }
+
+func TestRetiredSourceDiscoveryDefinitionsStayArchivedAndResolvable(t *testing.T) {
+	catalog := MustLoadEmbedded()
+	for _, version := range []int{1, 2} {
+		definition, ok := catalog.ResolveDefinition(Reference{Identity: "research.source-discovery", Version: version})
+		if !ok || !definition.Archived || !strings.HasPrefix(definition.SourcePath, "definitions/") {
+			t.Fatalf("historical child definition lost compatibility: %+v ok=%v", definition, ok)
+		}
+	}
+	current, _ := catalog.ResolveRelease(MustParseReference("nano.default@27"))
+	for _, root := range current.Roots {
+		definition, _ := catalog.ResolveDefinition(root)
+		if definition.Archived || len(definition.Children) != 0 {
+			t.Fatalf("current release still uses fixed subagents: %+v", definition)
+		}
+	}
+}

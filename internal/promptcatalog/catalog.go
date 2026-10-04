@@ -13,7 +13,7 @@ import (
 	"unicode"
 )
 
-//go:embed prompts/*.md
+//go:embed prompts/*.md archive/prompts/*.md
 var embeddedFiles embed.FS
 
 type PromptVersion struct {
@@ -23,6 +23,7 @@ type PromptVersion struct {
 	Content    string
 	SHA256     string
 	SourcePath string
+	Archived   bool
 }
 
 type Catalog struct {
@@ -34,16 +35,23 @@ func LoadEmbedded() (Catalog, error) {
 	if err != nil {
 		return Catalog{}, err
 	}
+	archivedPaths, err := fs.Glob(embeddedFiles, "archive/prompts/*.md")
+	if err != nil {
+		return Catalog{}, err
+	}
+	paths = append(paths, archivedPaths...)
 	definitions := make([]PromptVersion, 0, len(paths))
 	for _, path := range paths {
 		payload, err := embeddedFiles.ReadFile(path)
 		if err != nil {
 			return Catalog{}, err
 		}
-		definition, err := parseMarkdown(path, string(payload))
+		// Keep the original logical path for immutable database registrations.
+		definition, err := parseMarkdown(strings.TrimPrefix(path, "archive/"), string(payload))
 		if err != nil {
 			return Catalog{}, err
 		}
+		definition.Archived = strings.HasPrefix(path, "archive/")
 		definitions = append(definitions, definition)
 	}
 	return New(definitions)
@@ -107,6 +115,19 @@ func (c Catalog) Versions() []PromptVersion {
 		return versions[left].Identity < versions[right].Identity
 	})
 	return versions
+}
+
+// ActiveVersions is the maintained prompt surface. Versions and Resolve also
+// include historical definitions needed to resume pinned runs.
+func (c Catalog) ActiveVersions() []PromptVersion {
+	versions := c.Versions()
+	active := make([]PromptVersion, 0, len(versions))
+	for _, version := range versions {
+		if !version.Archived {
+			active = append(active, version)
+		}
+	}
+	return active
 }
 
 func CanonicalSHA256(definition PromptVersion) (string, error) {

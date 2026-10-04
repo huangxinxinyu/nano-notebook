@@ -18,7 +18,7 @@ import (
 
 const maxMCPToolNameLength = 128
 
-//go:embed definitions/*.json model-policies/*.json provider-capabilities/*.json model-context-policies/*.json contracts/*.schema.json releases/*.json
+//go:embed definitions/*.json archive/definitions/*.json model-policies/*.json provider-capabilities/*.json model-context-policies/*.json contracts/*.schema.json releases/*.json
 var embeddedFiles embed.FS
 
 type Reference struct {
@@ -109,6 +109,7 @@ type Definition struct {
 	Delegation  *DelegationMetadata  `json:"delegation,omitempty"`
 	SHA256      string               `json:"-"`
 	SourcePath  string               `json:"-"`
+	Archived    bool                 `json:"-"`
 }
 
 func (d Definition) Reference() Reference {
@@ -241,14 +242,16 @@ func LoadFS(source fs.FS) (Catalog, error) {
 		contracts:            make(map[Reference]ContractVersion),
 		releases:             make(map[Reference]ReleaseManifest),
 	}
-	if err := loadKind(source, "definitions/*.json", func(filePath string, payload []byte) error {
-		var value Definition
-		if err := decodeStrict(payload, &value); err != nil {
-			return fmt.Errorf("definition %s: %w", filePath, err)
+	for _, pattern := range []string{"definitions/*.json", "archive/definitions/*.json"} {
+		if err := loadKind(source, pattern, func(filePath string, payload []byte) error {
+			var value Definition
+			if err := decodeStrict(payload, &value); err != nil {
+				return fmt.Errorf("definition %s: %w", filePath, err)
+			}
+			return catalog.addDefinition(filePath, value)
+		}); err != nil {
+			return Catalog{}, err
 		}
-		return catalog.addDefinition(filePath, value)
-	}); err != nil {
-		return Catalog{}, err
 	}
 	if err := loadKind(source, "model-policies/*.json", func(filePath string, payload []byte) error {
 		var value ModelPolicy
@@ -444,7 +447,8 @@ func (c *Catalog) addDefinition(filePath string, value Definition) error {
 	if err := validatePath(filePath, value.Reference(), ".json"); err != nil {
 		return err
 	}
-	value.SourcePath = filePath
+	value.SourcePath = strings.TrimPrefix(filePath, "archive/")
+	value.Archived = strings.HasPrefix(filePath, "archive/")
 	value.SHA256 = canonicalHash(value)
 	return addUnique(c.definitions, value.Reference(), value, "definition")
 }

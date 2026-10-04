@@ -243,6 +243,9 @@ func main() {
 		slog.Error("worker Chat root has invalid configured child topology", "definition", chatRoot)
 		os.Exit(1)
 	}
+	// The archived discovery executor is retained only to resume historical
+	// role-based runs or releases that explicitly pinned this fixed child.
+	// Current Chat uses discover_sources; Research uses runtime spawn_agent.
 	researchChild := agentcatalog.MustParseReference("research.source-discovery@2")
 	if len(chatDefinition.Children) == 1 {
 		researchChild = chatDefinition.Children[0]
