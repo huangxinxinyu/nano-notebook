@@ -897,10 +897,15 @@ func applyResearchArchivalCapsules(units []ContextUnit, archived map[int]researc
 				ErrorCode    string             `json:"error_code,omitempty"`
 				ContentState string             `json:"content_state"`
 				ResultRef    string             `json:"result_ref"`
+				ReadTool     string             `json:"read_tool,omitempty"`
 				Rehydratable bool               `json:"rehydratable"`
 			}{
 				ActionID: call.ID, Status: accepted.Status, ErrorCode: errorCode,
-				ContentState: "compacted", ResultRef: fmt.Sprintf("run:%s/checkpoint:%s", unit.RunID, call.ID), Rehydratable: true,
+				ContentState: "compacted", ResultRef: fmt.Sprintf("run:%s/checkpoint:%s", unit.RunID, call.ID),
+				Rehydratable: accepted.Status == ActionSucceeded,
+			}
+			if shell.Rehydratable {
+				shell.ReadTool = ToolResultReadTool
 			}
 			encoded, err := json.Marshal(shell)
 			if err != nil {

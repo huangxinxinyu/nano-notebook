@@ -41,6 +41,36 @@ func TestReadToolResultActionReturnsScopedBoundedPage(t *testing.T) {
 	}
 }
 
+func TestReadToolResultActionReadsCompactedCheckpointReference(t *testing.T) {
+	checkpointStore := &recordingCheckpointResultStore{result: ActionResult{
+		Status: ActionSucceeded, Output: json.RawMessage(`{"answer":"restored"}`),
+	}}
+	action := NewReadToolResultAction(
+		ToolResultReader{MaximumPageBytes: 64, MaximumOutputBytes: 512},
+		CompactedToolResultReader{Store: checkpointStore, MaximumPageBytes: 64},
+	)
+	ref := "run:run_a/checkpoint:decision:4/action:2"
+	input, err := json.Marshal(readToolResultInput{ResultRef: ref, MaxBytes: 64})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := action.Execute(context.Background(), ActionRequest{
+		ActionID: "decision:5/action:0", Input: input, UserID: "user_a", ChatID: "chat_a",
+		Attempt: Attempt{RunID: "run_a"},
+	})
+	if err != nil || result.Status != ActionSucceeded {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	var page ToolResultPage
+	if err := json.Unmarshal(result.Output, &page); err != nil {
+		t.Fatal(err)
+	}
+	if page.ResultRef != ref || page.Content != `{"answer":"restored"}` || !page.Complete {
+		t.Fatalf("page=%#v", page)
+	}
+}
+
 func TestReadToolResultActionCapsFinalModelVisibleJSON(t *testing.T) {
 	payload, err := json.Marshal(map[string]string{"markdown": strings.Repeat(`<tag attr="value">\\path</tag>`, 300)})
 	if err != nil {

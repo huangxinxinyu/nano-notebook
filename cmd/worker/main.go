@@ -523,7 +523,11 @@ func main() {
 		Store: toolResultStore, MaximumPageBytes: config.ToolResultPageBytes,
 		MaximumOutputBytes: config.ToolResultPageBytes,
 	}
-	readToolResultTool := agent.NewReadToolResultAction(toolResultReader)
+	compactedToolResultReader := agent.CompactedToolResultReader{
+		Store: agent.PostgresCheckpointResultStore{Pool: db.Pool()}, Externalized: toolResultReader,
+		MaximumPageBytes: config.ToolResultPageBytes,
+	}
+	readToolResultTool := agent.NewReadToolResultAction(toolResultReader, compactedToolResultReader)
 	researchURLTools := agent.NewVersionedResearchURLActions(researchURLReader, webReaderAdapter, webReaderAdapter)
 	readURLTool := agent.NewResearchDeduplicatingAction(db.Pool(), researchURLTools[0])
 	readDocumentPagesTool := researchURLTools[1]

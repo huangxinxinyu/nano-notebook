@@ -86,6 +86,14 @@ func TestApplyResearchArchivalCapsulesUsesGenericShellsAndPreservesCheckpointInp
 	if !strings.Contains(projected[0].Messages[3].Content, `"error_code":"bounded_failure"`) {
 		t.Fatalf("generic Result shell lost stable error code: %s", projected[0].Messages[3].Content)
 	}
+	if !strings.Contains(projected[0].Messages[2].Content, `"read_tool":"read_tool_result"`) ||
+		!strings.Contains(projected[0].Messages[2].Content, `"rehydratable":true`) {
+		t.Fatalf("successful Result shell is not model-readable: %s", projected[0].Messages[2].Content)
+	}
+	if strings.Contains(projected[0].Messages[3].Content, `"read_tool"`) ||
+		!strings.Contains(projected[0].Messages[3].Content, `"rehydratable":false`) {
+		t.Fatalf("failed Result shell incorrectly promises rehydration: %s", projected[0].Messages[3].Content)
+	}
 }
 
 func TestDecodeResearchCapsuleBatchRequiresExactOrderedRangeAndEightKiBPerCapsule(t *testing.T) {

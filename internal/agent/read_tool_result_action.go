@@ -9,9 +9,12 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 )
 
-var toolResultReferencePattern = regexp.MustCompile(`^tr_[A-Za-z0-9_-]{12,128}$`)
+var toolResultReferencePattern = regexp.MustCompile(`^(?:tr_[A-Za-z0-9_-]{12,128}|run:[A-Za-z0-9_-]{1,160}/checkpoint:decision:[1-9][0-9]*/action:[0-9]+)$`)
 
-type readToolResultAction struct{ reader ToolResultReader }
+type readToolResultAction struct {
+	reader    ToolResultReader
+	compacted *CompactedToolResultReader
+}
 
 type readToolResultInput struct {
 	ResultRef string `json:"result_ref"`
@@ -19,8 +22,12 @@ type readToolResultInput struct {
 	MaxBytes  int    `json:"max_bytes,omitempty"`
 }
 
-func NewReadToolResultAction(reader ToolResultReader) Action {
-	return &readToolResultAction{reader: reader}
+func NewReadToolResultAction(reader ToolResultReader, compacted ...CompactedToolResultReader) Action {
+	action := &readToolResultAction{reader: reader}
+	if len(compacted) > 0 {
+		action.compacted = &compacted[0]
+	}
+	return action
 }
 
 func (*readToolResultAction) CrashReplaySafe() bool { return true }
@@ -28,8 +35,8 @@ func (*readToolResultAction) CrashReplaySafe() bool { return true }
 func (*readToolResultAction) Definition() models.ActionDefinition {
 	return models.ActionDefinition{
 		Name:        "read_tool_result",
-		Description: "Read one bounded byte range from a recent externalized read-only Tool Result. Reads do not extend its expiry. When complete=false, call again at next_offset until complete=true.",
-		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["result_ref"],"properties":{"result_ref":{"type":"string","pattern":"^tr_[A-Za-z0-9_-]{12,128}$"},"offset":{"type":"integer","minimum":0},"max_bytes":{"type":"integer","minimum":1}}}`),
+		Description: "Read one bounded byte range from a recent externalized Tool Result or a compacted checkpoint result. Reads do not extend ephemeral expiry. When complete=false, call again at next_offset until complete=true.",
+		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["result_ref"],"properties":{"result_ref":{"type":"string","pattern":"^(?:tr_[A-Za-z0-9_-]{12,128}|run:[A-Za-z0-9_-]{1,160}/checkpoint:decision:[1-9][0-9]*/action:[0-9]+)$"},"offset":{"type":"integer","minimum":0},"max_bytes":{"type":"integer","minimum":1}}}`),
 	}
 }
 
@@ -43,9 +50,15 @@ func (a *readToolResultAction) Execute(ctx context.Context, request ActionReques
 	if err != nil {
 		return ActionResult{}, err
 	}
-	page, err := a.reader.Read(ctx, ToolResultScope{
+	scope := ToolResultScope{
 		UserID: request.UserID, ChatID: request.ChatID, RunID: request.Attempt.RunID,
-	}, input.ResultRef, input.Offset, input.MaxBytes)
+	}
+	var page ToolResultPage
+	if compactedToolResultReferencePattern.MatchString(input.ResultRef) && a.compacted != nil {
+		page, err = a.compacted.Read(ctx, scope, input.ResultRef, input.Offset, input.MaxBytes)
+	} else {
+		page, err = a.reader.Read(ctx, scope, input.ResultRef, input.Offset, input.MaxBytes)
+	}
 	if err != nil {
 		code := "tool_result_read_failed"
 		switch {
