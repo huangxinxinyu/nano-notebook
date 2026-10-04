@@ -31,13 +31,13 @@ func (s researchWorkspaceIndexStub) Snapshot(context.Context, string) (researchW
 	return s.snapshot, s.err
 }
 
-func TestResearchWorkspacePathIsRunScopedMarkdownOnly(t *testing.T) {
-	for _, path := range []string{"report_plan.md", "review.md", "notes/codex.md", "sections/recommendation.md"} {
+func TestResearchWorkspacePathIsRunScopedMarkdownOrData(t *testing.T) {
+	for _, path := range []string{"report_plan.md", "review.md", "notes/codex.md", "sections/recommendation.md", "data/prices.csv", "data/summary.json"} {
 		if err := validateResearchWorkspacePath(path, false); err != nil {
 			t.Fatalf("valid path %q: %v", path, err)
 		}
 	}
-	for _, path := range []string{"", "report.md", "../secret.md", "/tmp/a.md", "sections/a/b.md", "sections/a.txt", "sections/UPPER.md"} {
+	for _, path := range []string{"", "report.md", "../secret.md", "/tmp/a.md", "sections/a/b.md", "sections/a.txt", "sections/UPPER.md", "data/chart.png", "data/a/b.csv", "data/Prices.csv"} {
 		if err := validateResearchWorkspacePath(path, false); err == nil {
 			t.Fatalf("accepted unsafe path %q", path)
 		}

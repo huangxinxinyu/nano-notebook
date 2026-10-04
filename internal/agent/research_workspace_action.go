@@ -24,6 +24,10 @@ const (
 
 var researchWorkspaceNestedPathPattern = regexp.MustCompile(`^(?:notes|sections)/[a-z0-9][a-z0-9._-]{0,79}\.md$`)
 
+// Data files hold tabular or structured intermediate results; they are never
+// report sections.
+var researchWorkspaceDataPathPattern = regexp.MustCompile(`^data/[a-z0-9][a-z0-9._-]{0,79}\.(?:csv|json|txt|md)$`)
+
 type researchWorkspaceFileOutput struct {
 	Path      string `json:"path"`
 	ObjectKey string `json:"object_key"`
@@ -134,7 +138,7 @@ func (a *writeResearchFileAction) Available(Execution) (bool, string) {
 func (*writeResearchFileAction) Definition() models.ActionDefinition {
 	return models.ActionDefinition{
 		Name:        "write_research_file",
-		Description: "Persist one bounded Markdown planning, note, review, or report-section file in this Research Run's durable MinIO workspace. Rewriting a logical path creates a new immutable version.",
+		Description: "Persist one bounded Markdown planning, note, review, or report-section file, or a data/<name>.csv|json|txt|md data file, in this Research Run's durable MinIO workspace. Rewriting a logical path creates a new immutable version.",
 		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["path","content"],"properties":{"path":{"type":"string","minLength":1,"maxLength":96},"content":{"type":"string","minLength":1,"maxLength":98304}}}`),
 	}
 }
@@ -200,7 +204,7 @@ func (a *readResearchFileAction) Available(Execution) (bool, string) {
 func (*readResearchFileAction) Definition() models.ActionDefinition {
 	return models.ActionDefinition{
 		Name:        "read_research_file",
-		Description: "Read the latest checkpoint-accepted version of one logical Markdown file from this Research Run's MinIO workspace.",
+		Description: "Read the latest checkpoint-accepted version of one logical Markdown or data file from this Research Run's MinIO workspace.",
 		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string","minLength":1,"maxLength":96}}}`),
 	}
 }
@@ -429,7 +433,8 @@ func decodeAssembleResearchReportInput(raw json.RawMessage) (assembleResearchRep
 }
 
 func validateResearchWorkspacePath(path string, allowReport bool) error {
-	if path == "report_plan.md" || path == "review.md" || (allowReport && path == "report.md") || researchWorkspaceNestedPathPattern.MatchString(path) {
+	if path == "report_plan.md" || path == "review.md" || (allowReport && path == "report.md") ||
+		researchWorkspaceNestedPathPattern.MatchString(path) || researchWorkspaceDataPathPattern.MatchString(path) {
 		return nil
 	}
 	return errors.New("invalid Research workspace path")
@@ -441,7 +446,7 @@ func putResearchWorkspaceObject(ctx context.Context, store objectstore.Store, ru
 	}
 	digest := sha256.Sum256(payload)
 	identity := sha256.Sum256([]byte(runID + "\x00" + actionID))
-	objectKey := fmt.Sprintf("research-workspaces/%s/%s/%s.md", runID, hex.EncodeToString(identity[:]), hex.EncodeToString(digest[:]))
+	objectKey := fmt.Sprintf("research-workspaces/%s/%s/%s%s", runID, hex.EncodeToString(identity[:]), hex.EncodeToString(digest[:]), path[strings.LastIndexByte(path, '.'):])
 	if err := store.Put(ctx, objectKey, payload); err != nil {
 		return researchWorkspaceFile{}, err
 	}
