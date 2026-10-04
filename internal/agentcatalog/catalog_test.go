@@ -13,7 +13,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	definitions := catalog.Definitions()
-	if got, want := len(definitions), 34; got != want {
+	if got, want := len(definitions), 35; got != want {
 		t.Fatalf("definitions=%d want=%d", got, want)
 	}
 	want := map[string]struct {
@@ -125,6 +125,10 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		"research.executor@18": {
 			executor: "research_root", model: "agent.deep-research-default@5",
 			tools: []string{"assemble_research_report", "inspect_source", "list_agents", "list_research_files", "read_research_file", "read_tool_result", "read_url", "rewrite_todo_list", "save_url_as_source", "search_evidence", "spawn_agent", "update_todo_status", "wait_agent", "web_search", "write_research_file"},
+		},
+		"research.executor@19": {
+			executor: "research_root", model: "agent.deep-research-default@5",
+			tools: []string{"assemble_research_report", "inspect_source", "list_agents", "list_research_files", "read_research_file", "read_tool_result", "read_url", "rewrite_todo_list", "run_python", "save_url_as_source", "search_evidence", "spawn_agent", "update_todo_status", "wait_agent", "web_search", "write_research_file"},
 		},
 		"studio.report@1": {
 			executor: "studio_structured_output", model: "agent.studio-default@1",
@@ -581,7 +585,7 @@ func TestRetiredSourceDiscoveryDefinitionsStayArchivedAndResolvable(t *testing.T
 			t.Fatalf("historical child definition lost compatibility: %+v ok=%v", definition, ok)
 		}
 	}
-	current, _ := catalog.ResolveRelease(MustParseReference("nano.default@27"))
+	current, _ := catalog.ResolveRelease(MustParseReference("nano.default@28"))
 	for _, root := range current.Roots {
 		definition, _ := catalog.ResolveDefinition(root)
 		if definition.Archived || len(definition.Children) != 0 {

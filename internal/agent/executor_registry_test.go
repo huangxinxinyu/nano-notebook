@@ -41,6 +41,7 @@ func TestNanoToolCapabilitiesSchedulesOnlySideEffectFreeToolsInParallel(t *testi
 		"read_url":                 agentcatalog.ToolParallel,
 		"save_url_as_source":       agentcatalog.ToolOrderedSync,
 		"rewrite_todo_list":        agentcatalog.ToolOrderedSync,
+		"run_python":               agentcatalog.ToolOrderedSync,
 		"search_evidence":          agentcatalog.ToolParallel,
 		"update_todo_status":       agentcatalog.ToolOrderedSync,
 		"web_search":               agentcatalog.ToolOrderedSync,
@@ -203,6 +204,7 @@ func productionToolCapabilities() map[string]agentcatalog.ToolCapability {
 		"update_todo_status":       {Scheduling: agentcatalog.ToolOrderedSync},
 		"web_search":               {Scheduling: agentcatalog.ToolOrderedSync},
 		"write_research_file":      {Scheduling: agentcatalog.ToolOrderedSync},
+		"run_python":               {Scheduling: agentcatalog.ToolOrderedSync},
 	}
 }
 
