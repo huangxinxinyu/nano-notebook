@@ -1134,6 +1134,10 @@ func (b postgresResearchClaimBackend) ResearchUnreadLeads(ctx context.Context, r
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	return loadResearchUnreadLeads(ctx, tx, runID, limit)
+}
+
+func loadResearchUnreadLeads(ctx context.Context, tx DBTX, runID string, limit int) ([]researchReadSource, error) {
 	// A paper read or failed under one URL is not unread under another, such
 	// as an arXiv abs lead for a page read through its html URL; variants of
 	// one unread document are listed once.

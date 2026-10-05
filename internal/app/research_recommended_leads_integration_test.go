@@ -99,3 +99,60 @@ func TestScoutCandidatesBecomeRecommendedLeadsAtAssembly(t *testing.T) {
 		}
 	}
 }
+
+func TestWaitingResearchRootSeesRecommendedUnreadSources(t *testing.T) {
+	api := newTestAPI(t)
+	ctx := context.Background()
+	parent, _, _, _ := admitResearchExecutionForRelease(t, api, "wait-reading@example.com", "nano.default@46")
+	runtime, err := agent.NewResearchRuntime(api.db.Pool(), promptcatalog.MustLoadEmbedded())
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt := attemptFromClaim(parent)
+	execution, err := runtime.Load(ctx, attempt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.StartRun(ctx, attempt, execution); err != nil {
+		t.Fatal(err)
+	}
+	scout, ok, err := jobs.NewQueue(api.db.Pool()).ClaimNext(ctx)
+	if err != nil || !ok {
+		t.Fatalf("scout claim=%+v ok=%v err=%v", scout, ok, err)
+	}
+	if _, err := runtime.Load(ctx, attemptFromClaim(scout)); err != nil {
+		t.Fatal(err)
+	}
+	draft := models.FinalDraft{Text: "1. https://arxiv.org/abs/2401.14887 The Power of Noise (critique)\n2. https://arxiv.org/abs/2212.10509 IRCoT\n"}
+	checkpoint, _ := agent.NewFinalDraftCheckpoint(1, draft)
+	if _, err := runtime.AppendCheckpoint(ctx, attemptFromClaim(scout), checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.PublishFinal(ctx, attemptFromClaim(scout), draft); err != nil {
+		t.Fatal(err)
+	}
+	definition, _ := agentcatalog.MustLoadEmbedded().ResolveDefinition(agentcatalog.MustParseReference("research.executor@33"))
+	wait := agent.NewRuntimeSubagentToolRegistrations(api.db.Pool())
+	var waitAction agent.Action
+	for _, registration := range wait {
+		if registration.Action.Definition().Name == "wait_agent" {
+			waitAction = registration.Action
+		}
+	}
+	input, _ := json.Marshal(map[string]any{"agent_ids": []string{scout.RunID}, "timeout_ms": 0})
+	appendResearchProposal(t, runtime, attempt, 1, []models.ActionProposal{{Name: "wait_agent", Input: input}})
+	result, err := waitAction.Execute(ctx, agent.ActionRequest{Attempt: attempt, UserID: execution.UserID, ChatID: execution.ChatID, ActionID: "decision:1/action:0", Input: input, Definition: definition.Reference(), DefinitionSHA256: definition.SHA256})
+	if err != nil || result.Status != agent.ActionSucceeded {
+		t.Fatalf("wait=%+v err=%v", result, err)
+	}
+	var output struct {
+		Recommended []struct {
+			URL string `json:"url"`
+		} `json:"recommended_unread"`
+		Note string `json:"reading_note"`
+	}
+	if err := json.Unmarshal(result.Output, &output); err != nil || len(output.Recommended) != 2 ||
+		output.Recommended[0].URL != "https://arxiv.org/abs/2401.14887" || !strings.Contains(output.Note, "queued") {
+		t.Fatalf("wait output=%s err=%v", result.Output, err)
+	}
+}

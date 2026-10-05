@@ -168,3 +168,30 @@ func researchQueuedReadsGuidance(queued []researchQueuedRead) string {
 	}
 	return fmt.Sprintf("Queued long documents: %d (listed in queued_reads) are still waiting for a reader slot. Call wait_agent on your readers; each wait that finds a finished reader dispatches queued documents to new readers. Use their cards before Final.", len(queued))
 }
+
+// From executor v33 a waiting root also sees the recommended sources it has
+// not read. While readers run the root is otherwise idle, and long reads
+// beyond the free reader slots queue without blocking it, so this is when a
+// second reading round costs no wall time.
+const (
+	researchWaitReadingVersion = 33
+	researchWaitRecommendedMax = 5
+	researchWaitReadingNote    = "These sources were recommended by scouts or readers and are still unread. While your readers run, read the ones that could change, qualify, or contradict a conclusion with read_url, independent evaluations and critiques first; long documents beyond the free reader slots are queued and dispatched automatically."
+)
+
+func waitAgentRecommendedReading(ctx context.Context, tx pgx.Tx, request ActionRequest) ([]researchReadSource, error) {
+	if request.Definition.Identity != "research.executor" || request.Definition.Version < researchWaitReadingVersion {
+		return nil, nil
+	}
+	leads, err := loadResearchUnreadLeads(ctx, tx, request.Attempt.RunID, researchWaitRecommendedMax)
+	if err != nil {
+		return nil, err
+	}
+	recommended := leads[:0]
+	for _, lead := range leads {
+		if lead.Recommended {
+			recommended = append(recommended, lead)
+		}
+	}
+	return recommended, nil
+}

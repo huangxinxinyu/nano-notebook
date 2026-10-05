@@ -391,10 +391,18 @@ func (a *runtimeSubagentAction) wait(ctx context.Context, tx pgx.Tx, request Act
 	if err != nil {
 		return ActionResult{}, err
 	}
+	recommended, err := waitAgentRecommendedReading(ctx, tx, request)
+	if err != nil {
+		return ActionResult{}, err
+	}
 	result := func(timedOut bool) map[string]any {
 		value := map[string]any{"agents": agents, "timed_out": timedOut}
 		if len(autoReaders) > 0 {
 			value["auto_dispatched_readers"] = autoReaders
+		}
+		if len(recommended) > 0 {
+			value["recommended_unread"] = recommended
+			value["reading_note"] = researchWaitReadingNote
 		}
 		return value
 	}
