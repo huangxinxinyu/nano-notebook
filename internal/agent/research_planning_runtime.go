@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
@@ -102,6 +103,9 @@ func (r *ResearchPlanningRuntime) BuildDecisionRequest(ctx context.Context, exec
 		system += fmt.Sprintf("\n- %s: %s — %s", reference, skill.Name, skill.Description)
 	}
 	system += "\n\n" + researchPlanningContext(time.Now(), execution.TimeZone)
+	if hint := memberLanguageHint(requestText); hint != "" {
+		system += "\n\n" + hint
+	}
 	turns, err := r.planningLaneTurns(ctx, execution, prefix, requestText)
 	if err != nil {
 		return models.ModelRequest{}, err
@@ -179,6 +183,25 @@ func planningTurnContent(turnNo int, message string, planVersion int, planJSON s
 		return "The Member asks to revise the proposed Research Plan:\n" + message
 	}
 	return fmt.Sprintf("The Member asks to revise Research Plan version %d. The current plan, including any edits the Member made directly, is:\n%s\n\nRevision request:\n%s\n\nRevise the plan. Ask with request_user_input only if the request leaves a consequential decision open; otherwise return the complete revised plan.", planVersion, planJSON, message)
+}
+
+// memberLanguageHint names the Member's language when the request is mostly
+// Chinese; English system text and search results otherwise pull the model
+// into asking questions in English.
+func memberLanguageHint(request string) string {
+	han, letters := 0, 0
+	for _, character := range request {
+		switch {
+		case unicode.Is(unicode.Han, character):
+			han++
+		case unicode.IsLetter(character):
+			letters++
+		}
+	}
+	if han == 0 || han*2 < letters/4 {
+		return ""
+	}
+	return "Member language: Chinese. Write every request_user_input question, option, and description, and the whole plan, in Simplified Chinese; keep proper names such as paper or product titles as they are."
 }
 
 func researchPlanningContext(now time.Time, timeZone string) string {

@@ -79,3 +79,14 @@ func TestRequestUserInputDefinitionRegisters(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMemberLanguageHintDetectsChineseRequests(t *testing.T) {
+	if hint := memberLanguageHint("帮我调研一下 RAG 里做迭代检索值不值得"); !strings.Contains(hint, "Simplified Chinese") {
+		t.Fatalf("chinese hint=%q", hint)
+	}
+	for _, request := range []string{"Compare iterative retrieval methods for RAG", "Compare Self-RAG, FLARE, and CRAG for production RAG pipelines 中文"} {
+		if hint := memberLanguageHint(request); hint != "" {
+			t.Fatalf("english request %q got hint %q", request, hint)
+		}
+	}
+}
