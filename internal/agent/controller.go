@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
@@ -321,6 +322,8 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 				}
 			}
 			if isModelInvalidResponse(err) {
+				slog.WarnContext(ctx, "Agent model response invalid", "run_id", attempt.RunID, "attempt", attempt.AttemptNo,
+					"recovery_attempt", invalidResponseRecoveryAttempt, "detail", invalidResponseRecoveryDetail, "error", err)
 				limit := 0
 				if runtime, ok := c.runtime.(InvalidModelResponseRecoveryRuntime); ok {
 					limit = runtime.InvalidModelResponseRetryLimit()
