@@ -29,7 +29,7 @@ func TestEmbeddedCatalogContainsEveryProductionPrompt(t *testing.T) {
 		"agent.studio-data-table":                     "studio_data_table_result.v1",
 		"source-processing.image-evidence-normalizer": "image_evidence_regions.v1",
 	}
-	const extraVersions = 30 // chat composer upgrades plus final deep Research planner/executor/reporter/compactor upgrades, alongside their @1s
+	const extraVersions = 31 // chat composer upgrades plus final deep Research planner/executor/reporter/compactor upgrades, alongside their @1s
 	if got := len(catalog.Versions()); got != len(want)+extraVersions {
 		t.Fatalf("versions=%d want=%d", got, len(want)+extraVersions)
 	}
