@@ -13,7 +13,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	definitions := catalog.Definitions()
-	if got, want := len(definitions), 47; got != want {
+	if got, want := len(definitions), 48; got != want {
 		t.Fatalf("definitions=%d want=%d", got, want)
 	}
 	want := map[string]struct {
@@ -79,6 +79,10 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 			tools: []string{"read_skill", "request_user_input", "web_search"},
 		},
 		"research.planner@10": {
+			executor: "research_planner", model: "agent.deep-research-default@6",
+			tools: []string{"read_skill", "request_user_input", "web_search"},
+		},
+		"research.planner@13": {
 			executor: "research_planner", model: "agent.deep-research-default@6",
 			tools: []string{"read_skill", "request_user_input", "web_search"},
 		},
