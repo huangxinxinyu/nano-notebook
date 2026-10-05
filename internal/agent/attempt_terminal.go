@@ -59,7 +59,7 @@ func TerminalizeAttemptStateInTx(ctx context.Context, tx pgx.Tx, attempt Attempt
 		if isConfiguredResearch && !runtimeSubagent {
 			sessionTag, err := tx.Exec(ctx, `
 				update research_sessions set status='failed',error_code=$2,updated_at=now()
-				where (planning_run_id=$1 and status='planning')
+				where (planning_run_id=$1 and status in ('planning','awaiting_input'))
 				   or (execution_run_id=$1 and status in ('queued','running','publishing'))
 			`, attempt.RunID, errorCode)
 			if err != nil {

@@ -67,6 +67,10 @@ func (s *Server) researchSessionByID(w http.ResponseWriter, r *http.Request) {
 		s.startResearch(w, r, user.ID, parts[0])
 		return
 	}
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "answers" && r.Method == http.MethodPost {
+		s.answerResearchQuestions(w, r, user.ID, parts[0])
+		return
+	}
 	writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
 }
 
@@ -87,6 +91,7 @@ func (s *Server) researchSessionSnapshot(w http.ResponseWriter, r *http.Request,
 	var reportVersion *int
 	var report *string
 	var discovered, read, failed int
+	var pending *agent.PendingPlanningQuestions
 	err := s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
 		if err := tx.QueryRow(r.Context(), `
 			select id,chat_id,input_message_id,status,planning_run_id,accepted_plan_version,
@@ -101,6 +106,12 @@ func (s *Server) researchSessionSnapshot(w http.ResponseWriter, r *http.Request,
 		}
 		if err := tx.QueryRow(r.Context(), `select version,content_markdown from research_report_versions where session_id=$1 order by version desc limit 1`, sessionID).Scan(&reportVersion, &report); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
+		}
+		if session.Status == "awaiting_input" {
+			var err error
+			if pending, err = agent.LoadPendingPlanningQuestions(r.Context(), tx, sessionID); err != nil {
+				return err
+			}
 		}
 		return tx.QueryRow(r.Context(), `
 			select count(*) filter(where status='discovered'),count(*) filter(where status='read'),count(*) filter(where status='failed')
@@ -122,7 +133,52 @@ func (s *Server) researchSessionSnapshot(w http.ResponseWriter, r *http.Request,
 	if reportVersion != nil && report != nil {
 		response["report"] = map[string]any{"version": *reportVersion, "content_markdown": *report}
 	}
+	if pending != nil {
+		response["pending_questions"] = pending
+	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *Server) answerResearchQuestions(w http.ResponseWriter, r *http.Request, userID, sessionID string) {
+	if !validCSRF(r) {
+		writeError(w, r, http.StatusForbidden, "csrf_required", "error.csrf_required")
+		return
+	}
+	var request struct {
+		ActionID       string                 `json:"action_id"`
+		Answers        []agent.PlanningAnswer `json:"answers"`
+		UseRecommended bool                   `json:"use_recommended"`
+	}
+	if !readJSON(w, r, &request) {
+		return
+	}
+	if strings.TrimSpace(request.ActionID) == "" || len(request.Answers) > 3 {
+		writeError(w, r, http.StatusBadRequest, "validation_failed", "error.research_answer_invalid")
+		return
+	}
+	err := s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
+		var owned bool
+		if err := tx.QueryRow(r.Context(), `select exists(select 1 from research_sessions where id=$1 and user_id=$2)`, sessionID, userID).Scan(&owned); err != nil {
+			return err
+		}
+		if !owned {
+			return pgx.ErrNoRows
+		}
+		return agent.AnswerPlanningQuestionsInTx(r.Context(), tx, sessionID, request.ActionID, request.Answers, request.UseRecommended)
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		writeError(w, r, http.StatusNotFound, "not_found", "error.research_session_not_found")
+	case errors.Is(err, agent.ErrPlanningAnswerInvalid):
+		writeError(w, r, http.StatusBadRequest, "validation_failed", "error.research_answer_invalid")
+	case errors.Is(err, agent.ErrPlanningQuestionClosed):
+		writeError(w, r, http.StatusConflict, "research_state_conflict", "error.research_state_conflict")
+	case err != nil:
+		slog.ErrorContext(r.Context(), "Research answer failed", "session_id", sessionID, "error", err)
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+	default:
+		writeJSON(w, http.StatusAccepted, map[string]any{"session_id": sessionID, "status": "planning"})
+	}
 }
 
 func (s *Server) editResearchPlan(w http.ResponseWriter, r *http.Request, userID, sessionID string) {

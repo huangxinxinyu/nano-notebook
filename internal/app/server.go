@@ -1114,7 +1114,7 @@ func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request, userID, runID
 		}
 		_, err = tx.Exec(r.Context(), `
 			update research_sessions set status='cancelled',error_code='member_cancelled',updated_at=now()
-			where user_id=$1 and status in ('planning','queued','running','publishing')
+			where user_id=$1 and status in ('planning','awaiting_input','queued','running','publishing')
 			  and (planning_run_id=$2 or execution_run_id=$2)
 		`, userID, runID)
 		return err
