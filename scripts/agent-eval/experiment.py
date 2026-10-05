@@ -245,6 +245,24 @@ def wait_for(get, done, seconds):
         time.sleep(2)
 
 
+def settle_planning(api, session_id, get_session, seconds=900):
+    """Wait for a plan, answering every planner question with its recommended option.
+
+    The fixed protocol does not coach the planner: each question batch is
+    accepted with the recommended defaults and recorded in the observation.
+    """
+    asked = []
+    deadline = time.time() + seconds
+    while True:
+        planned = wait_for(get_session, lambda x: x["session"]["status"] not in {"planning"}, max(1, deadline - time.time()))
+        pending = planned.get("pending_questions")
+        if planned["session"]["status"] != "awaiting_input" or not pending:
+            return planned, asked
+        asked.append(pending["questions"])
+        api.call(f"/api/v1/research-sessions/{session_id}/answers",
+                 {"action_id": pending["action_id"], "answers": [], "use_recommended": True})
+
+
 def prepare_sources(suite, cache):
     cache.mkdir(parents=True, exist_ok=True)
     manifest = {}
@@ -327,7 +345,7 @@ def trial(case, number, suite, cache, out, base, retry_preparation=False, live_p
     if case["mode"] == "research":
         session_id = admission["research_session_id"]
         get_session = lambda: api.call(f"/api/v1/research-sessions/{session_id}")
-        planned = wait_for(get_session, lambda x: x["session"]["status"] != "planning", 600)
+        planned, planner_questions = settle_planning(api, session_id, get_session)
         plan = planned.get("plan")
         if planned["session"]["status"] == "awaiting_confirmation" and plan and not plan["content"].get("clarifying_questions"):
             api.call(f"/api/v1/research-sessions/{session_id}/start", {
@@ -343,6 +361,8 @@ def trial(case, number, suite, cache, out, base, retry_preparation=False, live_p
     if any(binding["release"] != suite["release"] for binding in bindings):
         raise ValueError("admitted release does not match frozen baseline")
     observation = {"case_id": case["id"], "trial": number, **observed}
+    if case["mode"] == "research":
+        observation["planner_questions"] = planner_questions
     save_new(result_path, observation)
     return key + " " + observed["status"]
 

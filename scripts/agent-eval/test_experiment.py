@@ -19,6 +19,27 @@ class ExperimentTest(unittest.TestCase):
                            {"case_id": "single-react", "trial": number, "status": status})
             self.assertEqual(e.failed_trials(out), [{"case_id": "single-react", "trial": 1}])
 
+    def test_settle_planning_answers_each_batch_with_recommendations(self):
+        states = [
+            {"session": {"status": "awaiting_input"}, "pending_questions": {"action_id": "decision:1/action:0", "questions": [{"id": "scope"}]}},
+            {"session": {"status": "awaiting_input"}, "pending_questions": {"action_id": "decision:3/action:0", "questions": [{"id": "depth"}]}},
+            {"session": {"status": "awaiting_confirmation"}, "plan": {"version": 1}},
+        ]
+        calls = []
+
+        class FakeAPI:
+            def call(self, path, data=None):
+                calls.append((path, data))
+                return {}
+
+        planned, asked = e.settle_planning(FakeAPI(), "research_x", lambda: states.pop(0), seconds=5)
+        self.assertEqual(planned["session"]["status"], "awaiting_confirmation")
+        self.assertEqual(asked, [[{"id": "scope"}], [{"id": "depth"}]])
+        self.assertEqual(calls, [
+            ("/api/v1/research-sessions/research_x/answers", {"action_id": "decision:1/action:0", "answers": [], "use_recommended": True}),
+            ("/api/v1/research-sessions/research_x/answers", {"action_id": "decision:3/action:0", "answers": [], "use_recommended": True}),
+        ])
+
     def setUp(self):
         self.cases = [{"id": x, "category": "single" if x < "C" else "research"} for x in "ABCD"]
         self.rows = [{"case_id": case, "trial": i + 1, "pass": value}
