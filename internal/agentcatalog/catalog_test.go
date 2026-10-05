@@ -13,7 +13,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	definitions := catalog.Definitions()
-	if got, want := len(definitions), 36; got != want {
+	if got, want := len(definitions), 37; got != want {
 		t.Fatalf("definitions=%d want=%d", got, want)
 	}
 	want := map[string]struct {
@@ -69,6 +69,10 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		"research.planner@7": {
 			executor: "research_planner", model: "agent.deep-research-default@6",
 			tools: []string{"read_skill"},
+		},
+		"research.planner@8": {
+			executor: "research_planner", model: "agent.deep-research-default@6",
+			tools: []string{"read_skill", "web_search"},
 		},
 		"research.executor@1": {
 			executor: "research_root", model: "agent.deep-research-default@1",
@@ -589,7 +593,7 @@ func TestRetiredSourceDiscoveryDefinitionsStayArchivedAndResolvable(t *testing.T
 			t.Fatalf("historical child definition lost compatibility: %+v ok=%v", definition, ok)
 		}
 	}
-	current, _ := catalog.ResolveRelease(MustParseReference("nano.default@29"))
+	current, _ := catalog.ResolveRelease(MustParseReference("nano.default@30"))
 	for _, root := range current.Roots {
 		definition, _ := catalog.ResolveDefinition(root)
 		if definition.Archived || len(definition.Children) != 0 {

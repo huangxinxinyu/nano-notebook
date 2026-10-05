@@ -223,9 +223,9 @@ func ResearchPlannerExecutorCapability() agentcatalog.ExecutorCapability {
 			agentcatalog.MustParseReference("research.plan-result@1"):  true,
 		},
 		Skills: map[agentcatalog.Reference]bool{agentcatalog.MustParseReference("skill.grill-me@1"): true},
-		Tools:  map[string]bool{"read_skill": true},
+		Tools:  map[string]bool{"read_skill": true, "web_search": true},
 		MaxLimits: agentcatalog.Limits{
-			ModelCalls: 4, Actions: 2, ActionBatch: 1, ContextBytes: 262144, ResultBytes: 131072, Attempts: 3,
+			ModelCalls: 6, Actions: 4, ActionBatch: 2, ContextBytes: 262144, ResultBytes: 131072, Attempts: 3,
 		},
 		MemberVisible: true, CanPublish: true,
 	}
