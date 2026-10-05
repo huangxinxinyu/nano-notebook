@@ -115,7 +115,7 @@ func (a *recordClaimAction) Available(Execution) (bool, string) {
 
 func (*recordClaimAction) Definition() models.ActionDefinition {
 	return models.ActionDefinition{
-		Name: recordClaimActionName,
+		Name:        recordClaimActionName,
 		Description: "Record one claim card: a verbatim quote from a Source read in this Run (a read_url page URL or a search_evidence source_id) and the claim it supports. Returns a card id such as c3 and whether the quote was found in the stored source text; a mismatch is still recorded. Cite cards in report prose as [c3]. All cards are listed in claims.md.",
 		InputSchema: json.RawMessage(fmt.Sprintf(`{"type":"object","additionalProperties":false,"required":["source","quote","claim"],"properties":{"source":{"type":"string","minLength":1,"maxLength":4096,"description":"The read page URL, or the Notebook source_id."},"quote":{"type":"string","minLength":1,"maxLength":%d,"description":"Verbatim source text; use ... to elide inside a long passage."},"claim":{"type":"string","minLength":1,"maxLength":%d,"description":"What this quote establishes, in the report language."},"conditions":{"type":"string","maxLength":%d,"description":"Scope, setting, version, or caveat that limits the claim."}}}`,
 			claimRecordInputMaxQuote, claimRecordInputMaxClaim, claimRecordInputMaxCondit)),
