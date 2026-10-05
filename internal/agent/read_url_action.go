@@ -221,6 +221,9 @@ const (
 	researchReaderCapacityOutcome = "reader_capacity_excerpt"
 	researchReaderExcerptRunes    = 8_000
 	researchDelegatedReadMinRune  = 30_000
+	// researchQueuedReaderVersion is the first executor version whose
+	// capacity excerpts are queued for automatic reader dispatch.
+	researchQueuedReaderVersion = 27
 )
 
 // SetResearchReaderSpawner lets a research read_url hand long documents to
@@ -244,20 +247,7 @@ func (a *readURLAction) delegateLongRead(ctx context.Context, request ActionRequ
 		utf8.RuneCountInString(page.Content) < researchDelegatedReadMinRune {
 		return ActionResult{}, false, nil
 	}
-	title := strings.TrimSpace(page.Title)
-	if title == "" {
-		title = requestedURL
-	}
-	taskName := title
-	if runes := []rune(taskName); len(runes) > 72 {
-		taskName = string(runes[:72])
-	}
-	message := fmt.Sprintf(researchReaderTaskPrefix+" %s (%s).\n\n"+
-		"Call read_url on exactly that URL, then page through the rest with read_tool_result at each next_offset until complete=true. "+
-		"For every fact relevant to the accepted Research Plan, such as methods, settings, results and numbers, comparisons, and stated limitations, record a claim card with record_claim using that URL as source and a verbatim quote. "+
-		"A card exists only when record_claim returns its id; naming cards in your Final records nothing. "+
-		"Do not search for or read other sources. Return Final with: what the document is, each recorded card id with the claim it supports, and anything relevant you could not capture.", requestedURL, title)
-	input, err := json.Marshal(spawnAgentInput{Message: message, TaskName: "Read: " + taskName})
+	input, err := json.Marshal(researchReaderSpawnInput(requestedURL, page.Title))
 	if err != nil {
 		return ActionResult{}, false, err
 	}
@@ -269,7 +259,7 @@ func (a *readURLAction) delegateLongRead(ctx context.Context, request ActionRequ
 	}
 	if spawned.Status != ActionSucceeded {
 		if researchReaderCapacityExhausted(spawned) {
-			return researchReaderCapacityExcerpt(requestedURL, page)
+			return researchReaderCapacityExcerpt(requestedURL, page, request.Definition.Version >= researchQueuedReaderVersion)
 		}
 		return ActionResult{}, false, nil
 	}
@@ -290,14 +280,34 @@ func (a *readURLAction) delegateLongRead(ctx context.Context, request ActionRequ
 	return ActionResult{Status: ActionSucceeded, Output: payload}, true, nil
 }
 
+// researchReaderSpawnInput is the reader task for one long document, shared by
+// immediate delegation and by readers dispatched later from the queue.
+func researchReaderSpawnInput(requestedURL, title string) spawnAgentInput {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = requestedURL
+	}
+	taskName := title
+	if runes := []rune(taskName); len(runes) > 72 {
+		taskName = string(runes[:72])
+	}
+	message := fmt.Sprintf(researchReaderTaskPrefix+" %s (%s).\n\n"+
+		"Call read_url on exactly that URL, then page through the rest with read_tool_result at each next_offset until complete=true. "+
+		"For every fact relevant to the accepted Research Plan, such as methods, settings, results and numbers, comparisons, and stated limitations, record a claim card with record_claim using that URL as source and a verbatim quote. "+
+		"A card exists only when record_claim returns its id; naming cards in your Final records nothing. "+
+		"Do not search for or read other sources. Return Final with: what the document is, each recorded card id with the claim it supports, and anything relevant you could not capture.", requestedURL, title)
+	return spawnAgentInput{Message: message, TaskName: "Read: " + taskName}
+}
+
 func researchReaderCapacityExhausted(result ActionResult) bool {
 	return result.ErrorCode == "subagent_capacity_exhausted" || (result.Error != nil && result.Error.Code == "subagent_capacity_exhausted")
 }
 
 // researchReaderCapacityExcerpt keeps a long document out of the root's
-// context even when every reader slot is busy: the root sees an excerpt and
-// can delegate the document itself once wait_agent frees a reader.
-func researchReaderCapacityExcerpt(requestedURL string, page webreader.Page) (ActionResult, bool, error) {
+// context even when every reader slot is busy: the root sees an excerpt. From
+// executor v27 the document is queued and wait_agent dispatches its reader
+// once a slot frees; earlier versions left delegation to the model.
+func researchReaderCapacityExcerpt(requestedURL string, page webreader.Page, queued bool) (ActionResult, bool, error) {
 	excerpt := []rune(page.Content)
 	if len(excerpt) > researchReaderExcerptRunes {
 		excerpt = excerpt[:researchReaderExcerptRunes]
@@ -305,12 +315,19 @@ func researchReaderCapacityExcerpt(requestedURL string, page webreader.Page) (Ac
 	payload, err := json.Marshal(readURLOutput{
 		Outcome: researchReaderCapacityOutcome, RequestedURL: requestedURL, Title: page.Title, FinalURL: page.FinalURL,
 		Markdown: string(excerpt), Engine: page.Engine, WordCount: page.WordCount, Truncated: true, MediaType: webreader.MediaTypeHTML,
-		Note: "This long document shows only its opening excerpt because every reader subagent slot is busy. Collect finished readers with wait_agent, then hand this URL to a reader with spawn_agent, asking it to read the document in full and record claim cards with record_claim.",
+		Note: researchReaderCapacityNote(queued),
 	})
 	if err != nil {
 		return ActionResult{}, false, err
 	}
 	return ActionResult{Status: ActionSucceeded, Output: payload}, true, nil
+}
+
+func researchReaderCapacityNote(queued bool) string {
+	if queued {
+		return "This long document shows only its opening excerpt because every reader subagent slot is busy. It is queued: the next wait_agent that finds a finished reader hands it to a new reader and lists that reader in dispatched_readers. Do not spawn a reader for it yourself; keep working and collect its cards from claims.md after waiting for that reader."
+	}
+	return "This long document shows only its opening excerpt because every reader subagent slot is busy. Collect finished readers with wait_agent, then hand this URL to a reader with spawn_agent, asking it to read the document in full and record claim cards with record_claim."
 }
 
 func isResearchReaderTask(task string) bool {

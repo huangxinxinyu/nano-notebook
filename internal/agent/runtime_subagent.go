@@ -282,19 +282,35 @@ func (a *runtimeSubagentAction) spawn(ctx context.Context, tx pgx.Tx, request Ac
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return ActionResult{}, err
 	}
-	var active, total int
-	if err := tx.QueryRow(ctx, `select count(*) filter(where child.status in ('queued','running')),count(*)
-		from agent_subagents s join agent_runs child on child.id=s.child_run_id where s.parent_run_id=$1`, request.Attempt.RunID).Scan(&active, &total); err != nil {
+	active, total, err := countRuntimeSubagentsInTx(ctx, tx, request.Attempt.RunID)
+	if err != nil {
 		return ActionResult{}, err
 	}
 	if active >= runtimeSubagentMaxActive || total >= runtimeSubagentMaxTotal {
 		return ActionResult{Status: ActionDomainError, ErrorCode: "subagent_capacity_exhausted"}, nil
 	}
-	childID, jobID := "run_"+uuid.NewString(), "job_"+uuid.NewString()
-	if err := chargeConfiguredTreeInTx(ctx, tx, request.Attempt.RunID, treeBudgetCharge{ContextBytes: len(request.Input)}); err != nil {
+	childID, err := createRuntimeSubagentInTx(ctx, tx, request, request.ActionID, input, len(request.Input))
+	if err != nil {
 		return ActionResult{}, err
 	}
-	_, err = tx.Exec(ctx, `insert into agent_runs(id,status,runtime_kind,tree_id,
+	return commitSubagentResult(ctx, tx, map[string]string{"agent_id": childID, "task_name": input.TaskName})
+}
+
+func countRuntimeSubagentsInTx(ctx context.Context, tx pgx.Tx, parentID string) (active, total int, err error) {
+	err = tx.QueryRow(ctx, `select count(*) filter(where child.status in ('queued','running')),count(*)
+		from agent_subagents s join agent_runs child on child.id=s.child_run_id where s.parent_run_id=$1`, parentID).Scan(&active, &total)
+	return active, total, err
+}
+
+// createRuntimeSubagentInTx admits one child Run under the caller's capacity
+// check. actionID keys the child to the parent Action that created it, so a
+// replayed Action finds its child instead of creating another.
+func createRuntimeSubagentInTx(ctx context.Context, tx pgx.Tx, request ActionRequest, actionID string, input spawnAgentInput, contextBytes int) (string, error) {
+	childID, jobID := "run_"+uuid.NewString(), "job_"+uuid.NewString()
+	if err := chargeConfiguredTreeInTx(ctx, tx, request.Attempt.RunID, treeBudgetCharge{ContextBytes: contextBytes}); err != nil {
+		return "", err
+	}
+	_, err := tx.Exec(ctx, `insert into agent_runs(id,status,runtime_kind,tree_id,
 		definition_identity,definition_version,definition_sha256,executor_identity,
 		model_policy_identity,model_policy_version,model_policy_sha256,provider_model,
 		provider_capability_identity,provider_capability_version,provider_capability_sha256,
@@ -306,32 +322,32 @@ func (a *runtimeSubagentAction) spawn(ctx context.Context, tx pgx.Tx, request Ac
 		model_context_policy_identity,model_context_policy_version,model_context_policy_sha256,
 		parent_context_manifest,selected_source_count from agent_runs where id=$1`, request.Attempt.RunID, childID)
 	if err != nil {
-		return ActionResult{}, err
+		return "", err
 	}
-	if _, err = tx.Exec(ctx, `insert into agent_subagents(child_run_id,parent_run_id,action_id,task_name,message) values($1,$2,$3,$4,$5)`, childID, request.Attempt.RunID, request.ActionID, input.TaskName, input.Message); err != nil {
-		return ActionResult{}, err
+	if _, err = tx.Exec(ctx, `insert into agent_subagents(child_run_id,parent_run_id,action_id,task_name,message) values($1,$2,$3,$4,$5)`, childID, request.Attempt.RunID, actionID, input.TaskName, input.Message); err != nil {
+		return "", err
 	}
 	if _, err = tx.Exec(ctx, `insert into agent_run_evidence_set(run_id,ordinal,notebook_id,source_id,evidence_revision_id,index_version_id)
 		select $2,ordinal,notebook_id,source_id,evidence_revision_id,index_version_id from agent_run_evidence_set where run_id=$1`, request.Attempt.RunID, childID); err != nil {
-		return ActionResult{}, err
+		return "", err
 	}
 	if _, err = tx.Exec(ctx, `insert into agent_jobs(id,kind,run_id,status) values($1,'agent_run',$2,'queued')`, jobID, childID); err != nil {
-		return ActionResult{}, err
+		return "", err
 	}
 	var model string
 	if err = tx.QueryRow(ctx, `select provider_model from agent_runs where id=$1`, childID).Scan(&model); err != nil {
-		return ActionResult{}, err
+		return "", err
 	}
 	if err = StartRunTraceInTx(ctx, tx, childID, model, request.Definition.String(), nil); err != nil {
-		return ActionResult{}, err
+		return "", err
 	}
 	if err = recordRuntimeSubagentSpawnInTx(ctx, tx, request.Attempt.RunID, childID); err != nil {
-		return ActionResult{}, err
+		return "", err
 	}
 	if _, err = tx.Exec(ctx, `select pg_notify('nano_agent_jobs',$1)`, jobID); err != nil {
-		return ActionResult{}, err
+		return "", err
 	}
-	return commitSubagentResult(ctx, tx, map[string]string{"agent_id": childID, "task_name": input.TaskName})
+	return childID, nil
 }
 
 func (a *runtimeSubagentAction) wait(ctx context.Context, tx pgx.Tx, request ActionRequest) (ActionResult, error) {
@@ -359,6 +375,17 @@ func (a *runtimeSubagentAction) wait(ctx context.Context, tx pgx.Tx, request Act
 	if len(agents) != len(input.AgentIDs) {
 		return ActionResult{Status: ActionDomainError, ErrorCode: "subagent_not_owned"}, nil
 	}
+	autoReaders, err := waitAgentResearchQueue(ctx, tx, request)
+	if err != nil {
+		return ActionResult{}, err
+	}
+	result := func(timedOut bool) map[string]any {
+		value := map[string]any{"agents": agents, "timed_out": timedOut}
+		if len(autoReaders) > 0 {
+			value["auto_dispatched_readers"] = autoReaders
+		}
+		return value
+	}
 	timeoutMS := 30000
 	if input.TimeoutMS != nil {
 		timeoutMS = *input.TimeoutMS
@@ -368,7 +395,7 @@ func (a *runtimeSubagentAction) wait(ctx context.Context, tx pgx.Tx, request Act
 		ready = ready || item.Status == "completed" || item.Status == "failed" || item.Status == "cancelled"
 	}
 	if ready || timeoutMS == 0 {
-		return commitSubagentResult(ctx, tx, map[string]any{"agents": agents, "timed_out": !ready})
+		return commitSubagentResult(ctx, tx, result(!ready))
 	}
 	if _, err = tx.Exec(ctx, `insert into agent_subagent_waits(parent_run_id,action_id,agent_ids,deadline_at)
 		values($1,$2,$3,now()+$4*interval '1 millisecond') on conflict(parent_run_id,action_id) do nothing`, request.Attempt.RunID, request.ActionID, input.AgentIDs, timeoutMS); err != nil {
@@ -380,7 +407,7 @@ func (a *runtimeSubagentAction) wait(ctx context.Context, tx pgx.Tx, request Act
 		return ActionResult{}, err
 	}
 	if expired {
-		return commitSubagentResult(ctx, tx, map[string]any{"agents": agents, "timed_out": true})
+		return commitSubagentResult(ctx, tx, result(true))
 	}
 	if _, err = tx.Exec(ctx, `update agent_runs set status='queued',updated_at=now() where id=$1`, request.Attempt.RunID); err != nil {
 		return ActionResult{}, err

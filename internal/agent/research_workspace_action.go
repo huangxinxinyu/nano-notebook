@@ -55,6 +55,7 @@ type researchWorkspaceAssemblyOutput struct {
 	CitationCheck *researchCitationCheck    `json:"citation_check,omitempty"`
 	Coverage      *researchSourceCoverage   `json:"source_coverage,omitempty"`
 	Running       []researchRunningSubagent `json:"running_subagents,omitempty"`
+	QueuedReads   []researchQueuedRead      `json:"queued_reads,omitempty"`
 }
 
 type researchWorkspaceSnapshot struct {
@@ -484,8 +485,17 @@ func (a *assembleResearchReportAction) Execute(ctx context.Context, request Acti
 			guidance += " " + advice
 		}
 	}
+	var queued []researchQueuedRead
+	if lister, ok := a.agents.(researchQueuedReadLister); ok && request.Definition.Identity == "research.executor" && request.Definition.Version >= researchQueuedReaderVersion {
+		if queued, err = lister.QueuedResearchReads(ctx, request.Attempt.RunID); err != nil {
+			return ActionResult{}, err
+		}
+		if advice := researchQueuedReadsGuidance(queued); advice != "" {
+			guidance += " " + advice
+		}
+	}
 	output, err := json.Marshal(researchWorkspaceAssemblyOutput{
-		researchWorkspaceFileOutput: file, ReviewPresent: reviewPresent, Guidance: guidance, CitationCheck: citationCheck, Coverage: coverage, Running: running,
+		researchWorkspaceFileOutput: file, ReviewPresent: reviewPresent, Guidance: guidance, CitationCheck: citationCheck, Coverage: coverage, Running: running, QueuedReads: queued,
 	})
 	if err != nil {
 		return ActionResult{}, err
