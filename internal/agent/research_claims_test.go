@@ -384,3 +384,21 @@ func TestSourceCoverageListsSourcesWithUncitedCards(t *testing.T) {
 		t.Fatalf("guidance=%q", guidance)
 	}
 }
+
+func TestCardRangesCiteEveryCardBetweenTheirEnds(t *testing.T) {
+	claims := []researchClaim{
+		{recordClaimOutput: recordClaimOutput{ID: "g2", URL: "https://example.com/a"}},
+		{recordClaimOutput: recordClaimOutput{ID: "g3", URL: "https://example.com/a"}},
+		{recordClaimOutput: recordClaimOutput{ID: "g4", URL: "https://example.com/b"}},
+		{recordClaimOutput: recordClaimOutput{ID: "c1", URL: "https://example.com/c"}},
+		{recordClaimOutput: recordClaimOutput{ID: "c2", URL: "https://example.com/d"}},
+	}
+	rendered, stats := renderResearchClaimCitations("Tokens [g2-g4]. Root [c1–2]. Mixed [g3, c1~c2]. Reversed [g4-g2].", claims)
+	want := "Tokens [1](https://example.com/a)[2](https://example.com/b). Root [3](https://example.com/c)[4](https://example.com/d). Mixed [1](https://example.com/a)[3](https://example.com/c)[4](https://example.com/d). Reversed ."
+	if rendered != want || stats.Cited != 8 {
+		t.Fatalf("rendered=%q\nwant    =%q stats=%+v", rendered, want, stats)
+	}
+	if got := strings.Join(citedClaimIDs("aa1-3"), ","); got != "aa1,aa2,aa3" {
+		t.Fatalf("two-letter range=%q", got)
+	}
+}

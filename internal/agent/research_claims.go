@@ -42,17 +42,25 @@ const (
 	claimRecordMaxQuestion    = 30
 )
 
+// researchClaimCitationElement matches one cited card id or card range.
+const researchClaimCitationElement = `(?:(?:[abd-z]{1,2}|c)[1-9][0-9]*\s*[-–—~]\s*(?:[abd-z]{1,2}|c)?[1-9][0-9]*|[abd-z]{1,2}[1-9][0-9]*|(?:c?[0-9a-f]{4}-?)?c[1-9][0-9]*)`
+
+// researchClaimMaxRange bounds how many cards one cited range expands to.
+const researchClaimMaxRange = 30
+
 var (
 	// Root cards are c1, c2, ...; each subagent's cards take a letter
 	// namespace in spawn order (a1, b2, ..., aa3). Earlier runs used hex namespaces (16d1-c3).
 	researchClaimIDPattern = regexp.MustCompile(`^(?:(?:[0-9a-f]{4}-)?c|[abd-z]{1,2})[1-9][0-9]*$`)
 	// Citations also accept the variants models write for hex child ids, such
 	// as c16d1-c3 or 16d1c3 for 16d1-c3; canonicalClaimID maps them back.
-	researchClaimCitationPattern = regexp.MustCompile(`\[((?:[abd-z]{1,2}[1-9][0-9]*|(?:c?[0-9a-f]{4}-?)?c[1-9][0-9]*)(?:\s*[,，;；、]\s*(?:[abd-z]{1,2}[1-9][0-9]*|(?:c?[0-9a-f]{4}-?)?c[1-9][0-9]*))*)\]`)
-	childClaimIDVariantPattern   = regexp.MustCompile(`^c?([0-9a-f]{4})-?c([1-9][0-9]*)$`)
-	researchClaimIDSplitPattern  = regexp.MustCompile(`\s*[,，;；、]\s*`)
-	claimMarkdownLinkURLPattern  = regexp.MustCompile(`\]\([^)\s]*\)`)
-	claimEllipsisPattern         = regexp.MustCompile(`\.{3,}|…+`)
+	researchClaimCitationPattern = regexp.MustCompile(`\[(` + researchClaimCitationElement + `(?:\s*[,，;；、]\s*` + researchClaimCitationElement + `)*)\]`)
+	// A range such as [g2-g4] or [c3–5] cites every card between its ends.
+	researchClaimRangePattern   = regexp.MustCompile(`^([abd-z]{1,2}|c)([1-9][0-9]*)\s*[-–—~]\s*(?:[abd-z]{1,2}|c)?([1-9][0-9]*)$`)
+	childClaimIDVariantPattern  = regexp.MustCompile(`^c?([0-9a-f]{4})-?c([1-9][0-9]*)$`)
+	researchClaimIDSplitPattern = regexp.MustCompile(`\s*[,，;；、]\s*`)
+	claimMarkdownLinkURLPattern = regexp.MustCompile(`\]\([^)\s]*\)`)
+	claimEllipsisPattern        = regexp.MustCompile(`\.{3,}|…+`)
 )
 
 type recordClaimInput struct {
@@ -602,9 +610,20 @@ func canonicalClaimID(id string) string {
 }
 
 func citedClaimIDs(list string) []string {
-	ids := researchClaimIDSplitPattern.Split(list, -1)
-	for index, id := range ids {
-		ids[index] = canonicalClaimID(id)
+	parts := researchClaimIDSplitPattern.Split(list, -1)
+	ids := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if match := researchClaimRangePattern.FindStringSubmatch(strings.TrimSpace(part)); match != nil {
+			first, _ := strconv.Atoi(match[2])
+			last, _ := strconv.Atoi(match[3])
+			if last >= first && last-first < researchClaimMaxRange {
+				for ordinal := first; ordinal <= last; ordinal++ {
+					ids = append(ids, researchClaimNamespacedID(strings.TrimPrefix(match[1], "c"), ordinal))
+				}
+				continue
+			}
+		}
+		ids = append(ids, canonicalClaimID(part))
 	}
 	return ids
 }
