@@ -450,6 +450,7 @@ func (a *assembleResearchReportAction) Execute(ctx context.Context, request Acti
 	var citationCheck *researchCitationCheck
 	var coverage *researchSourceCoverage
 	var questions *researchQuestionCoverageReport
+	countBreadth := true
 	if a.claims != nil {
 		claims, err := a.claims.ResearchClaims(ctx, request.Attempt.RunID)
 		if err != nil {
@@ -467,13 +468,14 @@ func (a *assembleResearchReportAction) Execute(ctx context.Context, request Acti
 			}
 			report := builder.String()
 			measured := checkResearchSourceCoverage(report, claims, sources)
-			if measured.ReadSources < researchBreadthTarget {
+			countBreadth = request.Definition.Identity != "research.executor" || request.Definition.Version < researchQuestionBreadthVersion
+			if !countBreadth || measured.ReadSources < researchBreadthTarget {
 				if measured.UnreadLeads, err = a.sources.ResearchUnreadLeads(ctx, request.Attempt.RunID, sourceCoverageMaxLeads); err != nil {
 					return ActionResult{}, err
 				}
 			}
 			coverage = &measured
-			if advice := researchSourceCoverageGuidance(measured); advice != "" {
+			if advice := researchSourceCoverageGuidance(measured, countBreadth); advice != "" {
 				guidance += " " + advice
 			}
 		}
@@ -486,6 +488,9 @@ func (a *assembleResearchReportAction) Execute(ctx context.Context, request Acti
 				questions = &measured
 				if advice := researchQuestionCoverageGuidance(measured); advice != "" {
 					guidance += " " + advice
+					if !countBreadth && coverage != nil && len(coverage.UnreadLeads) > 0 {
+						guidance += " Unread leads already discovered are listed in source_coverage.unread_leads."
+					}
 				}
 			}
 		}

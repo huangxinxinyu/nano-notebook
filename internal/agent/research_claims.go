@@ -1037,9 +1037,11 @@ const (
 	sourceCoverageMaxUnusedList  = 6
 	sourceCoverageMaxUncited     = 8
 	// researchBreadthTarget is the read-source count below which assembly
-	// suggests another discovery round; the executor prompt cites 8-15.
-	researchBreadthTarget  = 8
-	sourceCoverageMaxLeads = 6
+	// suggests another discovery round, before executor v31 judged breadth
+	// per research question instead of by a count.
+	researchBreadthTarget          = 8
+	researchQuestionBreadthVersion = 31
+	sourceCoverageMaxLeads         = 6
 )
 
 type researchReadSource struct {
@@ -1199,7 +1201,9 @@ func checkResearchSourceCoverage(report string, claims []researchClaim, sources 
 	return coverage
 }
 
-func researchSourceCoverageGuidance(coverage researchSourceCoverage) string {
+// researchSourceCoverageGuidance advises on uncited sources and cards; with
+// countBreadth it also applies the older read-source count target.
+func researchSourceCoverageGuidance(coverage researchSourceCoverage, countBreadth bool) string {
 	parts := make([]string, 0, 2)
 	if coverage.ReadSources > 0 && coverage.CitedSources < coverage.ReadSources {
 		parts = append(parts, fmt.Sprintf("Source coverage: the report cites %d of the %d sources read in this Run. Cite an uncited read source where it supports or qualifies a claim, record a card from it if needed, or leave it out deliberately.", coverage.CitedSources, coverage.ReadSources))
@@ -1207,7 +1211,7 @@ func researchSourceCoverageGuidance(coverage researchSourceCoverage) string {
 	if len(coverage.UnusedCards) > 0 {
 		parts = append(parts, fmt.Sprintf("Card use: the report cites %d of %d usable claim cards; sources_with_uncited_cards lists sources whose verified findings the report leaves out. Plan source lists and reference lists are a starting map, not a limit: use these cards wherever they support, qualify, or contradict a claim. If the Member set a length limit, make room by tightening prose and replacing weaker evidence rather than dropping a source's main findings.", coverage.CitedCards, coverage.Cards))
 	}
-	if coverage.ReadSources < researchBreadthTarget {
+	if countBreadth && coverage.ReadSources < researchBreadthTarget {
 		advice := fmt.Sprintf("Source breadth: only %d sources have been read, while a substantial report usually rests on about %d-15 across several source families. Before Final, consider another round of discovery and parallel reading, especially independent evaluations, critiques, and alternatives, then revise and assemble again.", coverage.ReadSources, researchBreadthTarget)
 		if len(coverage.UnreadLeads) > 0 {
 			advice += " Unread leads already discovered are listed in unread_leads."

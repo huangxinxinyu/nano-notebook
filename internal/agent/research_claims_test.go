@@ -286,17 +286,20 @@ func TestSourceCoverageCountsCardAndLinkCitations(t *testing.T) {
 	if coverage.ReadSources != 3 || coverage.CitedSources != 2 || len(coverage.UncitedSample) != 1 || coverage.UncitedSample[0].Title != "Unused" {
 		t.Fatalf("coverage=%+v", coverage)
 	}
-	if guidance := researchSourceCoverageGuidance(coverage); !strings.Contains(guidance, "2 of the 3") || !strings.Contains(guidance, "only 3 sources have been read") {
+	if guidance := researchSourceCoverageGuidance(coverage, true); !strings.Contains(guidance, "2 of the 3") || !strings.Contains(guidance, "only 3 sources have been read") {
 		t.Fatalf("guidance=%q", guidance)
 	}
 	coverage.UnreadLeads = []researchReadSource{{URL: "https://example.com/lead", Title: "Lead"}}
-	if guidance := researchSourceCoverageGuidance(coverage); !strings.Contains(guidance, "unread_leads") {
+	if guidance := researchSourceCoverageGuidance(coverage, true); !strings.Contains(guidance, "unread_leads") {
 		t.Fatalf("guidance without leads pointer=%q", guidance)
 	}
-	if guidance := researchSourceCoverageGuidance(researchSourceCoverage{ReadSources: 2, CitedSources: 2}); strings.Contains(guidance, "Source coverage") || !strings.Contains(guidance, "Source breadth") {
+	if guidance := researchSourceCoverageGuidance(researchSourceCoverage{ReadSources: 2, CitedSources: 2}, true); strings.Contains(guidance, "Source coverage") || !strings.Contains(guidance, "Source breadth") {
 		t.Fatalf("fully cited narrow report guidance=%q", guidance)
 	}
-	if guidance := researchSourceCoverageGuidance(researchSourceCoverage{ReadSources: 9, CitedSources: 9}); guidance != "" {
+	if guidance := researchSourceCoverageGuidance(researchSourceCoverage{ReadSources: 2, CitedSources: 2}, false); guidance != "" {
+		t.Fatalf("question-judged breadth still applied a source count: %q", guidance)
+	}
+	if guidance := researchSourceCoverageGuidance(researchSourceCoverage{ReadSources: 9, CitedSources: 9}, true); guidance != "" {
 		t.Fatalf("broad, fully cited report produced guidance %q", guidance)
 	}
 }
@@ -377,7 +380,7 @@ func TestSourceCoverageListsSourcesWithUncitedCards(t *testing.T) {
 		t.Fatalf("unused=%+v", coverage.UnusedCards)
 	}
 	coverage.ReadSources, coverage.CitedSources = researchBreadthTarget, researchBreadthTarget
-	if guidance := researchSourceCoverageGuidance(coverage); !strings.Contains(guidance, "cites 3 of 8 usable claim cards") || !strings.Contains(guidance, "not a limit") {
+	if guidance := researchSourceCoverageGuidance(coverage, true); !strings.Contains(guidance, "cites 3 of 8 usable claim cards") || !strings.Contains(guidance, "not a limit") {
 		t.Fatalf("guidance=%q", guidance)
 	}
 }
