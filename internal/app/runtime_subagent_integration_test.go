@@ -527,7 +527,7 @@ func TestRuntimeSubagentUserCancellationEndsRunningChildTrace(t *testing.T) {
 	}
 }
 
-func TestRuntimeSubagentDatabaseAdmitsTheRuntimeTotal(t *testing.T) {
+func TestRuntimeSubagentTotalEndsInACapacityResult(t *testing.T) {
 	f := newRuntimeSubagentFixture(t)
 	ctx := context.Background()
 	attempt := attemptFromClaim(f.parent)
@@ -535,8 +535,13 @@ func TestRuntimeSubagentDatabaseAdmitsTheRuntimeTotal(t *testing.T) {
 		input, _ := json.Marshal(map[string]string{"message": fmt.Sprintf("Independent investigation %d", i), "task_name": "task"})
 		appendResearchProposal(t, f.runtime, attempt, i+1, []models.ActionProposal{{Name: "spawn_agent", Input: input}})
 		result, err := f.tools["spawn_agent"].Execute(ctx, f.request("spawn_agent", fmt.Sprintf("decision:%d/action:0", i+1), input, attempt))
-		if err != nil || result.Status != agent.ActionSucceeded {
-			t.Fatalf("spawn %d=%+v err=%v", i, result, err)
+		if err != nil {
+			t.Fatalf("spawn %d: %v", i, err)
+		}
+		// The 17th child gets a capacity result the model can act on, never a
+		// database error that fails the Attempt.
+		if i < 16 && result.Status != agent.ActionSucceeded || i == 16 && result.ErrorCode != "subagent_capacity_exhausted" {
+			t.Fatalf("spawn %d=%+v", i, result)
 		}
 		appendResearchResult(t, f.runtime, attempt, i+1, 0, result)
 		// Finish the child so only the total, not concurrency, is exercised.

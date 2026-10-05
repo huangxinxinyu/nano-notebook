@@ -6,17 +6,17 @@ import (
 )
 
 func TestResearchScoutGroupsShareSlotsRoundRobin(t *testing.T) {
-	groups := researchScoutGroups([]string{"q1", " ", "q3", "q4", "q5", "q6", "q7"}, 4)
+	groups := researchScoutGroups([]string{"q1", " ", "q3", "q4", "q5", "q6", "q7"}, researchScoutMax)
 	got := make([]string, len(groups))
 	for index, group := range groups {
 		for _, question := range group {
 			got[index] += "Q" + string(rune('0'+question.Number))
 		}
 	}
-	if strings.Join(got, "|") != "Q1Q6|Q3Q7|Q4|Q5" {
+	if strings.Join(got, "|") != "Q1Q5|Q3Q6|Q4Q7" {
 		t.Fatalf("groups=%v", got)
 	}
-	if len(researchScoutGroups([]string{"only"}, 4)) != 1 || researchScoutGroups(nil, 4) != nil {
+	if len(researchScoutGroups([]string{"only"}, researchScoutMax)) != 1 || researchScoutGroups(nil, researchScoutMax) != nil {
 		t.Fatal("scout count does not follow the questions")
 	}
 }

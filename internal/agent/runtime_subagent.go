@@ -24,7 +24,7 @@ const runtimeSubagentInstructions = `You are a runtime subagent working for a pa
 // limit bounds concurrent provider load.
 const (
 	runtimeSubagentMaxActive = 4
-	runtimeSubagentMaxTotal  = 32
+	runtimeSubagentMaxTotal  = 16
 )
 
 func recordCancelledRuntimeSubagentsInTx(ctx context.Context, tx pgx.Tx, parentID string) error {

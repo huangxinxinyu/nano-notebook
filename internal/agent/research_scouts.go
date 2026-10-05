@@ -12,13 +12,16 @@ import (
 // From executor v29 a root Research Run starts with open discovery that does
 // not depend on the model choosing to search widely: before its first
 // decision the runtime dispatches scout subagents, one per plan research
-// question (questions share scouts when there are more than reader slots).
+// question (questions share scouts beyond researchScoutMax).
 // Scouts only search and return candidate sources; the root reads them.
 
 const (
 	researchScoutVersion    = 29
 	researchScoutTaskPrefix = "Scout open discovery for the parent researcher."
 	researchScoutActionID   = "scout:"
+	// researchScoutMax leaves at least one of the four concurrent slots to
+	// readers, so long documents the root finds early are read right away.
+	researchScoutMax = 3
 )
 
 // RunStarter lets a runtime start work owned by a fresh Attempt before its
@@ -65,7 +68,7 @@ func (r *ResearchRuntime) StartRun(ctx context.Context, attempt Attempt, executi
 		return err
 	}
 	request := ActionRequest{Attempt: attempt, UserID: execution.UserID, ChatID: execution.ChatID, Definition: reference}
-	for index, group := range researchScoutGroups(questions, runtimeSubagentMaxActive) {
+	for index, group := range researchScoutGroups(questions, researchScoutMax) {
 		input := researchScoutSpawnInput(group)
 		raw, err := json.Marshal(input)
 		if err != nil {
