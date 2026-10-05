@@ -50,8 +50,9 @@ type researchWorkspaceListOutput struct {
 
 type researchWorkspaceAssemblyOutput struct {
 	researchWorkspaceFileOutput
-	ReviewPresent bool   `json:"review_present"`
-	Guidance      string `json:"guidance"`
+	ReviewPresent bool                   `json:"review_present"`
+	Guidance      string                 `json:"guidance"`
+	CitationCheck *researchCitationCheck `json:"citation_check,omitempty"`
 }
 
 type researchWorkspaceSnapshot struct {
@@ -345,6 +346,7 @@ type assembleResearchReportAction struct {
 	store   objectstore.Store
 	index   researchWorkspaceIndex
 	barrier researchSourceImportBarrier
+	claims  researchClaimsSource
 }
 
 type assembleResearchReportInput struct {
@@ -439,8 +441,20 @@ func (a *assembleResearchReportAction) Execute(ctx context.Context, request Acti
 	if reviewPresent {
 		guidance = "Assembly succeeded with a checkpoint-accepted review.md. Return Final only if the reviewed sections satisfy the accepted plan."
 	}
+	var citationCheck *researchCitationCheck
+	if a.claims != nil {
+		claims, err := a.claims.ResearchClaims(ctx, request.Attempt.RunID)
+		if err != nil {
+			return ActionResult{}, err
+		}
+		check := checkResearchCitationNumbers(builder.String(), claims)
+		citationCheck = &check
+		if advice := researchCitationCheckGuidance(check); advice != "" {
+			guidance += " " + advice
+		}
+	}
 	output, err := json.Marshal(researchWorkspaceAssemblyOutput{
-		researchWorkspaceFileOutput: file, ReviewPresent: reviewPresent, Guidance: guidance,
+		researchWorkspaceFileOutput: file, ReviewPresent: reviewPresent, Guidance: guidance, CitationCheck: citationCheck,
 	})
 	if err != nil {
 		return ActionResult{}, err
@@ -555,6 +569,6 @@ func NewResearchWorkspaceActions(pool *pgxpool.Pool, store objectstore.Store) ([
 		newWriteResearchFileAction(store),
 		newReadResearchFileAction(store, index, postgresResearchClaimBackend{pool: pool}),
 		newListResearchFilesAction(index),
-		newAssembleResearchReportAction(store, index, postgresResearchSourceImportBarrier{pool: pool}),
+		&assembleResearchReportAction{store: store, index: index, barrier: postgresResearchSourceImportBarrier{pool: pool}, claims: postgresResearchClaimBackend{pool: pool}},
 	}, nil
 }

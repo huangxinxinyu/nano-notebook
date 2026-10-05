@@ -230,3 +230,44 @@ func TestRecordClaimDefinitionRegisters(t *testing.T) {
 	}
 }
 
+func TestCitationNumberCheckFlagsNumbersMissingFromCitedQuotes(t *testing.T) {
+	claims := []researchClaim{
+		{recordClaimOutput: recordClaimOutput{ID: "c2"}, Quote: "Real-world queries vary widely: some need keyword matching, others need semantic search."},
+		{recordClaimOutput: recordClaimOutput{ID: "c4"}, Quote: "compared with IRCoT, PAR2-RAG achieves up to 23.5% higher accuracy, with retrieval gains of up to 10.5% in NDCG."},
+		{recordClaimOutput: recordClaimOutput{ID: "c9"}, Quote: "smaller chunks delivered 8ms faster retrieval and 4.2% higher relevance across 1,024 queries"},
+	}
+	report := strings.Join([]string{
+		"# 迭代检索升级决策指南",
+		"迭代检索升级的工程标准是：ROI > 1.2 且 P95 延迟增幅 < 150ms。",
+		"| 维度 | 触发条件 | 来源 |",
+		"|---|---|---|",
+		"| 查询改写 | 模糊实体召回率 < 0.4 | [c2] |",
+		"| PAR2-RAG | 相比 IRCoT 准确率最高提升 23.5%，NDCG 提升 10.5% | [c4] |",
+		"小分块检索快 8 ms、相关性高 4.2%，共 1024 次查询。[c9] 2026 年 GPT-5 与 top-3 召回不计入核对。",
+		"三种方法各有取舍 [c2]。",
+	}, "\n")
+	check := checkResearchCitationNumbers(report, claims)
+	if len(check.UnsupportedNumbers) != 1 || check.UnsupportedNumbers[0].Numbers[0] != "0.4" || check.UnsupportedNumbers[0].Cards[0] != "c2" {
+		t.Fatalf("unsupported=%+v", check.UnsupportedNumbers)
+	}
+	if len(check.UncitedNumbers) != 1 || strings.Join(check.UncitedNumbers[0].Numbers, ",") != "1.2,150" {
+		t.Fatalf("uncited=%+v", check.UncitedNumbers)
+	}
+	if check.CheckedStatements != 4 {
+		t.Fatalf("checked=%d", check.CheckedStatements)
+	}
+	if !strings.Contains(researchCitationCheckGuidance(check), "1 statement(s)") {
+		t.Fatalf("guidance=%q", researchCitationCheckGuidance(check))
+	}
+	if guidance := researchCitationCheckGuidance(checkResearchCitationNumbers("相比 IRCoT 提升 23.5% [c4]。", claims)); guidance != "" {
+		t.Fatalf("supported statement produced guidance %q", guidance)
+	}
+}
+
+func TestResearchCitationStatementsKeepTrailingCitationsWithSentence(t *testing.T) {
+	got := researchCitationStatements("第一句提升 12%。[c1] 第二句没有引用。Third sentence [c2, c3]. Last")
+	want := []string{"第一句提升 12%。[c1]", " 第二句没有引用。", "Third sentence [c2, c3].", " Last"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("got %q", got)
+	}
+}

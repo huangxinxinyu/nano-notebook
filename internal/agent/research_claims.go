@@ -784,3 +784,206 @@ func (b postgresResearchClaimBackend) ClaimsMarkdown(ctx context.Context, runID 
 	return renderResearchClaimsMarkdown(collectResearchClaims(tree)), nil
 }
 
+// ResearchClaims returns every card recorded in the Run's Research tree.
+func (b postgresResearchClaimBackend) ResearchClaims(ctx context.Context, runID string) ([]researchClaim, error) {
+	tree, err := b.ClaimTree(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	return collectResearchClaims(tree), nil
+}
+
+type researchClaimsSource interface {
+	ResearchClaims(ctx context.Context, runID string) ([]researchClaim, error)
+}
+
+const (
+	citationCheckMaxFindings   = 10
+	citationCheckExcerptRunes  = 160
+	citationCheckGuidanceTitle = "Citation number check"
+)
+
+var (
+	citationCheckNumberPattern    = regexp.MustCompile(`\d+(?:[.,]\d+)*%?`)
+	citationCheckInlineCode       = regexp.MustCompile("`[^`]*`")
+	citationCheckRenderedLink     = regexp.MustCompile(`\[[^\]]*\]\([^)\s]*\)`)
+	citationCheckThousands        = regexp.MustCompile(`^\d{1,3}(?:,\d{3})+(?:\.\d+)?$`)
+	citationCheckTableSeparator   = regexp.MustCompile(`^\|?\s*:?-{2,}`)
+	citationCheckSentenceTerminal = "。！？!?；;"
+)
+
+type researchCitationFinding struct {
+	Excerpt string   `json:"excerpt"`
+	Numbers []string `json:"numbers"`
+	Cards   []string `json:"cards,omitempty"`
+}
+
+type researchCitationCheck struct {
+	CheckedStatements  int                       `json:"checked_statements"`
+	UnsupportedNumbers []researchCitationFinding `json:"unsupported_numbers,omitempty"`
+	UncitedNumbers     []researchCitationFinding `json:"uncited_numbers,omitempty"`
+}
+
+func (c researchCitationCheck) empty() bool {
+	return len(c.UnsupportedNumbers) == 0 && len(c.UncitedNumbers) == 0
+}
+
+// checkResearchCitationNumbers flags numbers that a cited statement states but
+// none of its cited cards' quotes contain, and numeric statements that cite
+// nothing. It is advisory: the result guides revision and never blocks.
+func checkResearchCitationNumbers(report string, claims []researchClaim) researchCitationCheck {
+	quotes := make(map[string]map[string]bool, len(claims))
+	for _, claim := range claims {
+		numbers := map[string]bool{}
+		for _, raw := range citationCheckNumberPattern.FindAllString(claim.Quote, -1) {
+			numbers[normalizeCitationNumber(raw)] = true
+		}
+		quotes[claim.ID] = numbers
+	}
+	var check researchCitationCheck
+	for _, statement := range researchCitationStatements(report) {
+		ids := make([]string, 0)
+		for _, match := range researchClaimCitationPattern.FindAllStringSubmatch(statement, -1) {
+			ids = append(ids, researchClaimIDSplitPattern.Split(match[1], -1)...)
+		}
+		numbers := citationStatementNumbers(statement)
+		if len(numbers) == 0 {
+			continue
+		}
+		check.CheckedStatements++
+		if len(ids) == 0 {
+			if len(check.UncitedNumbers) < citationCheckMaxFindings {
+				check.UncitedNumbers = append(check.UncitedNumbers, researchCitationFinding{Excerpt: citationExcerpt(statement), Numbers: numbers})
+			}
+			continue
+		}
+		missing := make([]string, 0)
+		for _, number := range numbers {
+			found := false
+			for _, id := range ids {
+				if quotes[id][normalizeCitationNumber(number)] {
+					found = true
+					break
+				}
+			}
+			if !found {
+				missing = append(missing, number)
+			}
+		}
+		if len(missing) > 0 && len(check.UnsupportedNumbers) < citationCheckMaxFindings {
+			check.UnsupportedNumbers = append(check.UnsupportedNumbers, researchCitationFinding{Excerpt: citationExcerpt(statement), Numbers: missing, Cards: ids})
+		}
+	}
+	return check
+}
+
+// researchCitationStatements splits a report into table rows and sentences,
+// keeping a citation that follows sentence punctuation with its sentence.
+func researchCitationStatements(report string) []string {
+	statements := make([]string, 0)
+	for _, line := range strings.Split(report, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || citationCheckTableSeparator.MatchString(line) {
+			continue
+		}
+		if strings.HasPrefix(line, "|") {
+			statements = append(statements, line)
+			continue
+		}
+		start := 0
+		for index := 0; index < len(line); {
+			character, size := utf8.DecodeRuneInString(line[index:])
+			index += size
+			if !strings.ContainsRune(citationCheckSentenceTerminal, character) && !(character == '.' && (index == len(line) || line[index] == ' ')) {
+				continue
+			}
+			for index < len(line) {
+				rest := line[index:]
+				trimmed := strings.TrimLeft(rest, " ")
+				if location := researchClaimCitationPattern.FindStringIndex(trimmed); location != nil && location[0] == 0 {
+					index += len(rest) - len(trimmed) + location[1]
+					continue
+				}
+				break
+			}
+			statements = append(statements, line[start:index])
+			start = index
+		}
+		if strings.TrimSpace(line[start:]) != "" {
+			statements = append(statements, line[start:])
+		}
+	}
+	return statements
+}
+
+// citationStatementNumbers keeps the numbers a reader would take as facts. It
+// skips identifiers glued to letters (P95, GPT-5, top-3, v0.11), lone digits,
+// and calendar years, which are too ambiguous to check against a quote.
+func citationStatementNumbers(statement string) []string {
+	text := researchClaimCitationPattern.ReplaceAllString(statement, " ")
+	text = citationCheckRenderedLink.ReplaceAllString(text, " ")
+	text = citationCheckInlineCode.ReplaceAllString(text, " ")
+	numbers := make([]string, 0)
+	seen := map[string]bool{}
+	for _, location := range citationCheckNumberPattern.FindAllStringIndex(text, -1) {
+		raw := text[location[0]:location[1]]
+		if citationNumberAttachedToIdentifier(text, location[0]) {
+			continue
+		}
+		value := strings.TrimSuffix(raw, "%")
+		if len(value) == 1 && !strings.HasSuffix(raw, "%") {
+			continue
+		}
+		if year, err := strconv.Atoi(value); err == nil && len(value) == 4 && year >= 1990 && year <= 2039 {
+			continue
+		}
+		if !seen[raw] {
+			seen[raw] = true
+			numbers = append(numbers, raw)
+		}
+	}
+	return numbers
+}
+
+func citationNumberAttachedToIdentifier(text string, start int) bool {
+	if start == 0 {
+		return false
+	}
+	previous, size := utf8.DecodeLastRuneInString(text[:start])
+	if previous == '-' || previous == '@' || previous == '_' {
+		before, _ := utf8.DecodeLastRuneInString(text[:start-size])
+		return previous != '-' || isASCIILetter(before)
+	}
+	return isASCIILetter(previous)
+}
+
+func isASCIILetter(character rune) bool {
+	return (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z')
+}
+
+func normalizeCitationNumber(raw string) string {
+	value := strings.TrimSuffix(raw, "%")
+	if citationCheckThousands.MatchString(value) {
+		value = strings.ReplaceAll(value, ",", "")
+	}
+	if parsed, err := strconv.ParseFloat(value, 64); err == nil {
+		return strconv.FormatFloat(parsed, 'f', -1, 64)
+	}
+	return value
+}
+
+func citationExcerpt(statement string) string {
+	excerpt := strings.Join(strings.Fields(statement), " ")
+	if runes := []rune(excerpt); len(runes) > citationCheckExcerptRunes {
+		excerpt = string(runes[:citationCheckExcerptRunes]) + "…"
+	}
+	return excerpt
+}
+
+func researchCitationCheckGuidance(check researchCitationCheck) string {
+	if check.empty() {
+		return ""
+	}
+	return fmt.Sprintf("%s: %d statement(s) state numbers that none of their cited cards' quotes contain (unsupported_numbers), and %d numeric statement(s) cite no card (uncited_numbers). For each, correct the number, cite the card whose quote contains it, or rewrite it as clearly labelled inference, then assemble again.",
+		citationCheckGuidanceTitle, len(check.UnsupportedNumbers), len(check.UncitedNumbers))
+}
