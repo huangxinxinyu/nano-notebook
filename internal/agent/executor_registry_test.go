@@ -59,9 +59,9 @@ func TestNanoToolCapabilitiesSchedulesOnlySideEffectFreeToolsInParallel(t *testi
 	}
 }
 
-func TestResearchRootAllowsEightReadActionsPerParallelBatch(t *testing.T) {
-	if got := ResearchRootExecutorCapability().MaxLimits.ActionBatch; got != 8 {
-		t.Fatalf("Research Root action batch=%d want=8", got)
+func TestResearchRootAllowsSixteenActionsPerParallelBatch(t *testing.T) {
+	if got := ResearchRootExecutorCapability().MaxLimits.ActionBatch; got != 16 {
+		t.Fatalf("Research Root action batch=%d want=16", got)
 	}
 }
 

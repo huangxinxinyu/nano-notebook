@@ -306,6 +306,9 @@ func researchReaderSpawnInput(requestedURL, title string, definitionVersion int)
 	if definitionVersion >= researchReaderLeadsVersion {
 		message += researchReaderLeadsInstruction
 	}
+	if definitionVersion >= researchRecommendedLeadsVersion {
+		message += " Each model decision is slow, so after reading each page propose all of that page's record_claim calls together in one decision, up to the tool-call limit, never one card per decision."
+	}
 	return spawnAgentInput{Message: message, TaskName: "Read: " + taskName}
 }
 

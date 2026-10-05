@@ -69,7 +69,7 @@ func (r *ResearchRuntime) StartRun(ctx context.Context, attempt Attempt, executi
 	}
 	request := ActionRequest{Attempt: attempt, UserID: execution.UserID, ChatID: execution.ChatID, Definition: reference}
 	for index, group := range researchScoutGroups(questions, researchScoutMax) {
-		input := researchScoutSpawnInput(group)
+		input := researchScoutSpawnInput(group, reference.Version)
 		raw, err := json.Marshal(input)
 		if err != nil {
 			return err
@@ -110,7 +110,9 @@ func researchScoutGroups(questions []string, limit int) [][]researchScoutQuestio
 	return groups
 }
 
-func researchScoutSpawnInput(questions []researchScoutQuestion) spawnAgentInput {
+// From executor v32 a scout batches its searches and skips the TODO tools,
+// which cost one slow model decision per update.
+func researchScoutSpawnInput(questions []researchScoutQuestion, definitionVersion int) spawnAgentInput {
 	labels := make([]string, len(questions))
 	var lines strings.Builder
 	for index, question := range questions {
@@ -121,6 +123,9 @@ func researchScoutSpawnInput(questions []researchScoutQuestion) spawnAgentInput 
 		"Run several rounds of web_search with varied queries: restate each question in plain terms without method names, use synonyms and adjacent terms, and add angles such as survey, benchmark, evaluation, replication, limitations, critique, and the most recent year. " +
 		"Do not limit yourself to sources the plan names; they came from a shallow scout. Search snippets are leads, not evidence: do not read full documents, record claim cards, or state findings. " +
 		"Return Final with, for each question, 5 to 10 candidate sources, most valuable first: URL, title, kind (paper, documentation, benchmark, evaluation, critique, or other), and one line on why it matters for the question. Flag independent evaluations and critiques, and say which questions found little."
+	if definitionVersion >= researchRecommendedLeadsVersion {
+		message += " Propose up to three web_search calls together in each decision and do not use the TODO tools; your Final's candidates become the parent's recommended reading list, so rank them carefully."
+	}
 	taskName := "Scout: " + strings.Join(labels, ", ")
 	if runes := []rune(taskName); len(runes) > 80 {
 		taskName = string(runes[:80])

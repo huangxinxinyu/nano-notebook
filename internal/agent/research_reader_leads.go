@@ -17,8 +17,11 @@ import (
 
 const (
 	researchReaderLeadsVersion = 30
-	researchReaderMaxLeads     = 8
-	researchReaderLeadTitle    = 300
+	// From executor v32 scouts' ranked candidates become recommended leads
+	// too, and assembly always lists unread recommended leads.
+	researchRecommendedLeadsVersion = 32
+	researchReaderMaxLeads          = 8
+	researchReaderLeadTitle         = 300
 )
 
 var (

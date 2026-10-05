@@ -22,7 +22,10 @@ func TestResearchScoutGroupsShareSlotsRoundRobin(t *testing.T) {
 }
 
 func TestResearchScoutTaskSearchesOpenlyWithoutReading(t *testing.T) {
-	input := researchScoutSpawnInput([]researchScoutQuestion{{Number: 2, Text: "When does iteration fail?"}, {Number: 5, Text: "What does it cost?"}})
+	input := researchScoutSpawnInput([]researchScoutQuestion{{Number: 2, Text: "When does iteration fail?"}, {Number: 5, Text: "What does it cost?"}}, 32)
+	if old := researchScoutSpawnInput([]researchScoutQuestion{{Number: 2, Text: "When does iteration fail?"}}, 31); strings.Contains(old.Message, "TODO") || !strings.Contains(input.Message, "do not use the TODO tools") {
+		t.Fatal("scout batching is not gated at executor v32")
+	}
 	if input.TaskName != "Scout: Q2, Q5" || !strings.HasPrefix(input.Message, researchScoutTaskPrefix) {
 		t.Fatalf("input=%+v", input)
 	}
