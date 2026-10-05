@@ -209,3 +209,23 @@ func TestEmbeddedDeepResearchV7AllowsSlowThinkingCalls(t *testing.T) {
 		t.Fatalf("context=%+v err=%v", resolved, err)
 	}
 }
+
+func TestEmbeddedDeepSeekResearchPolicyResolvesItsOwnCapability(t *testing.T) {
+	catalog, err := LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, ok := catalog.ResolveModelPolicy(MustParseReference("agent.deep-research-deepseek@1"))
+	if !ok || policy.ProviderModel != "aliyun/deepseek-v4-pro" || policy.TimeoutMS != 360_000 || policy.EnableThinking == nil || !*policy.EnableThinking {
+		t.Fatalf("policy=%+v ok=%v", policy, ok)
+	}
+	resolved, err := catalog.ResolveModelContextPolicy(policy.Reference())
+	if err != nil || resolved.Capability.ResolvedModel != "deepseek-v4-pro" || resolved.Capability.ContextWindowTokens != 1_000_000 ||
+		resolved.Capability.InvocationMode != "thinking" || resolved.Budgets.CompactionTriggerTokens != 512_000 {
+		t.Fatalf("context=%+v err=%v", resolved, err)
+	}
+	release, ok := catalog.ResolveRelease(MustParseReference("nano.default@37"))
+	if !ok || release.Roots["research"].String() != "research.executor@24" {
+		t.Fatalf("release=%+v ok=%v", release, ok)
+	}
+}

@@ -8,7 +8,8 @@
           "value": "env.DASHSCOPE_API_KEY",
           "models": [
             "qwen-plus",
-            "qwen-flash"
+            "qwen-flash",
+            "deepseek-v4-pro"
           ],
           "weight": 1
         }

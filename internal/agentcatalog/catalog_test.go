@@ -13,7 +13,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	definitions := catalog.Definitions()
-	if got, want := len(definitions), 44; got != want {
+	if got, want := len(definitions), 45; got != want {
 		t.Fatalf("definitions=%d want=%d", got, want)
 	}
 	want := map[string]struct {
@@ -89,6 +89,10 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		"research.planner@11": {
 			executor: "research_planner", model: "agent.deep-research-default@6",
 			tools: []string{"read_skill", "request_user_input", "web_search"},
+		},
+		"research.executor@24": {
+			executor: "research_root", model: "agent.deep-research-deepseek@1",
+			tools: []string{"assemble_research_report", "inspect_source", "list_agents", "list_research_files", "read_research_file", "read_skill", "read_tool_result", "read_url", "record_claim", "rewrite_todo_list", "run_python", "save_url_as_source", "search_evidence", "spawn_agent", "update_todo_status", "wait_agent", "web_search", "write_research_file"},
 		},
 		"research.executor@23": {
 			executor: "research_root", model: "agent.deep-research-default@7",
@@ -222,7 +226,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 			t.Fatalf("immutable identity missing for %s: %+v", key, definition)
 		}
 	}
-	if got, want := len(catalog.ModelPolicies()), 13; got != want {
+	if got, want := len(catalog.ModelPolicies()), 14; got != want {
 		t.Fatalf("model policies=%d want=%d", got, want)
 	}
 	if got, want := len(catalog.Contracts()), 12; got != want {

@@ -1,0 +1,9 @@
+{
+  "identity": "agent.deep-research-deepseek",
+  "version": 1,
+  "provider_model": "aliyun/deepseek-v4-pro",
+  "temperature": 0,
+  "max_output_tokens": 16384,
+  "timeout_ms": 360000,
+  "enable_thinking": true
+}
