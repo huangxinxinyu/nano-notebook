@@ -1134,27 +1134,53 @@ func (b postgresResearchClaimBackend) ResearchUnreadLeads(ctx context.Context, r
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// A paper read or failed under one URL is not unread under another, such
+	// as an arXiv abs lead for a page read through its html URL; variants of
+	// one unread document are listed once.
 	rows, err := tx.Query(ctx, `
-		select ledger.url,ledger.title,ledger.recommended_at is not null
+		select ledger.url,coalesce(ledger.final_url,''),ledger.title,ledger.status,ledger.recommended_at is not null
 		from research_evidence_ledger ledger
 		join research_sessions session on session.id=ledger.session_id
-		where session.execution_run_id=nano_research_root_run($1) and ledger.status='discovered'
+		where session.execution_run_id=nano_research_root_run($1)
 		order by ledger.recommended_at nulls last,ledger.first_seen_at,ledger.url
-		limit $2
-	`, runID, limit)
+	`, runID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	leads := make([]researchReadSource, 0, limit)
+	attempted := map[string]bool{}
+	candidates := make([]researchReadSource, 0)
 	for rows.Next() {
 		var lead researchReadSource
-		if err := rows.Scan(&lead.URL, &lead.Title, &lead.Recommended); err != nil {
+		var status string
+		if err := rows.Scan(&lead.URL, &lead.FinalURL, &lead.Title, &status, &lead.Recommended); err != nil {
 			return nil, err
 		}
-		leads = append(leads, lead)
+		if status != "discovered" {
+			attempted[researchDocumentKey(lead.URL)] = true
+			if lead.FinalURL != "" {
+				attempted[researchDocumentKey(lead.FinalURL)] = true
+			}
+			continue
+		}
+		candidates = append(candidates, lead)
 	}
-	return leads, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	leads := make([]researchReadSource, 0, limit)
+	for _, lead := range candidates {
+		key := researchDocumentKey(lead.URL)
+		if attempted[key] {
+			continue
+		}
+		attempted[key] = true
+		leads = append(leads, lead)
+		if len(leads) == limit {
+			break
+		}
+	}
+	return leads, nil
 }
 
 // ResearchReadSources lists the session's successfully read URLs.

@@ -54,6 +54,10 @@ func TestScoutCandidatesBecomeRecommendedLeadsAtAssembly(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// IRCoT was already read through its html page, so its abs lead is not unread.
+	if _, err := api.db.Pool().Exec(ctx, `insert into research_evidence_ledger(session_id,url,title,status) values($1,'https://arxiv.org/html/2212.10509v2','IRCoT','read')`, sessionID); err != nil {
+		t.Fatal(err)
+	}
 	workspaceActions, err := agent.NewResearchWorkspaceActions(api.db.Pool(), objectstore.NewMemoryStore())
 	if err != nil {
 		t.Fatal(err)
@@ -89,8 +93,8 @@ func TestScoutCandidatesBecomeRecommendedLeadsAtAssembly(t *testing.T) {
 			t.Fatal(err)
 		}
 		leads := output.Coverage.UnreadLeads
-		if len(leads) != 3 || leads[0].URL != "https://arxiv.org/abs/2401.14887" || !leads[0].Recommended || leads[1].URL != "https://arxiv.org/abs/2212.10509" ||
-			leads[2].URL != "https://example.com/plain" || leads[2].Recommended || !strings.Contains(output.Guidance, "Recommended but unread: 2 sources") {
+		if len(leads) != 2 || leads[0].URL != "https://arxiv.org/abs/2401.14887" || !leads[0].Recommended ||
+			leads[1].URL != "https://example.com/plain" || leads[1].Recommended || !strings.Contains(output.Guidance, "Recommended but unread: 1 sources") {
 			t.Fatalf("assembly=%s", result.Output)
 		}
 	}
