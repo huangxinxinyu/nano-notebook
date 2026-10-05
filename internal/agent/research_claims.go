@@ -2,8 +2,6 @@ package agent
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,8 +42,13 @@ const (
 )
 
 var (
-	researchClaimIDPattern       = regexp.MustCompile(`^(?:[0-9a-f]{4}-)?c[1-9][0-9]*$`)
-	researchClaimCitationPattern = regexp.MustCompile(`\[((?:[0-9a-f]{4}-)?c[1-9][0-9]*(?:\s*[,，;；、]\s*(?:[0-9a-f]{4}-)?c[1-9][0-9]*)*)\]`)
+	// Root cards are c1, c2, ...; each subagent's cards take one letter in
+	// spawn order (a1, b2, ...). Earlier runs used hex namespaces (16d1-c3).
+	researchClaimIDPattern = regexp.MustCompile(`^(?:(?:[0-9a-f]{4}-)?c|[abd-q])[1-9][0-9]*$`)
+	// Citations also accept the variants models write for hex child ids, such
+	// as c16d1-c3 or 16d1c3 for 16d1-c3; canonicalClaimID maps them back.
+	researchClaimCitationPattern = regexp.MustCompile(`\[((?:[abd-q][1-9][0-9]*|(?:c?[0-9a-f]{4}-?)?c[1-9][0-9]*)(?:\s*[,，;；、]\s*(?:[abd-q][1-9][0-9]*|(?:c?[0-9a-f]{4}-?)?c[1-9][0-9]*))*)\]`)
+	childClaimIDVariantPattern   = regexp.MustCompile(`^c?([0-9a-f]{4})-?c([1-9][0-9]*)$`)
 	researchClaimIDSplitPattern  = regexp.MustCompile(`\s*[,，;；、]\s*`)
 	claimMarkdownLinkURLPattern  = regexp.MustCompile(`\]\([^)\s]*\)`)
 	claimEllipsisPattern         = regexp.MustCompile(`\.{3,}|…+`)
@@ -199,7 +202,7 @@ func (t researchClaimTree) run(runID string) (researchClaimRun, bool) {
 
 // researchClaimID numbers record_claim proposals in decision order, so the id
 // is known before execution and identical across crash replay. Child Runs
-// carry a namespace so their cards never collide with the root's.
+// carry a one-letter namespace so their cards never collide with the root's.
 func researchClaimID(run researchClaimRun, actionID string) string {
 	ordinal := 0
 	for _, proposal := range run.Prefix.Proposals {
@@ -220,12 +223,18 @@ func researchClaimNamespacedID(namespace string, ordinal int) string {
 	if namespace == "" {
 		return "c" + strconv.Itoa(ordinal)
 	}
-	return namespace + "-c" + strconv.Itoa(ordinal)
+	return namespace + strconv.Itoa(ordinal)
 }
 
-func researchClaimNamespace(runID string) string {
-	digest := sha256.Sum256([]byte(runID))
-	return hex.EncodeToString(digest[:2])
+// researchChildClaimLetters names up to 16 subagents in spawn order; c is
+// reserved for the root's cards.
+const researchChildClaimLetters = "abdefghijklmnopq"
+
+func researchClaimNamespace(childIndex int) string {
+	if childIndex < 0 || childIndex >= len(researchChildClaimLetters) {
+		return ""
+	}
+	return researchChildClaimLetters[childIndex : childIndex+1]
 }
 
 func (a *recordClaimAction) resolveSource(ctx context.Context, request ActionRequest, tree researchClaimTree, source string) (researchClaimSourceText, bool, error) {
@@ -570,9 +579,26 @@ func collectResearchClaims(tree researchClaimTree) []researchClaim {
 	return claims
 }
 
+// canonicalClaimID normalizes a cited card id to the form record_claim
+// returned.
+func canonicalClaimID(id string) string {
+	if match := childClaimIDVariantPattern.FindStringSubmatch(id); match != nil {
+		return match[1] + "-c" + match[2]
+	}
+	return id
+}
+
+func citedClaimIDs(list string) []string {
+	ids := researchClaimIDSplitPattern.Split(list, -1)
+	for index, id := range ids {
+		ids[index] = canonicalClaimID(id)
+	}
+	return ids
+}
+
 func renderResearchClaimsMarkdown(claims []researchClaim) string {
 	var builder strings.Builder
-	builder.WriteString("# Claim cards\n\nCite a card in report prose as [c3]; the published report turns it into a numbered source link.\n")
+	builder.WriteString("# Claim cards\n\nCite each card in report prose by its exact id shown in brackets below, such as [a2] or [b1, c3]; never renumber cards. The published report turns them into numbered source links.\n")
 	if len(claims) == 0 {
 		builder.WriteString("\nNo claim cards recorded yet.\n")
 		return builder.String()
@@ -621,7 +647,7 @@ func renderResearchClaimCitations(report string, claims []researchClaim) (string
 		last = end
 		seen := map[string]bool{}
 		rendered := make([]string, 0)
-		for _, id := range researchClaimIDSplitPattern.Split(report[match[2]:match[3]], -1) {
+		for _, id := range citedClaimIDs(report[match[2]:match[3]]) {
 			claim, ok := byID[id]
 			if !ok {
 				stats.Unknown = append(stats.Unknown, id)
@@ -700,7 +726,7 @@ func loadResearchClaimTree(ctx context.Context, tx DBTX, runID string) (research
 		return researchClaimTree{}, err
 	}
 	runIDs := []string{rootID}
-	rows, err := tx.Query(ctx, `select child_run_id from agent_subagents where parent_run_id=$1 order by child_run_id`, rootID)
+	rows, err := tx.Query(ctx, `select child_run_id from agent_subagents where parent_run_id=$1 order by created_at,child_run_id`, rootID)
 	if err != nil {
 		return researchClaimTree{}, err
 	}
@@ -729,7 +755,7 @@ func loadResearchClaimTree(ctx context.Context, tx DBTX, runID string) (research
 		}
 		namespace := ""
 		if index > 0 {
-			namespace = researchClaimNamespace(id)
+			namespace = researchClaimNamespace(index - 1)
 		}
 		tree.Runs = append(tree.Runs, researchClaimRun{RunID: id, Namespace: namespace, Prefix: prefix})
 	}
@@ -844,7 +870,7 @@ func checkResearchCitationNumbers(report string, claims []researchClaim) researc
 	for _, statement := range researchCitationStatements(report) {
 		ids := make([]string, 0)
 		for _, match := range researchClaimCitationPattern.FindAllStringSubmatch(statement, -1) {
-			ids = append(ids, researchClaimIDSplitPattern.Split(match[1], -1)...)
+			ids = append(ids, citedClaimIDs(match[1])...)
 		}
 		numbers := citationStatementNumbers(statement)
 		if len(numbers) == 0 {
@@ -1084,7 +1110,7 @@ func checkResearchSourceCoverage(report string, claims []researchClaim, sources 
 		byID[claim.ID] = claim
 	}
 	for _, match := range researchClaimCitationPattern.FindAllStringSubmatch(report, -1) {
-		for _, id := range researchClaimIDSplitPattern.Split(match[1], -1) {
+		for _, id := range citedClaimIDs(match[1]) {
 			if claim, ok := byID[id]; ok {
 				cited[normalizeClaimURL(claim.URL)] = true
 				cited[normalizeClaimURL(claim.Source)] = true

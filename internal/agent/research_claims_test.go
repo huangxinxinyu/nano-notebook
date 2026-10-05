@@ -89,8 +89,8 @@ func TestResearchClaimIDCountsProposalsInDecisionOrder(t *testing.T) {
 		}
 	}
 	child := run
-	child.RunID, child.Namespace = "run_child", researchClaimNamespace("run_child")
-	if got := researchClaimID(child, "decision:2/action:1"); got != child.Namespace+"-c3" || !researchClaimIDPattern.MatchString(got) {
+	child.RunID, child.Namespace = "run_child", researchClaimNamespace(1)
+	if got := researchClaimID(child, "decision:2/action:1"); got != "b3" || !researchClaimIDPattern.MatchString(got) {
 		t.Fatalf("child id=%s", got)
 	}
 }
@@ -307,5 +307,39 @@ func TestRunningSubagentsGuidance(t *testing.T) {
 	}
 	if guidance := researchRunningSubagentsGuidance([]researchRunningSubagent{{AgentID: "run_a", TaskName: "Read: Paper"}}); !strings.Contains(guidance, "wait_agent") {
 		t.Fatalf("guidance=%q", guidance)
+	}
+}
+
+func TestCitationsResolveModelVariantsOfChildCardIDs(t *testing.T) {
+	claims := []researchClaim{
+		{recordClaimOutput: recordClaimOutput{ID: "16d1-c3", URL: "https://arxiv.org/html/2305.06983"}},
+		{recordClaimOutput: recordClaimOutput{ID: "433c-c4", URL: "https://example.com/mega-rag"}},
+		{recordClaimOutput: recordClaimOutput{ID: "c12", URL: "https://example.com/root"}},
+	}
+	report := "FLARE +11.6 [c16d1-c3]. MEGA [433cc4] and [16d1-c3, c433c-c4]. Root [c12]. Invented [cRaR-1]."
+	rendered, stats := renderResearchClaimCitations(report, claims)
+	want := "FLARE +11.6 [1](https://arxiv.org/html/2305.06983). MEGA [2](https://example.com/mega-rag) and [1](https://arxiv.org/html/2305.06983)[2](https://example.com/mega-rag). Root [3](https://example.com/root). Invented [cRaR-1]."
+	if rendered != want || stats.Cited != 5 {
+		t.Fatalf("rendered=%q\nwant    =%q stats=%+v", rendered, want, stats)
+	}
+	if canonicalClaimID("c1234") != "c1234" {
+		t.Fatal("root card id was rewritten")
+	}
+}
+
+func TestChildCardLettersCiteAndRender(t *testing.T) {
+	if researchClaimNamespace(0) != "a" || researchClaimNamespace(2) != "d" || researchClaimNamespace(15) != "q" || researchClaimNamespace(16) != "" {
+		t.Fatal("child letters skip c and cover 16 subagents")
+	}
+	claims := []researchClaim{
+		{recordClaimOutput: recordClaimOutput{ID: "a2", URL: "https://arxiv.org/html/2606.13905"}},
+		{recordClaimOutput: recordClaimOutput{ID: "c1", URL: "https://example.com/root"}},
+	}
+	rendered, stats := renderResearchClaimCitations("ADORE grades relevance [a2]. Both [a2, c1].", claims)
+	if rendered != "ADORE grades relevance [1](https://arxiv.org/html/2606.13905). Both [1](https://arxiv.org/html/2606.13905)[2](https://example.com/root)." || stats.Cited != 3 {
+		t.Fatalf("rendered=%q stats=%+v", rendered, stats)
+	}
+	if !strings.Contains(renderResearchClaimsMarkdown(claims), "never renumber") {
+		t.Fatal("claims.md does not tell the model to cite exact ids")
 	}
 }
