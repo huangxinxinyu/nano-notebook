@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"hash/fnv"
+	"log/slog"
 	"regexp"
 	"time"
 
@@ -93,6 +94,8 @@ func ClassifyAttempt(err, contextCause error) AttemptResolution {
 	case errors.Is(err, ErrResearchAuthorityLost):
 		return AttemptResolution{Disposition: AttemptTerminal, ErrorCode: "research_authority_lost"}
 	default:
+		// The Attempt record keeps only this generic code, so log the cause.
+		slog.Error("Agent Attempt failed with an unclassified error", "error", err)
 		return AttemptResolution{Disposition: AttemptTerminal, ErrorCode: "agent_execution_failed"}
 	}
 }
