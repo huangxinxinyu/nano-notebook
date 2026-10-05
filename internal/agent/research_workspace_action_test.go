@@ -216,3 +216,18 @@ func mustJSON(t *testing.T, value any) json.RawMessage {
 	}
 	return payload
 }
+
+func TestAssembleInputErrorsNameTheProblem(t *testing.T) {
+	for raw, want := range map[string]string{
+		`{"title":"T","section_paths":["report_plan.md"]}`:                `"report_plan.md" must look like sections/`,
+		`{"title":"T","section_paths":["sections/a.md","sections/a.md"]}`: "is repeated",
+		`{"title":"","section_paths":["sections/a.md"]}`:                  "title must be",
+		`{"title":"T","section_paths":[]}`:                                "got 0",
+		`{"title":"T","section_paths":["sections/a.md"],"order":["x"]}`:   "pass only title and section_paths",
+	} {
+		_, err := decodeAssembleResearchReportInput(json.RawMessage(raw))
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%s err=%v want %q", raw, err, want)
+		}
+	}
+}

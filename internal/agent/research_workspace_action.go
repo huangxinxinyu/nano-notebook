@@ -493,16 +493,26 @@ func (a *assembleResearchReportAction) Execute(ctx context.Context, request Acti
 	return ActionResult{Status: ActionSucceeded, Output: output}, nil
 }
 
+// decodeAssembleResearchReportInput names the exact problem, because the
+// controller feeds validation failures back to the model for a retry.
 func decodeAssembleResearchReportInput(raw json.RawMessage) (assembleResearchReportInput, error) {
 	var input assembleResearchReportInput
-	if decodeExactJSON(raw, &input) != nil || strings.TrimSpace(input.Title) == "" || len([]rune(input.Title)) > 500 ||
-		len(input.SectionPaths) < 1 || len(input.SectionPaths) > 24 {
-		return assembleResearchReportInput{}, errors.New("invalid assemble_research_report input")
+	if err := decodeExactJSON(raw, &input); err != nil {
+		return assembleResearchReportInput{}, fmt.Errorf("invalid assemble_research_report input: %v; pass only title and section_paths", err)
+	}
+	switch {
+	case strings.TrimSpace(input.Title) == "" || len([]rune(input.Title)) > 500:
+		return assembleResearchReportInput{}, errors.New("invalid assemble_research_report input: title must be 1 to 500 characters")
+	case len(input.SectionPaths) < 1 || len(input.SectionPaths) > 24:
+		return assembleResearchReportInput{}, fmt.Errorf("invalid assemble_research_report input: section_paths must list 1 to 24 files, got %d", len(input.SectionPaths))
 	}
 	seen := make(map[string]bool, len(input.SectionPaths))
 	for _, path := range input.SectionPaths {
-		if seen[path] || !strings.HasPrefix(path, "sections/") || validateResearchWorkspacePath(path, false) != nil {
-			return assembleResearchReportInput{}, errors.New("invalid assemble_research_report input")
+		switch {
+		case seen[path]:
+			return assembleResearchReportInput{}, fmt.Errorf("invalid assemble_research_report input: section path %q is repeated", path)
+		case !strings.HasPrefix(path, "sections/") || validateResearchWorkspacePath(path, false) != nil:
+			return assembleResearchReportInput{}, fmt.Errorf("invalid assemble_research_report input: section path %q must look like sections/<lowercase-name>.md and be a file you wrote; report_plan.md, review.md, and data files are not sections", path)
 		}
 		seen[path] = true
 	}
