@@ -378,6 +378,31 @@ func TestResearchSourceImportProjectionContainsOnlyLifecycleState(t *testing.T) 
 	}
 }
 
+func TestRepeatCircuitBreakerPausesOnlyRepeatedTools(t *testing.T) {
+	duplicate := func(decision int, name string) AcceptedProposal {
+		return AcceptedProposal{DecisionNo: decision, Actions: []AcceptedAction{{Name: name, Result: &ActionResult{Status: ActionDomainError, Error: researchDuplicateActionError("run_x", "decision:1/action:0")}}}}
+	}
+	prefix := CheckpointPrefix{Proposals: []AcceptedProposal{
+		{DecisionNo: 1, Actions: []AcceptedAction{{Name: "web_search", Result: &ActionResult{Status: ActionSucceeded}}}},
+		duplicate(2, "web_search"), duplicate(3, "web_search"),
+	}}
+	definitions := []models.ActionDefinition{{Name: "web_search"}, {Name: "read_url"}, {Name: "write_research_file"}}
+	steps := consecutiveResearchDuplicateSteps(prefix)
+	if steps != 2 {
+		t.Fatalf("steps=%d", steps)
+	}
+	kept, paused := pauseRepeatedResearchTools(prefix, steps, definitions)
+	if len(paused) != 1 || paused[0] != "web_search" || len(kept) != 2 {
+		t.Fatalf("kept=%v paused=%v", kept, paused)
+	}
+	if kept, paused := pauseRepeatedResearchTools(prefix, 1, definitions); len(paused) != 0 || len(kept) != 3 {
+		t.Fatalf("one duplicate step paused tools: %v", paused)
+	}
+	if kept, paused := pauseRepeatedResearchTools(prefix, steps, definitions[:1]); len(paused) != 0 || len(kept) != 1 {
+		t.Fatalf("pausing the only tool: kept=%v paused=%v", kept, paused)
+	}
+}
+
 func TestReaderSubagentCannotFinishWithoutClaimCards(t *testing.T) {
 	runtime := &ResearchRuntime{}
 	reader := Execution{ParentRunID: "run_parent", SubagentTask: researchReaderTaskPrefix + " https://example.com/paper (Paper)."}

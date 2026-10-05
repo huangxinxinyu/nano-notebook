@@ -254,6 +254,10 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 		if recovery.directive != "" {
 			system += "\n\n" + recovery.directive
 		}
+		var paused []string
+		if definitions, paused = pauseRepeatedResearchTools(prefix, duplicateSteps, definitions); len(paused) > 0 {
+			system += "\n\n" + fmt.Sprintf("Repeat circuit breaker: %s is paused for this decision because your last %d decisions only repeated completed inputs. Use the results you already have: read an unread lead, record claim cards, or draft and assemble the report.", strings.Join(paused, ", "), duplicateSteps)
+		}
 	}
 	if len(definitions) == 0 {
 		system += "\n\n" + researchFinalOnlyPrompt()
@@ -488,6 +492,40 @@ func consecutiveResearchDuplicateSteps(prefix CheckpointPrefix) int {
 		count++
 	}
 	return count
+}
+
+// researchRepeatPauseSteps is how many consecutive all-duplicate decisions
+// pause the repeated tools. A directive alone does not stop the model from
+// copying its own repeated calls, which stay visible in its context.
+const researchRepeatPauseSteps = 2
+
+// pauseRepeatedResearchTools removes the tools repeated in the trailing
+// all-duplicate decisions from the next decision's definitions, while at
+// least one other tool remains.
+func pauseRepeatedResearchTools(prefix CheckpointPrefix, duplicateSteps int, definitions []models.ActionDefinition) ([]models.ActionDefinition, []string) {
+	if duplicateSteps < researchRepeatPauseSteps {
+		return definitions, nil
+	}
+	repeated := map[string]bool{}
+	for index := len(prefix.Proposals) - 1; index >= 0 && index >= len(prefix.Proposals)-duplicateSteps; index-- {
+		for _, action := range prefix.Proposals[index].Actions {
+			repeated[action.Name] = true
+		}
+	}
+	kept := make([]models.ActionDefinition, 0, len(definitions))
+	paused := make([]string, 0, len(repeated))
+	for _, definition := range definitions {
+		if repeated[definition.Name] {
+			paused = append(paused, definition.Name)
+			continue
+		}
+		kept = append(kept, definition)
+	}
+	if len(kept) == 0 || len(paused) == 0 {
+		return definitions, nil
+	}
+	sort.Strings(paused)
+	return kept, paused
 }
 
 func isResearchDuplicateResult(result ActionResult) bool {
