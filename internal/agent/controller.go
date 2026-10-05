@@ -407,7 +407,7 @@ func (c *Controller) validateDecisionForRequest(session *MCPAttemptSession, pref
 	}
 	batch := *decision.Proposal
 	if len(batch.Actions) > execution.ActionBatchLimit {
-		return errors.New("Action proposal exceeds batch limit")
+		return fmt.Errorf("Action proposal exceeds batch limit: %d tool calls proposed, at most %d allowed per decision; propose the first %d now and the rest in later decisions", len(batch.Actions), execution.ActionBatchLimit, execution.ActionBatchLimit)
 	}
 	available := make(map[string]bool, len(definitions))
 	names := make([]string, 0, len(definitions))
