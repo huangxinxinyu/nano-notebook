@@ -50,12 +50,13 @@ type researchWorkspaceListOutput struct {
 
 type researchWorkspaceAssemblyOutput struct {
 	researchWorkspaceFileOutput
-	ReviewPresent bool                      `json:"review_present"`
-	Guidance      string                    `json:"guidance"`
-	CitationCheck *researchCitationCheck    `json:"citation_check,omitempty"`
-	Coverage      *researchSourceCoverage   `json:"source_coverage,omitempty"`
-	Running       []researchRunningSubagent `json:"running_subagents,omitempty"`
-	QueuedReads   []researchQueuedRead      `json:"queued_reads,omitempty"`
+	ReviewPresent bool                            `json:"review_present"`
+	Guidance      string                          `json:"guidance"`
+	CitationCheck *researchCitationCheck          `json:"citation_check,omitempty"`
+	Coverage      *researchSourceCoverage         `json:"source_coverage,omitempty"`
+	Running       []researchRunningSubagent       `json:"running_subagents,omitempty"`
+	QueuedReads   []researchQueuedRead            `json:"queued_reads,omitempty"`
+	Questions     *researchQuestionCoverageReport `json:"question_coverage,omitempty"`
 }
 
 type researchWorkspaceSnapshot struct {
@@ -448,6 +449,7 @@ func (a *assembleResearchReportAction) Execute(ctx context.Context, request Acti
 	}
 	var citationCheck *researchCitationCheck
 	var coverage *researchSourceCoverage
+	var questions *researchQuestionCoverageReport
 	if a.claims != nil {
 		claims, err := a.claims.ResearchClaims(ctx, request.Attempt.RunID)
 		if err != nil {
@@ -475,6 +477,18 @@ func (a *assembleResearchReportAction) Execute(ctx context.Context, request Acti
 				guidance += " " + advice
 			}
 		}
+		if lister, ok := a.claims.(researchPlanQuestionLister); ok {
+			planQuestions, err := lister.ResearchPlanQuestions(ctx, request.Attempt.RunID)
+			if err != nil {
+				return ActionResult{}, err
+			}
+			if measured, ok := checkResearchQuestionCoverage(builder.String(), claims, planQuestions); ok {
+				questions = &measured
+				if advice := researchQuestionCoverageGuidance(measured); advice != "" {
+					guidance += " " + advice
+				}
+			}
+		}
 	}
 	var running []researchRunningSubagent
 	if a.agents != nil {
@@ -495,7 +509,7 @@ func (a *assembleResearchReportAction) Execute(ctx context.Context, request Acti
 		}
 	}
 	output, err := json.Marshal(researchWorkspaceAssemblyOutput{
-		researchWorkspaceFileOutput: file, ReviewPresent: reviewPresent, Guidance: guidance, CitationCheck: citationCheck, Coverage: coverage, Running: running, QueuedReads: queued,
+		researchWorkspaceFileOutput: file, ReviewPresent: reviewPresent, Guidance: guidance, CitationCheck: citationCheck, Coverage: coverage, Running: running, QueuedReads: queued, Questions: questions,
 	})
 	if err != nil {
 		return ActionResult{}, err

@@ -39,6 +39,7 @@ const (
 	claimRecordInputMaxQuote  = 2000
 	claimRecordInputMaxClaim  = 1000
 	claimRecordInputMaxCondit = 500
+	claimRecordMaxQuestion    = 30
 )
 
 var (
@@ -59,6 +60,7 @@ type recordClaimInput struct {
 	Quote      string `json:"quote"`
 	Claim      string `json:"claim"`
 	Conditions string `json:"conditions,omitempty"`
+	Question   int    `json:"question,omitempty"`
 }
 
 type recordClaimOutput struct {
@@ -76,6 +78,7 @@ type researchClaim struct {
 	Quote      string
 	Claim      string
 	Conditions string
+	Question   int
 }
 
 type researchClaimRun struct {
@@ -120,8 +123,8 @@ func (*recordClaimAction) Definition() models.ActionDefinition {
 	return models.ActionDefinition{
 		Name:        recordClaimActionName,
 		Description: "Record one claim card: a verbatim quote from a Source read in this Run (a read_url page URL or a search_evidence source_id) and the claim it supports. Returns a card id such as c3 and whether the quote was found in the stored source text; a mismatch is still recorded. Cite cards in report prose as [c3]. All cards are listed in claims.md.",
-		InputSchema: json.RawMessage(fmt.Sprintf(`{"type":"object","additionalProperties":false,"required":["source","quote","claim"],"properties":{"source":{"type":"string","minLength":1,"maxLength":4096,"description":"The read page URL, or the Notebook source_id."},"quote":{"type":"string","minLength":1,"maxLength":%d,"description":"Verbatim source text; use ... to elide inside a long passage."},"claim":{"type":"string","minLength":1,"maxLength":%d,"description":"What this quote establishes, in the report language."},"conditions":{"type":"string","maxLength":%d,"description":"Scope, setting, version, or caveat that limits the claim."}}}`,
-			claimRecordInputMaxQuote, claimRecordInputMaxClaim, claimRecordInputMaxCondit)),
+		InputSchema: json.RawMessage(fmt.Sprintf(`{"type":"object","additionalProperties":false,"required":["source","quote","claim"],"properties":{"source":{"type":"string","minLength":1,"maxLength":4096,"description":"The read page URL, or the Notebook source_id."},"quote":{"type":"string","minLength":1,"maxLength":%d,"description":"Verbatim source text; use ... to elide inside a long passage."},"claim":{"type":"string","minLength":1,"maxLength":%d,"description":"What this quote establishes, in the report language."},"conditions":{"type":"string","maxLength":%d,"description":"Scope, setting, version, or caveat that limits the claim."},"question":{"type":"integer","minimum":1,"maximum":%d,"description":"Number of the accepted plan's research question this card helps answer, counting from 1; assembly reports coverage per question."}}}`,
+			claimRecordInputMaxQuote, claimRecordInputMaxClaim, claimRecordInputMaxCondit, claimRecordMaxQuestion)),
 	}
 }
 
@@ -187,6 +190,9 @@ func decodeRecordClaimInput(raw json.RawMessage) (recordClaimInput, error) {
 		utf8.RuneCountInString(input.Quote) > claimRecordInputMaxQuote || utf8.RuneCountInString(input.Claim) > claimRecordInputMaxClaim ||
 		utf8.RuneCountInString(input.Conditions) > claimRecordInputMaxCondit {
 		return recordClaimInput{}, errors.New("invalid record_claim input")
+	}
+	if input.Question < 0 || input.Question > claimRecordMaxQuestion {
+		return recordClaimInput{}, fmt.Errorf("invalid record_claim input: question must be a research question number from 1 to %d", claimRecordMaxQuestion)
 	}
 	return input, nil
 }
@@ -578,7 +584,7 @@ func collectResearchClaims(tree researchClaimTree) []researchClaim {
 				}
 				claims = append(claims, researchClaim{
 					recordClaimOutput: output, Quote: strings.TrimSpace(input.Quote),
-					Claim: strings.TrimSpace(input.Claim), Conditions: strings.TrimSpace(input.Conditions),
+					Claim: strings.TrimSpace(input.Claim), Conditions: strings.TrimSpace(input.Conditions), Question: input.Question,
 				})
 			}
 		}
@@ -611,7 +617,11 @@ func renderResearchClaimsMarkdown(claims []researchClaim) string {
 		return builder.String()
 	}
 	for _, claim := range claims {
-		fmt.Fprintf(&builder, "\n- [%s] (%s) %s\n", claim.ID, claim.Status, claim.Claim)
+		question := ""
+		if claim.Question > 0 {
+			question = fmt.Sprintf(" Q%d", claim.Question)
+		}
+		fmt.Fprintf(&builder, "\n- [%s] (%s%s) %s\n", claim.ID, claim.Status, question, claim.Claim)
 		source := claim.Source
 		if claim.URL != "" {
 			source = claim.URL
