@@ -106,6 +106,7 @@ func (r *ResearchPlanningRuntime) BuildDecisionRequest(ctx context.Context, exec
 	if hint := memberLanguageHint(requestText); hint != "" {
 		system += "\n\n" + hint
 	}
+	system += "\n\n" + researchPlanOutputContract
 	turns, err := r.planningLaneTurns(ctx, execution, prefix, requestText)
 	if err != nil {
 		return models.ModelRequest{}, err
@@ -204,6 +205,10 @@ func memberLanguageHint(request string) string {
 	return "Member language: Chinese. Write every request_user_input question, option, and description, and the whole plan, in Simplified Chinese; keep proper names such as paper or product titles as they are. This sets only the language you write in: it never limits the language, region, or origin of sources, and English-language papers and documentation remain fully in scope."
 }
 
+// researchPlanOutputContract restates the Final format last, where models
+// that otherwise write the plan as a Markdown document see it.
+const researchPlanOutputContract = "Output contract: your Final message is the plan JSON object itself, starting with { and ending with }. Write no heading, preface, summary, Markdown, or code fence around it; the Member reads the plan rendered from that object."
+
 func researchPlanningContext(now time.Time, timeZone string) string {
 	location, err := time.LoadLocation(timeZone)
 	if err != nil {
@@ -217,9 +222,9 @@ func (*ResearchPlanningRuntime) PrepareDecisionResponse(_ context.Context, _ Exe
 	if decision.Final == nil {
 		return decision, nil
 	}
-	plan, err := ValidateResearchPlanJSON(decision.Final.Text)
+	plan, err := ValidateResearchPlanJSON(researchPlanCandidate(decision.Final.Text))
 	if err != nil {
-		return models.ModelDecision{}, err
+		return models.ModelDecision{}, fmt.Errorf("%w; your response began with %q, so return only the plan object starting with {", err, researchPlanResponseHead(decision.Final.Text))
 	}
 	prepared := decision
 	final := *decision.Final
@@ -345,6 +350,29 @@ func parseVersionedIdentity(reference string) (string, int, error) {
 		return "", 0, err
 	}
 	return parsed.Identity, parsed.Version, nil
+}
+
+// researchPlanCandidate takes the plan object out of a model response that
+// wraps it in a Markdown fence or a sentence of prose. The object itself is
+// then validated as strictly as a Member's edit.
+func researchPlanCandidate(text string) string {
+	text = strings.TrimSpace(text)
+	if strings.HasPrefix(text, "{") && strings.HasSuffix(text, "}") {
+		return text
+	}
+	start, end := strings.Index(text, "{"), strings.LastIndex(text, "}")
+	if start < 0 || end < start {
+		return text
+	}
+	return text[start : end+1]
+}
+
+func researchPlanResponseHead(text string) string {
+	runes := []rune(strings.TrimSpace(text))
+	if len(runes) > 80 {
+		runes = runes[:80]
+	}
+	return string(runes)
 }
 
 func ValidateResearchPlanJSON(value string) (json.RawMessage, error) {
