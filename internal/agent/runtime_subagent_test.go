@@ -96,7 +96,7 @@ func TestRuntimeSubagentReleaseDoesNotRequirePredefinedChildren(t *testing.T) {
 func TestCurrentReleaseDoesNotBindArchivedPrompts(t *testing.T) {
 	catalog := agentcatalog.MustLoadEmbedded()
 	prompts := promptcatalog.MustLoadEmbedded()
-	release, _ := catalog.ResolveRelease(agentcatalog.MustParseReference("nano.default@28"))
+	release, _ := catalog.ResolveRelease(agentcatalog.MustParseReference("nano.default@29"))
 	for _, root := range release.Roots {
 		definition, _ := catalog.ResolveDefinition(root)
 		for _, reference := range definition.Prompts {

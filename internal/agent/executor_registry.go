@@ -244,11 +244,13 @@ func ResearchRootExecutorCapability() agentcatalog.ExecutorCapability {
 		Skills: map[agentcatalog.Reference]bool{
 			agentcatalog.MustParseReference("skill.research-workflow@1"): true,
 			agentcatalog.MustParseReference("skill.research-workflow@2"): true,
+			agentcatalog.MustParseReference("skill.source-reading@1"):    true,
 		},
 		Tools: map[string]bool{
 			"spawn_agent": true, "wait_agent": true, "list_agents": true,
 			"assemble_research_report": true, "list_research_files": true, "read_research_file": true,
-			"inspect_source": true, "read_document_pages": true, "read_tool_result": true, "read_url": true, "save_url_as_source": true,
+			"inspect_source": true, "read_document_pages": true, "read_skill": true, "read_tool_result": true, "read_url": true,
+			"record_claim": true, "save_url_as_source": true,
 			"rewrite_todo_list": true, "run_python": true, "search_evidence": true, "update_todo_status": true,
 			"web_search": true, "write_research_file": true,
 		},

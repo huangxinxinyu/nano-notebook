@@ -29,7 +29,7 @@ func TestEmbeddedCatalogContainsEveryProductionPrompt(t *testing.T) {
 		"agent.studio-data-table":                     "studio_data_table_result.v1",
 		"source-processing.image-evidence-normalizer": "image_evidence_regions.v1",
 	}
-	const extraVersions = 18 // chat composer upgrades plus final deep Research planner/executor/reporter/compactor upgrades, alongside their @1s
+	const extraVersions = 20 // chat composer upgrades plus final deep Research planner/executor/reporter/compactor upgrades, alongside their @1s
 	if got := len(catalog.Versions()); got != len(want)+extraVersions {
 		t.Fatalf("versions=%d want=%d", got, len(want)+extraVersions)
 	}
@@ -224,8 +224,8 @@ func TestArchivedPromptsRemainResolvableWithoutAppearingInActiveCatalog(t *testi
 			t.Fatalf("historical prompt exposed as current: %+v", prompt)
 		}
 	}
-	current, ok := catalog.Resolve("agent.deep-research-executor", 7)
+	current, ok := catalog.Resolve("agent.deep-research-executor", 8)
 	if !ok || current.Archived {
-		t.Fatalf("Python sandbox executor is not current: %+v", current)
+		t.Fatalf("claim card executor is not current: %+v", current)
 	}
 }

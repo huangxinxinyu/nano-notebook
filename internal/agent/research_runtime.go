@@ -174,16 +174,17 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 		return models.ModelRequest{}, errors.New("Research Final Draft does not require another decision")
 	}
 	var sessionID, originalRequest, planJSON, executorReference, reporterReference string
+	var skillAllowlist []byte
 	err := r.pool.QueryRow(ctx, `
 		select session.id,message.content,plan.plan_json::text,
-			definition.prompt_bindings->>'executor',definition.prompt_bindings->>'reporter'
+			definition.prompt_bindings->>'executor',definition.prompt_bindings->>'reporter',definition.skill_allowlist
 		from research_sessions session
 		join chat_messages message on message.id=session.input_message_id
 		join research_plan_versions plan on plan.session_id=session.id and plan.version=session.accepted_plan_version
 		join agent_runs run on run.id=$1
 		join agent_definition_versions definition on definition.definition_identity=run.definition_identity and definition.definition_version=run.definition_version
 		where session.execution_run_id=nano_research_root_run($1) and session.status in ('running','publishing')
-	`, execution.RunID).Scan(&sessionID, &originalRequest, &planJSON, &executorReference, &reporterReference)
+	`, execution.RunID).Scan(&sessionID, &originalRequest, &planJSON, &executorReference, &reporterReference, &skillAllowlist)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return models.ModelRequest{}, ErrLeaseLost
 	}
@@ -210,6 +211,11 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 	}
 	if workflow != "" {
 		system += "\n\nMandatory Research workflow Skill:\n" + workflow
+	}
+	if summaries, err := researchOnDemandSkillSummaries(skillAllowlist, definitions, r.skills); err != nil {
+		return models.ModelRequest{}, err
+	} else if summaries != "" {
+		system += "\n\n" + summaries
 	}
 	if execution.ParentRunID != "" {
 		system += "\n\n" + runtimeSubagentInstructions
@@ -324,6 +330,47 @@ func researchWorkflowSkillPrompt(execution Execution, skills skillcatalog.Catalo
 		return "", fmt.Errorf("Research workflow Skill skill.research-workflow@%d is missing", version)
 	}
 	return strings.TrimSpace(skill.Body), nil
+}
+
+// researchOnDemandSkillSummaries lists the allowed Skills other than the
+// injected workflow Skill; the model loads full instructions with read_skill.
+func researchOnDemandSkillSummaries(allowlist []byte, definitions []models.ActionDefinition, skills skillcatalog.Catalog) (string, error) {
+	if len(allowlist) == 0 || !hasActionDefinition(definitions, "read_skill") {
+		return "", nil
+	}
+	var references []string
+	if err := json.Unmarshal(allowlist, &references); err != nil {
+		return "", err
+	}
+	sort.Strings(references)
+	var builder strings.Builder
+	for _, value := range references {
+		reference, err := agentcatalog.ParseReference(value)
+		if err != nil {
+			return "", err
+		}
+		if reference.Identity == "skill.research-workflow" {
+			continue
+		}
+		skill, ok := skills.Resolve(reference.Identity, reference.Version)
+		if !ok {
+			return "", fmt.Errorf("Research Skill %s is unavailable", value)
+		}
+		fmt.Fprintf(&builder, "\n- %s: %s — %s", value, skill.Name, skill.Description)
+	}
+	if builder.Len() == 0 {
+		return "", nil
+	}
+	return "Available Skills (load full instructions with read_skill when the work calls for them):" + builder.String(), nil
+}
+
+func hasActionDefinition(definitions []models.ActionDefinition, name string) bool {
+	for _, definition := range definitions {
+		if definition.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func includeExactResearchSuffix(definitions []models.ActionDefinition, duplicateSteps int) bool {
