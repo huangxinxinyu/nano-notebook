@@ -201,7 +201,7 @@ func memberLanguageHint(request string) string {
 	if han == 0 || han*2 < letters/4 {
 		return ""
 	}
-	return "Member language: Chinese. Write every request_user_input question, option, and description, and the whole plan, in Simplified Chinese; keep proper names such as paper or product titles as they are."
+	return "Member language: Chinese. Write every request_user_input question, option, and description, and the whole plan, in Simplified Chinese; keep proper names such as paper or product titles as they are. This sets only the language you write in: it never limits the language, region, or origin of sources, and English-language papers and documentation remain fully in scope."
 }
 
 func researchPlanningContext(now time.Time, timeZone string) string {
