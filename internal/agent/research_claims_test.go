@@ -271,3 +271,25 @@ func TestResearchCitationStatementsKeepTrailingCitationsWithSentence(t *testing.
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestSourceCoverageCountsCardAndLinkCitations(t *testing.T) {
+	claims := []researchClaim{
+		{recordClaimOutput: recordClaimOutput{ID: "c1", Source: "https://arxiv.org/abs/2310.11511", URL: "https://ar5iv.labs.arxiv.org/html/2310.11511"}},
+	}
+	sources := []researchReadSource{
+		{URL: "https://arxiv.org/abs/2310.11511", FinalURL: "https://ar5iv.labs.arxiv.org/html/2310.11511", Title: "Self-RAG"},
+		{URL: "https://example.com/blog/", Title: "Blog"},
+		{URL: "https://example.com/unused", Title: "Unused"},
+	}
+	report := "Self-RAG critiques its own output [c1]. A blog agrees ([Blog](https://example.com/blog))."
+	coverage := checkResearchSourceCoverage(report, claims, sources)
+	if coverage.ReadSources != 3 || coverage.CitedSources != 2 || len(coverage.UncitedSample) != 1 || coverage.UncitedSample[0].Title != "Unused" {
+		t.Fatalf("coverage=%+v", coverage)
+	}
+	if guidance := researchSourceCoverageGuidance(coverage); !strings.Contains(guidance, "2 of the 3") {
+		t.Fatalf("guidance=%q", guidance)
+	}
+	if guidance := researchSourceCoverageGuidance(researchSourceCoverage{ReadSources: 2, CitedSources: 2}); guidance != "" {
+		t.Fatalf("full coverage produced guidance %q", guidance)
+	}
+}

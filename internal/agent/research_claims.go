@@ -987,3 +987,90 @@ func researchCitationCheckGuidance(check researchCitationCheck) string {
 	return fmt.Sprintf("%s: %d statement(s) state numbers that none of their cited cards' quotes contain (unsupported_numbers), and %d numeric statement(s) cite no card (uncited_numbers). For each, correct the number, cite the card whose quote contains it, or rewrite it as clearly labelled inference, then assemble again.",
 		citationCheckGuidanceTitle, len(check.UnsupportedNumbers), len(check.UncitedNumbers))
 }
+
+const sourceCoverageMaxUncited = 8
+
+type researchReadSource struct {
+	URL      string `json:"url"`
+	FinalURL string `json:"-"`
+	Title    string `json:"title,omitempty"`
+}
+
+type researchSourceCoverage struct {
+	ReadSources   int                  `json:"read_sources"`
+	CitedSources  int                  `json:"cited_sources"`
+	UncitedSample []researchReadSource `json:"uncited_read_sources,omitempty"`
+}
+
+type researchReadSourceLister interface {
+	ResearchReadSources(ctx context.Context, runID string) ([]researchReadSource, error)
+}
+
+// ResearchReadSources lists the session's successfully read URLs.
+func (b postgresResearchClaimBackend) ResearchReadSources(ctx context.Context, runID string) ([]researchReadSource, error) {
+	tx, err := b.workerTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, `
+		select ledger.url,coalesce(ledger.final_url,''),ledger.title
+		from research_evidence_ledger ledger
+		join research_sessions session on session.id=ledger.session_id
+		where session.execution_run_id=nano_research_root_run($1) and ledger.status='read'
+		order by ledger.first_seen_at,ledger.url
+	`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	sources := make([]researchReadSource, 0)
+	for rows.Next() {
+		var source researchReadSource
+		if err := rows.Scan(&source.URL, &source.FinalURL, &source.Title); err != nil {
+			return nil, err
+		}
+		sources = append(sources, source)
+	}
+	return sources, rows.Err()
+}
+
+// checkResearchSourceCoverage counts which read sources the report cites,
+// through claim cards or direct links, and samples the read but uncited ones.
+// Like the number check it only informs revision.
+func checkResearchSourceCoverage(report string, claims []researchClaim, sources []researchReadSource) researchSourceCoverage {
+	cited := map[string]bool{}
+	byID := make(map[string]researchClaim, len(claims))
+	for _, claim := range claims {
+		byID[claim.ID] = claim
+	}
+	for _, match := range researchClaimCitationPattern.FindAllStringSubmatch(report, -1) {
+		for _, id := range researchClaimIDSplitPattern.Split(match[1], -1) {
+			if claim, ok := byID[id]; ok {
+				cited[normalizeClaimURL(claim.URL)] = true
+				cited[normalizeClaimURL(claim.Source)] = true
+			}
+		}
+	}
+	for _, match := range markdownLinkPattern.FindAllStringSubmatch(report, -1) {
+		cited[normalizeClaimURL(match[1])] = true
+	}
+	coverage := researchSourceCoverage{ReadSources: len(sources)}
+	for _, source := range sources {
+		if cited[normalizeClaimURL(source.URL)] || (source.FinalURL != "" && cited[normalizeClaimURL(source.FinalURL)]) {
+			coverage.CitedSources++
+			continue
+		}
+		if len(coverage.UncitedSample) < sourceCoverageMaxUncited {
+			coverage.UncitedSample = append(coverage.UncitedSample, source)
+		}
+	}
+	return coverage
+}
+
+func researchSourceCoverageGuidance(coverage researchSourceCoverage) string {
+	if coverage.ReadSources == 0 || coverage.CitedSources == coverage.ReadSources {
+		return ""
+	}
+	return fmt.Sprintf("Source coverage: the report cites %d of the %d sources read in this Run. Cite an uncited read source where it supports or qualifies a claim, record a card from it if needed, or leave it out deliberately.", coverage.CitedSources, coverage.ReadSources)
+}
