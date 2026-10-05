@@ -462,6 +462,11 @@ func (a *assembleResearchReportAction) Execute(ctx context.Context, request Acti
 			}
 			report := builder.String()
 			measured := checkResearchSourceCoverage(report, claims, sources)
+			if measured.ReadSources < researchBreadthTarget {
+				if measured.UnreadLeads, err = a.sources.ResearchUnreadLeads(ctx, request.Attempt.RunID, sourceCoverageMaxLeads); err != nil {
+					return ActionResult{}, err
+				}
+			}
 			coverage = &measured
 			if advice := researchSourceCoverageGuidance(measured); advice != "" {
 				guidance += " " + advice

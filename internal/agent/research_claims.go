@@ -988,7 +988,13 @@ func researchCitationCheckGuidance(check researchCitationCheck) string {
 		citationCheckGuidanceTitle, len(check.UnsupportedNumbers), len(check.UncitedNumbers))
 }
 
-const sourceCoverageMaxUncited = 8
+const (
+	sourceCoverageMaxUncited = 8
+	// researchBreadthTarget is the read-source count below which assembly
+	// suggests another discovery round; the executor prompt cites 8-15.
+	researchBreadthTarget  = 8
+	sourceCoverageMaxLeads = 6
+)
 
 type researchReadSource struct {
 	URL      string `json:"url"`
@@ -1000,10 +1006,43 @@ type researchSourceCoverage struct {
 	ReadSources   int                  `json:"read_sources"`
 	CitedSources  int                  `json:"cited_sources"`
 	UncitedSample []researchReadSource `json:"uncited_read_sources,omitempty"`
+	UnreadLeads   []researchReadSource `json:"unread_leads,omitempty"`
 }
 
 type researchReadSourceLister interface {
 	ResearchReadSources(ctx context.Context, runID string) ([]researchReadSource, error)
+	ResearchUnreadLeads(ctx context.Context, runID string, limit int) ([]researchReadSource, error)
+}
+
+// ResearchUnreadLeads lists discovered but never read or failed URLs in the
+// order search first surfaced them.
+func (b postgresResearchClaimBackend) ResearchUnreadLeads(ctx context.Context, runID string, limit int) ([]researchReadSource, error) {
+	tx, err := b.workerTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, `
+		select ledger.url,ledger.title
+		from research_evidence_ledger ledger
+		join research_sessions session on session.id=ledger.session_id
+		where session.execution_run_id=nano_research_root_run($1) and ledger.status='discovered'
+		order by ledger.first_seen_at,ledger.url
+		limit $2
+	`, runID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	leads := make([]researchReadSource, 0, limit)
+	for rows.Next() {
+		var lead researchReadSource
+		if err := rows.Scan(&lead.URL, &lead.Title); err != nil {
+			return nil, err
+		}
+		leads = append(leads, lead)
+	}
+	return leads, rows.Err()
 }
 
 // ResearchReadSources lists the session's successfully read URLs.
@@ -1069,8 +1108,16 @@ func checkResearchSourceCoverage(report string, claims []researchClaim, sources 
 }
 
 func researchSourceCoverageGuidance(coverage researchSourceCoverage) string {
-	if coverage.ReadSources == 0 || coverage.CitedSources == coverage.ReadSources {
-		return ""
+	parts := make([]string, 0, 2)
+	if coverage.ReadSources > 0 && coverage.CitedSources < coverage.ReadSources {
+		parts = append(parts, fmt.Sprintf("Source coverage: the report cites %d of the %d sources read in this Run. Cite an uncited read source where it supports or qualifies a claim, record a card from it if needed, or leave it out deliberately.", coverage.CitedSources, coverage.ReadSources))
 	}
-	return fmt.Sprintf("Source coverage: the report cites %d of the %d sources read in this Run. Cite an uncited read source where it supports or qualifies a claim, record a card from it if needed, or leave it out deliberately.", coverage.CitedSources, coverage.ReadSources)
+	if coverage.ReadSources < researchBreadthTarget {
+		advice := fmt.Sprintf("Source breadth: only %d sources have been read, while a substantial report usually rests on about %d-15 across several source families. Before Final, consider another round of discovery and parallel reading, especially independent evaluations, critiques, and alternatives, then revise and assemble again.", coverage.ReadSources, researchBreadthTarget)
+		if len(coverage.UnreadLeads) > 0 {
+			advice += " Unread leads already discovered are listed in unread_leads."
+		}
+		parts = append(parts, advice)
+	}
+	return strings.Join(parts, " ")
 }
