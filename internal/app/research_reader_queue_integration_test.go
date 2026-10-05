@@ -115,3 +115,65 @@ func TestResearchWaitAgentDispatchesQueuedLongReadWhenReaderSlotFrees(t *testing
 	}
 
 }
+
+func TestResearchReadersCoverEachArxivPaperOnce(t *testing.T) {
+	api := newTestAPI(t)
+	ctx := context.Background()
+	parent, _, _, _ := admitResearchExecutionForRelease(t, api, "reader-dedupe@example.com", "nano.default@40")
+	runtime, err := agent.NewResearchRuntime(api.db.Pool(), promptcatalog.MustLoadEmbedded())
+	if err != nil {
+		t.Fatal(err)
+	}
+	execution, err := runtime.Load(ctx, attemptFromClaim(parent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, _ := agentcatalog.MustLoadEmbedded().ResolveDefinition(agentcatalog.MustParseReference("research.executor@27"))
+	f := runtimeSubagentFixture{api: api, parent: parent, runtime: runtime, execution: execution, definition: definition, tools: map[string]agent.Action{}, sink: &capturingDirectTraceSink{}}
+	for _, registration := range agent.NewRuntimeSubagentToolRegistrations(api.db.Pool()) {
+		f.tools[registration.Action.Definition().Name] = registration.Action
+	}
+	attempt := attemptFromClaim(parent)
+	reader := func(url string) json.RawMessage {
+		input, _ := json.Marshal(map[string]string{"message": "Read one long document for the parent researcher, in full: " + url + " (FAIR-RAG).\n\nRecord claim cards.", "task_name": "Read: FAIR-RAG"})
+		return input
+	}
+	spawns := []models.ActionProposal{{Name: "spawn_agent", Input: reader("https://arxiv.org/abs/2510.22344")}, {Name: "spawn_agent", Input: reader("https://arxiv.org/html/2510.22344v1")}}
+	appendResearchProposal(t, runtime, attempt, 1, spawns)
+	ids := make([]string, len(spawns))
+	for i, spawn := range spawns {
+		result, err := f.tools["spawn_agent"].Execute(ctx, f.request("spawn_agent", fmt.Sprintf("decision:1/action:%d", i), spawn.Input, attempt))
+		if err != nil || result.Status != agent.ActionSucceeded {
+			t.Fatalf("spawn %d=%+v err=%v", i, result, err)
+		}
+		appendResearchResult(t, runtime, attempt, 1, i, result)
+		var output struct {
+			AgentID        string `json:"agent_id"`
+			AlreadyReading bool   `json:"already_reading"`
+		}
+		_ = json.Unmarshal(result.Output, &output)
+		ids[i] = output.AgentID
+		if output.AlreadyReading != (i == 1) {
+			t.Fatalf("spawn %d output=%s", i, result.Output)
+		}
+	}
+	if ids[0] != ids[1] {
+		t.Fatalf("html variant got its own reader: %v", ids)
+	}
+
+	// A queued pdf variant of the same paper is covered by that reader too.
+	readInput := json.RawMessage(`{"url":"https://arxiv.org/pdf/2510.22344"}`)
+	appendResearchProposal(t, runtime, attempt, 2, []models.ActionProposal{{Name: "read_url", Input: readInput}})
+	excerpt, _ := json.Marshal(map[string]any{"outcome": "reader_capacity_excerpt", "requested_url": "https://arxiv.org/pdf/2510.22344", "final_url": "https://arxiv.org/pdf/2510.22344", "title": "FAIR-RAG", "markdown": "Opening", "word_count": 9000, "truncated": true})
+	appendResearchResult(t, runtime, attempt, 2, 0, agent.ActionResult{Status: agent.ActionSucceeded, Output: excerpt})
+	waitInput, _ := json.Marshal(map[string]any{"agent_ids": ids[:1], "timeout_ms": 0})
+	appendResearchProposal(t, runtime, attempt, 3, []models.ActionProposal{{Name: "wait_agent", Input: waitInput}})
+	result, err := f.tools["wait_agent"].Execute(ctx, f.request("wait_agent", "decision:3/action:0", waitInput, attempt))
+	if err != nil || result.Status != agent.ActionSucceeded || strings.Contains(string(result.Output), "auto_dispatched_readers") {
+		t.Fatalf("wait=%s err=%v", result.Output, err)
+	}
+	var children int
+	if err := api.db.Pool().QueryRow(ctx, `select count(*) from agent_subagents where parent_run_id=$1`, parent.RunID).Scan(&children); err != nil || children != 1 {
+		t.Fatalf("children=%d err=%v", children, err)
+	}
+}

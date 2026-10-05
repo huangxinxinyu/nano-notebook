@@ -285,6 +285,15 @@ func (a *runtimeSubagentAction) spawn(ctx context.Context, tx pgx.Tx, request Ac
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return ActionResult{}, err
 	}
+	if url := researchReaderTaskURL(input.Message); url != "" {
+		readerID, readerName, found, err := findResearchReaderForDocumentInTx(ctx, tx, request.Attempt.RunID, url)
+		if err != nil {
+			return ActionResult{}, err
+		}
+		if found {
+			return commitSubagentResult(ctx, tx, map[string]any{"agent_id": readerID, "task_name": readerName, "already_reading": true})
+		}
+	}
 	active, total, err := countRuntimeSubagentsInTx(ctx, tx, request.Attempt.RunID)
 	if err != nil {
 		return ActionResult{}, err

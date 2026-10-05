@@ -53,7 +53,7 @@ func loadResearchQueuedReads(ctx context.Context, tx DBTX, rootRunID string) ([]
 		return nil, err
 	}
 	defer rows.Close()
-	queued := make([]researchQueuedRead, 0)
+	candidates := make([]researchQueuedRead, 0)
 	for rows.Next() {
 		var item researchQueuedRead
 		var requested, finalURL string
@@ -63,9 +63,26 @@ func loadResearchQueuedReads(ctx context.Context, tx DBTX, rootRunID string) ([]
 		if requested != "" {
 			item.URL = requested
 		}
-		queued = append(queued, item)
+		candidates = append(candidates, item)
 	}
-	return queued, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	// A reader for another URL of the same document, such as an arXiv html
+	// page for a queued abs page, already covers it.
+	reading, err := researchReaderDocumentKeysInTx(ctx, tx, rootRunID)
+	if err != nil {
+		return nil, err
+	}
+	queued := make([]researchQueuedRead, 0, len(candidates))
+	for _, item := range candidates {
+		if key := researchDocumentKey(item.URL); !reading[key] {
+			reading[key] = true
+			queued = append(queued, item)
+		}
+	}
+	return queued, nil
 }
 
 // dispatchQueuedResearchReadsInTx hands queued long documents to new readers
