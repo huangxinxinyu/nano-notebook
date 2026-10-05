@@ -59,7 +59,7 @@ begin
 			parent.executor_identity,parent.model_policy_identity,parent.model_policy_version,parent.model_policy_sha256,
 			parent.provider_model,parent.provider_capability_sha256,parent.model_context_policy_sha256,parent.parent_context_manifest)
 	then raise exception 'runtime subagent must inherit an active root and cannot spawn descendants'; end if;
-	if (select count(*) from agent_subagents where parent_run_id=parent.id)>=16
+	if (select count(*) from agent_subagents where parent_run_id=parent.id)>=32
 		or (select count(*) from agent_subagents s join agent_runs r on r.id=s.child_run_id
 			where s.parent_run_id=parent.id and r.status in ('queued','running'))>=4
 	then raise exception 'runtime subagent capacity exhausted'; end if;
