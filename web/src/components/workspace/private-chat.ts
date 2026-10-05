@@ -52,7 +52,7 @@ export type ResearchPlan = {
 export type ResearchSessionSummary = {
   id: string;
   input_message_id: string;
-  status: "planning" | "awaiting_confirmation" | "queued" | "running" | "publishing" | "completed" | "failed" | "cancelled";
+  status: "planning" | "awaiting_input" | "awaiting_confirmation" | "queued" | "running" | "publishing" | "completed" | "failed" | "cancelled";
   planning_run_id?: string;
   accepted_plan_version?: number;
   execution_run_id?: string;
@@ -60,11 +60,22 @@ export type ResearchSessionSummary = {
   error_code?: string;
 };
 
+export type PlanningQuestion = {
+  id: string;
+  header?: string;
+  question: string;
+  options: { label: string; description?: string }[];
+  recommended: number;
+};
+
+export type PlanningAnswer = { id: string; choice?: string; text?: string };
+
 export type ResearchSessionSnapshot = {
   session: ResearchSessionSummary & { chat_id: string };
   plan?: { version: number; content: ResearchPlan };
   report?: { version: number; content_markdown: string };
   evidence: { discovered: number; read: number; failed: number };
+  pending_questions?: { action_id: string; questions: PlanningQuestion[] };
 };
 
 export type Citation = {
@@ -103,6 +114,8 @@ export type ChatController = {
   send: (message: AppendMessage) => Promise<boolean>;
   editResearchPlan: (plan: ResearchPlan) => Promise<boolean>;
   startResearch: (planVersion: number) => Promise<boolean>;
+  answerResearchQuestions: (actionID: string, answers: PlanningAnswer[], useRecommended: boolean) => Promise<boolean>;
+  reviseResearchPlan: (content: string) => Promise<boolean>;
   stop: (runID: string) => Promise<boolean>;
   retry: (runID: string) => Promise<boolean>;
 };
@@ -286,6 +299,41 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
     return true;
   }
 
+  async function answerResearchQuestions(actionID: string, answers: PlanningAnswer[], useRecommended: boolean) {
+    const research = researchQuery.data;
+    if (!research || research.session.status !== "awaiting_input") return false;
+    setError(null);
+    const response = await api(`/api/v1/research-sessions/${research.session.id}/answers`, {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken() },
+      body: JSON.stringify({ action_id: actionID, answers, use_recommended: useRecommended })
+    });
+    if (!response.ok) {
+      if (response.status === 409) await researchQuery.refetch();
+      else setError(copy.unavailableLabel);
+      return false;
+    }
+    await researchQuery.refetch();
+    return true;
+  }
+
+  async function reviseResearchPlan(content: string) {
+    const research = researchQuery.data;
+    if (!research || research.session.status !== "awaiting_confirmation" || !content.trim()) return false;
+    setError(null);
+    const response = await api(`/api/v1/research-sessions/${research.session.id}/revisions`, {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken(), "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ id: crypto.randomUUID(), content: content.trim(), time_zone: browserTimeZone() })
+    });
+    if (!response.ok) {
+      setError(copy.unavailableLabel);
+      return false;
+    }
+    await Promise.all([snapshotQuery.refetch(), researchQuery.refetch()]);
+    return true;
+  }
+
   async function stop(runID: string) {
     setError(null);
     const response = await api(`/api/v1/agent-runs/${runID}/cancel`, {
@@ -345,6 +393,8 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
     send,
     editResearchPlan,
     startResearch,
+    answerResearchQuestions,
+    reviseResearchPlan,
     stop,
     retry
   };

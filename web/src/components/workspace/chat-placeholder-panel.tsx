@@ -12,7 +12,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps 
 import remarkGfm from "remark-gfm";
 import { MaterialSymbol } from "../icons/material-symbol";
 import { Button } from "../ui/button";
-import { appendMessageText, type AgentActivity, type AgentRun, type ChatController, type ChatMessage, type Citation, type ResearchPlan } from "./private-chat";
+import { appendMessageText, type AgentActivity, type AgentRun, type ChatController, type ChatMessage, type Citation, type PlanningAnswer, type PlanningQuestion, type ResearchPlan } from "./private-chat";
 import { SourceOpenTarget } from "./source-open-target";
 import type { MemberSource } from "./sources";
 
@@ -68,6 +68,15 @@ export type ChatPanelCopy = {
   researchCompletedLabel: string;
   researchFailedLabel: string;
   planInvalidLabel: string;
+  researchQuestionsTitle: string;
+  researchQuestionsHelp: string;
+  recommendedLabel: string;
+  otherAnswerLabel: string;
+  submitAnswersLabel: string;
+  useRecommendedLabel: string;
+  revisePlanLabel: string;
+  revisePlanPlaceholder: string;
+  submitRevisionLabel: string;
 };
 
 export function ChatPanelContent({ copy, controller, sources, onOpenSource, selectedSourceCount = 0 }: { copy: ChatPanelCopy; controller: ChatController; sources: MemberSource[]; onOpenSource: (source: MemberSource) => void; selectedSourceCount?: number }) {
@@ -212,7 +221,10 @@ function ResearchStatusCard({ copy, controller }: { copy: ChatPanelCopy; control
   if (!research) return null;
   const { session, evidence, plan } = research;
   if (session.status === "cancelled") return null;
-  if (session.status === "planning") {
+  if (session.status === "awaiting_input" && research.pending_questions) {
+    return <ResearchQuestionsCard key={research.pending_questions.action_id} copy={copy} controller={controller} actionID={research.pending_questions.action_id} questions={research.pending_questions.questions} />;
+  }
+  if (session.status === "planning" || session.status === "awaiting_input") {
     return <section className="research-status-card" aria-label={copy.researchProgressLabel}><span className="research-pulse" />{copy.researchPlanningLabel}</section>;
   }
   if (session.status === "awaiting_confirmation" && plan) {
@@ -229,10 +241,54 @@ function ResearchStatusCard({ copy, controller }: { copy: ChatPanelCopy; control
   );
 }
 
+function ResearchQuestionsCard({ copy, controller, actionID, questions }: { copy: ChatPanelCopy; controller: ChatController; actionID: string; questions: PlanningQuestion[] }) {
+  const [choices, setChoices] = useState<Record<string, string>>(() => Object.fromEntries(questions.map((question) => [question.id, question.options[question.recommended]?.label ?? ""])));
+  const [texts, setTexts] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const submit = async (useRecommended: boolean) => {
+    setBusy(true);
+    const answers: PlanningAnswer[] = useRecommended ? [] : questions.map((question) => {
+      const text = texts[question.id]?.trim();
+      return text ? { id: question.id, text } : { id: question.id, choice: choices[question.id] };
+    });
+    await controller.answerResearchQuestions(actionID, answers, useRecommended);
+    setBusy(false);
+  };
+  return (
+    <section className="research-plan-card research-questions-card" aria-label={copy.researchQuestionsTitle}>
+      <div><span className="material-symbols-rounded" aria-hidden="true">help</span><div><h3>{copy.researchQuestionsTitle}</h3><p>{copy.researchQuestionsHelp}</p></div></div>
+      {questions.map((question) => (
+        <fieldset key={question.id} className="research-question">
+          <legend>{question.header ? <span className="research-question-chip">{question.header}</span> : null}{question.question}</legend>
+          {question.options.map((option, index) => (
+            <label key={option.label} className="research-question-option">
+              <input type="radio" name={`${actionID}:${question.id}`} checked={!texts[question.id]?.trim() && choices[question.id] === option.label}
+                onChange={() => { setChoices((current) => ({ ...current, [question.id]: option.label })); setTexts((current) => ({ ...current, [question.id]: "" })); }} />
+              <span><b>{option.label}</b>{index === question.recommended ? <em>{copy.recommendedLabel}</em> : null}{option.description ? <small>{option.description}</small> : null}</span>
+            </label>
+          ))}
+          <input className="research-question-other" type="text" placeholder={copy.otherAnswerLabel} value={texts[question.id] ?? ""} maxLength={1000}
+            onChange={(event) => setTexts((current) => ({ ...current, [question.id]: event.target.value }))} />
+        </fieldset>
+      ))}
+      <div className="research-plan-actions">
+        <Button variant="outline" disabled={busy} onClick={() => void submit(true)}>{copy.useRecommendedLabel}</Button>
+        <Button disabled={busy} onClick={() => void submit(false)}>{copy.submitAnswersLabel}</Button>
+      </div>
+    </section>
+  );
+}
+
 function ResearchPlanEditor({ copy, controller, plan, version }: { copy: ChatPanelCopy; controller: ChatController; plan: ResearchPlan; version: number }) {
   const [draft, setDraft] = useState(() => JSON.stringify(plan, null, 2));
   const [planError, setPlanError] = useState(false);
-  const [busy, setBusy] = useState<"save" | "start" | null>(null);
+  const [busy, setBusy] = useState<"save" | "start" | "revise" | null>(null);
+  const [revision, setRevision] = useState("");
+  const revise = async () => {
+    setBusy("revise");
+    if (await controller.reviseResearchPlan(revision)) setRevision("");
+    setBusy(null);
+  };
   const save = async () => {
     let parsed: ResearchPlan;
     try {
@@ -256,7 +312,12 @@ function ResearchPlanEditor({ copy, controller, plan, version }: { copy: ChatPan
       <div><span className="material-symbols-rounded" aria-hidden="true">route</span><div><h3>{plan.title || copy.researchPlanTitle}</h3><p>{copy.researchPlanHelp}</p></div></div>
       <textarea aria-label={copy.researchPlanTitle} value={draft} onChange={(event) => setDraft(event.target.value)} rows={14} spellCheck={false} />
       {planError ? <p className="research-plan-error" role="alert">{copy.planInvalidLabel}</p> : null}
+      <label className="research-plan-revision">
+        <span>{copy.revisePlanLabel}</span>
+        <textarea value={revision} onChange={(event) => setRevision(event.target.value)} rows={3} maxLength={8000} placeholder={copy.revisePlanPlaceholder} />
+      </label>
       <div className="research-plan-actions">
+        <Button variant="outline" disabled={busy !== null || !revision.trim()} onClick={() => void revise()}>{busy === "revise" ? copy.savingLabel : copy.submitRevisionLabel}</Button>
         <Button variant="outline" disabled={busy !== null} onClick={() => void save()}>{busy === "save" ? copy.savingLabel : copy.savePlanLabel}</Button>
         <Button disabled={busy !== null} onClick={() => void start()}>{busy === "start" ? copy.startingLabel : copy.startResearchLabel}</Button>
       </div>
