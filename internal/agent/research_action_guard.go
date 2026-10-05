@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
@@ -73,17 +74,35 @@ func (a *researchDeduplicatingAction) Execute(ctx context.Context, request Actio
 	if err := rows.Err(); err != nil {
 		return ActionResult{}, err
 	}
-	if hasRepeatedResearchAction(payloads, a.action.Definition().Name, request.Input) {
-		return ActionResult{Status: ActionDomainError, ErrorCode: "research_duplicate_action"}, nil
+	if earlier, repeated := repeatedResearchAction(payloads, a.action.Definition().Name, request.Input); repeated {
+		return ActionResult{Status: ActionDomainError, Error: researchDuplicateActionError(request.Attempt.RunID, earlier)}, nil
 	}
 	return a.action.Execute(ctx, request)
 }
 
+// researchDuplicateActionError points the model at the earlier identical
+// call's checkpointed result instead of leaving it to guess and retry.
+func researchDuplicateActionError(runID, earlierActionID string) *ActionError {
+	return &ActionError{
+		Kind: "domain", Code: "research_duplicate_action",
+		Message:    fmt.Sprintf("An identical call already ran in this Research Run as %s; it was not repeated.", earlierActionID),
+		Suggestion: fmt.Sprintf("Use that earlier result: it is in your context, or page it with read_tool_result result_ref %q. Otherwise choose a different URL or query.", "run:"+runID+"/checkpoint:"+earlierActionID),
+	}
+}
+
 func hasRepeatedResearchAction(payloads [][]byte, name string, input json.RawMessage) bool {
+	_, repeated := repeatedResearchAction(payloads, name, input)
+	return repeated
+}
+
+// repeatedResearchAction reports whether the current proposal repeats an
+// earlier identical call, and that earlier call's action id.
+func repeatedResearchAction(payloads [][]byte, name string, input json.RawMessage) (string, bool) {
 	want, err := CanonicalJSONObject(input)
 	if err != nil {
-		return false
+		return "", false
 	}
+	first := ""
 	matches := 0
 	for _, raw := range payloads {
 		var proposal proposalCheckpointPayload
@@ -97,11 +116,14 @@ func hasRepeatedResearchAction(payloads [][]byte, name string, input json.RawMes
 			got, err := CanonicalJSONObject(action.Input)
 			if err == nil && bytes.Equal(got, want) {
 				matches++
+				if matches == 1 {
+					first = action.ActionID
+				}
 				if matches > 1 {
-					return true
+					return first, true
 				}
 			}
 		}
 	}
-	return false
+	return "", false
 }

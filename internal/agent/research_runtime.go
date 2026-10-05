@@ -463,7 +463,7 @@ func consecutiveResearchDuplicateSteps(prefix CheckpointPrefix) int {
 		}
 		duplicateStep := true
 		for _, action := range proposal.Actions {
-			if action.Result == nil || action.Result.Status != ActionDomainError || action.Result.ErrorCode != "research_duplicate_action" {
+			if action.Result == nil || action.Result.Status != ActionDomainError || !isResearchDuplicateResult(*action.Result) {
 				duplicateStep = false
 				break
 			}
@@ -474,6 +474,10 @@ func consecutiveResearchDuplicateSteps(prefix CheckpointPrefix) int {
 		count++
 	}
 	return count
+}
+
+func isResearchDuplicateResult(result ActionResult) bool {
+	return result.ErrorCode == "research_duplicate_action" || (result.Error != nil && result.Error.Code == "research_duplicate_action")
 }
 
 type researchDuplicateRecovery struct {
