@@ -568,6 +568,12 @@ func main() {
 	runtimeSubagentTools := agent.NewRuntimeSubagentToolRegistrations(db.Pool(), traceSink)
 	for _, registration := range runtimeSubagentTools {
 		registryTools = append(registryTools, registration.Action)
+		if registration.Action.Definition().Name == "spawn_agent" {
+			if err := agent.SetResearchReaderSpawner(researchURLTools[0], registration.Action); err != nil {
+				slog.Error("Research reader delegation invalid", "error", err)
+				os.Exit(1)
+			}
+		}
 	}
 	registry, err := agent.NewActionRegistry(registryTools...)
 	if err != nil {

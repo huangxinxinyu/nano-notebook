@@ -61,6 +61,9 @@ func (*ResearchRuntime) InvalidModelResponseRetryLimit() int { return 5 }
 
 func (*ResearchRuntime) PrepareDecisionResponse(_ context.Context, execution Execution, prefix CheckpointPrefix, decision models.ModelDecision) (models.ModelDecision, error) {
 	if execution.ParentRunID != "" {
+		if decision.Final != nil && isResearchReaderTask(execution.SubagentTask) && !hasRecordedClaim(prefix) {
+			return models.ModelDecision{}, errors.New("reader subagent recorded no claim cards: listing cards in Final records nothing; call record_claim with a verbatim quote for each relevant fact before returning Final")
+		}
 		return decision, nil
 	}
 	sourceFirst := isSourceFirstResearchExecution(execution)
@@ -71,6 +74,17 @@ func (*ResearchRuntime) PrepareDecisionResponse(_ context.Context, execution Exe
 		return decision, nil
 	}
 	return models.ModelDecision{}, errors.New("Research completion signal has no assembled report; return a complete report or assemble the workspace first")
+}
+
+func hasRecordedClaim(prefix CheckpointPrefix) bool {
+	for _, proposal := range prefix.Proposals {
+		for _, action := range proposal.Actions {
+			if action.Name == recordClaimActionName && action.Result != nil && action.Result.Status == ActionSucceeded {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func isSourceFirstResearchExecution(execution Execution) bool {
@@ -1017,6 +1031,19 @@ func materializeResearchEvidence(ctx context.Context, tx pgx.Tx, sessionID, runI
 		}
 		var output readURLOutput
 		if err := json.Unmarshal(action.Result.Output, &output); err != nil {
+			return err
+		}
+		if isResearchReaderDelegation(output) {
+			// The reader subagent's own read_url records the read; until then
+			// the delegated URL is only a lead.
+			_, err := tx.Exec(ctx, `
+				insert into research_evidence_ledger(session_id,url,final_url,title,status)
+				values($1,$2,nullif($3,''),$4,'discovered')
+				on conflict(session_id,url) do update set
+					final_url=coalesce(excluded.final_url,research_evidence_ledger.final_url),
+					title=case when excluded.title<>'' then excluded.title else research_evidence_ledger.title end,
+					last_seen_at=now()
+			`, sessionID, input.URL, output.FinalURL, output.Title)
 			return err
 		}
 		if isResearchPDFImportRequired(output) {

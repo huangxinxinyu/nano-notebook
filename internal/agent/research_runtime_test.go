@@ -377,3 +377,20 @@ func TestResearchSourceImportProjectionContainsOnlyLifecycleState(t *testing.T) 
 		}
 	}
 }
+
+func TestReaderSubagentCannotFinishWithoutClaimCards(t *testing.T) {
+	runtime := &ResearchRuntime{}
+	reader := Execution{ParentRunID: "run_parent", SubagentTask: researchReaderTaskPrefix + " https://example.com/paper (Paper)."}
+	final := models.ModelDecision{Final: &models.FinalDraft{Text: "Recorded [c1] and [c2]."}}
+	if _, err := runtime.PrepareDecisionResponse(context.Background(), reader, CheckpointPrefix{}, final); err == nil || !strings.Contains(err.Error(), "record_claim") {
+		t.Fatalf("reader without cards err=%v", err)
+	}
+	withCard := CheckpointPrefix{Proposals: []AcceptedProposal{{DecisionNo: 1, Actions: []AcceptedAction{{Name: recordClaimActionName, Result: &ActionResult{Status: ActionSucceeded}}}}}}
+	if _, err := runtime.PrepareDecisionResponse(context.Background(), reader, withCard, final); err != nil {
+		t.Fatalf("reader with a card err=%v", err)
+	}
+	other := Execution{ParentRunID: "run_parent", SubagentTask: "Compare the two papers."}
+	if _, err := runtime.PrepareDecisionResponse(context.Background(), other, CheckpointPrefix{}, final); err != nil {
+		t.Fatalf("non-reader child err=%v", err)
+	}
+}

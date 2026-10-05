@@ -50,10 +50,11 @@ type researchWorkspaceListOutput struct {
 
 type researchWorkspaceAssemblyOutput struct {
 	researchWorkspaceFileOutput
-	ReviewPresent bool                    `json:"review_present"`
-	Guidance      string                  `json:"guidance"`
-	CitationCheck *researchCitationCheck  `json:"citation_check,omitempty"`
-	Coverage      *researchSourceCoverage `json:"source_coverage,omitempty"`
+	ReviewPresent bool                      `json:"review_present"`
+	Guidance      string                    `json:"guidance"`
+	CitationCheck *researchCitationCheck    `json:"citation_check,omitempty"`
+	Coverage      *researchSourceCoverage   `json:"source_coverage,omitempty"`
+	Running       []researchRunningSubagent `json:"running_subagents,omitempty"`
 }
 
 type researchWorkspaceSnapshot struct {
@@ -349,6 +350,7 @@ type assembleResearchReportAction struct {
 	barrier researchSourceImportBarrier
 	claims  researchClaimsSource
 	sources researchReadSourceLister
+	agents  researchSubagentLister
 }
 
 type assembleResearchReportInput struct {
@@ -473,8 +475,17 @@ func (a *assembleResearchReportAction) Execute(ctx context.Context, request Acti
 			}
 		}
 	}
+	var running []researchRunningSubagent
+	if a.agents != nil {
+		if running, err = a.agents.RunningResearchSubagents(ctx, request.Attempt.RunID); err != nil {
+			return ActionResult{}, err
+		}
+		if advice := researchRunningSubagentsGuidance(running); advice != "" {
+			guidance += " " + advice
+		}
+	}
 	output, err := json.Marshal(researchWorkspaceAssemblyOutput{
-		researchWorkspaceFileOutput: file, ReviewPresent: reviewPresent, Guidance: guidance, CitationCheck: citationCheck, Coverage: coverage,
+		researchWorkspaceFileOutput: file, ReviewPresent: reviewPresent, Guidance: guidance, CitationCheck: citationCheck, Coverage: coverage, Running: running,
 	})
 	if err != nil {
 		return ActionResult{}, err
@@ -589,6 +600,6 @@ func NewResearchWorkspaceActions(pool *pgxpool.Pool, store objectstore.Store) ([
 		newWriteResearchFileAction(store),
 		newReadResearchFileAction(store, index, postgresResearchClaimBackend{pool: pool}),
 		newListResearchFilesAction(index),
-		&assembleResearchReportAction{store: store, index: index, barrier: postgresResearchSourceImportBarrier{pool: pool}, claims: postgresResearchClaimBackend{pool: pool}, sources: postgresResearchClaimBackend{pool: pool}},
+		&assembleResearchReportAction{store: store, index: index, barrier: postgresResearchSourceImportBarrier{pool: pool}, claims: postgresResearchClaimBackend{pool: pool}, sources: postgresResearchClaimBackend{pool: pool}, agents: postgresResearchClaimBackend{pool: pool}},
 	}, nil
 }

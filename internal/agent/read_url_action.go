@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
@@ -18,6 +20,9 @@ type readURLAction struct {
 	reader      researchURLReader
 	htmlReader  webreader.Adapter
 	sourceFirst webreader.Acquirer
+	// readerSpawner is the spawn_agent Action used to hand a long document
+	// to a reader subagent instead of returning its full text.
+	readerSpawner Action
 }
 
 type researchURLReader interface {
@@ -34,6 +39,8 @@ type readURLInput struct {
 type readURLOutput struct {
 	Outcome        string `json:"outcome,omitempty"`
 	RequestedURL   string `json:"requested_url,omitempty"`
+	ReaderAgentID  string `json:"reader_agent_id,omitempty"`
+	Note           string `json:"note,omitempty"`
 	Title          string `json:"title"`
 	FinalURL       string `json:"final_url"`
 	Markdown       string `json:"markdown"`
@@ -158,6 +165,9 @@ func (a *readURLAction) executeSourceFirst(ctx context.Context, request ActionRe
 	if content.MediaType != webreader.MediaTypeHTML {
 		return ActionResult{Status: ActionDomainError, ErrorCode: "read_url_response_invalid"}, nil
 	}
+	if delegated, ok, err := a.delegateLongRead(ctx, request, input.URL, content.Page); err != nil || ok {
+		return delegated, err
+	}
 	payload, err := json.Marshal(readURLOutput{
 		Title: content.Page.Title, FinalURL: content.Page.FinalURL, Markdown: content.Page.Content,
 		Engine: content.Page.Engine, WordCount: content.Page.WordCount, Truncated: content.Page.Truncated,
@@ -201,6 +211,114 @@ func (a *readURLAction) acquireReadable(ctx context.Context, url string) (webrea
 		lastErr = err
 	}
 	return webreader.Content{}, lastErr
+}
+
+const (
+	researchReaderTaskPrefix = "Read one long document for the parent researcher, in full:"
+	researchReaderOutcome    = "delegated_to_reader"
+	// researchReaderCapacityOutcome marks an excerpt returned because every
+	// reader slot was busy.
+	researchReaderCapacityOutcome = "reader_capacity_excerpt"
+	researchReaderExcerptRunes    = 8_000
+	researchDelegatedReadMinRune  = 30_000
+)
+
+// SetResearchReaderSpawner lets a research read_url hand long documents to
+// reader subagents through the given spawn_agent Action.
+func SetResearchReaderSpawner(readURL, spawner Action) error {
+	action, ok := readURL.(*readURLAction)
+	if !ok || spawner == nil || spawner.Definition().Name != "spawn_agent" {
+		return errors.New("research reader delegation requires read_url and spawn_agent")
+	}
+	action.readerSpawner = spawner
+	return nil
+}
+
+// delegateLongRead keeps a long document's full text out of a root
+// Researcher's context. From executor v22 the root hands it to a reader
+// subagent that pages through it and records claim cards, while the root
+// keeps discovering. Children cannot delegate, and a full subagent tree
+// falls back to returning the text, so delegation never loses a read.
+func (a *readURLAction) delegateLongRead(ctx context.Context, request ActionRequest, requestedURL string, page webreader.Page) (ActionResult, bool, error) {
+	if a.readerSpawner == nil || request.Definition.Identity != "research.executor" || request.Definition.Version < 22 ||
+		utf8.RuneCountInString(page.Content) < researchDelegatedReadMinRune {
+		return ActionResult{}, false, nil
+	}
+	title := strings.TrimSpace(page.Title)
+	if title == "" {
+		title = requestedURL
+	}
+	taskName := title
+	if runes := []rune(taskName); len(runes) > 72 {
+		taskName = string(runes[:72])
+	}
+	message := fmt.Sprintf(researchReaderTaskPrefix+" %s (%s).\n\n"+
+		"Call read_url on exactly that URL, then page through the rest with read_tool_result at each next_offset until complete=true. "+
+		"For every fact relevant to the accepted Research Plan, such as methods, settings, results and numbers, comparisons, and stated limitations, record a claim card with record_claim using that URL as source and a verbatim quote. "+
+		"A card exists only when record_claim returns its id; naming cards in your Final records nothing. "+
+		"Do not search for or read other sources. Return Final with: what the document is, each recorded card id with the claim it supports, and anything relevant you could not capture.", requestedURL, title)
+	input, err := json.Marshal(spawnAgentInput{Message: message, TaskName: "Read: " + taskName})
+	if err != nil {
+		return ActionResult{}, false, err
+	}
+	spawnRequest := request
+	spawnRequest.Input = input
+	spawned, err := a.readerSpawner.Execute(ctx, spawnRequest)
+	if err != nil {
+		return ActionResult{}, false, err
+	}
+	if spawned.Status != ActionSucceeded {
+		if researchReaderCapacityExhausted(spawned) {
+			return researchReaderCapacityExcerpt(requestedURL, page)
+		}
+		return ActionResult{}, false, nil
+	}
+	var agent struct {
+		AgentID string `json:"agent_id"`
+	}
+	if json.Unmarshal(spawned.Output, &agent) != nil || agent.AgentID == "" {
+		return ActionResult{}, false, nil
+	}
+	payload, err := json.Marshal(readURLOutput{
+		Outcome: researchReaderOutcome, RequestedURL: requestedURL, Title: page.Title, FinalURL: page.FinalURL,
+		WordCount: page.WordCount, MediaType: webreader.MediaTypeHTML, ReaderAgentID: agent.AgentID,
+		Note: "This long document was handed to a reader subagent, which reads it in full and records claim cards. Do not read it yourself. Keep discovering and reading other sources, collect the reader with wait_agent before drafting, and use its cards from claims.md.",
+	})
+	if err != nil {
+		return ActionResult{}, false, err
+	}
+	return ActionResult{Status: ActionSucceeded, Output: payload}, true, nil
+}
+
+func researchReaderCapacityExhausted(result ActionResult) bool {
+	return result.ErrorCode == "subagent_capacity_exhausted" || (result.Error != nil && result.Error.Code == "subagent_capacity_exhausted")
+}
+
+// researchReaderCapacityExcerpt keeps a long document out of the root's
+// context even when every reader slot is busy: the root sees an excerpt and
+// can delegate the document itself once wait_agent frees a reader.
+func researchReaderCapacityExcerpt(requestedURL string, page webreader.Page) (ActionResult, bool, error) {
+	excerpt := []rune(page.Content)
+	if len(excerpt) > researchReaderExcerptRunes {
+		excerpt = excerpt[:researchReaderExcerptRunes]
+	}
+	payload, err := json.Marshal(readURLOutput{
+		Outcome: researchReaderCapacityOutcome, RequestedURL: requestedURL, Title: page.Title, FinalURL: page.FinalURL,
+		Markdown: string(excerpt), Engine: page.Engine, WordCount: page.WordCount, Truncated: true, MediaType: webreader.MediaTypeHTML,
+		Note: "This long document shows only its opening excerpt because every reader subagent slot is busy. Collect finished readers with wait_agent, then hand this URL to a reader with spawn_agent, asking it to read the document in full and record claim cards with record_claim.",
+	})
+	if err != nil {
+		return ActionResult{}, false, err
+	}
+	return ActionResult{Status: ActionSucceeded, Output: payload}, true, nil
+}
+
+func isResearchReaderTask(task string) bool {
+	return strings.HasPrefix(task, researchReaderTaskPrefix)
+}
+
+func isResearchReaderDelegation(output readURLOutput) bool {
+	return output.Outcome == researchReaderOutcome && output.Markdown == ""
 }
 
 func classifyReadURLError(err error) string {

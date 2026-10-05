@@ -39,3 +39,16 @@ func TestExternalizedReadURLResultIsRecordedAsRead(t *testing.T) {
 		t.Fatalf("args=%v", got)
 	}
 }
+
+func TestDelegatedReadStaysALeadInTheLedger(t *testing.T) {
+	output, _ := json.Marshal(readURLOutput{Outcome: researchReaderOutcome, RequestedURL: "https://example.com/paper", Title: "Paper", FinalURL: "https://example.com/paper", ReaderAgentID: "run_reader"})
+	input, _ := json.Marshal(readURLInput{URL: "https://example.com/paper"})
+	tx := &recordingLedgerTx{}
+	action := AcceptedAction{ActionID: "decision:3/action:1", Name: "read_url", Input: input, Result: &ActionResult{Status: ActionSucceeded, Output: output}}
+	if err := materializeResearchEvidence(context.Background(), tx, "research_s", "run_r", action); err != nil {
+		t.Fatal(err)
+	}
+	if len(tx.statements) != 1 || !strings.Contains(tx.statements[0], "'discovered'") || strings.Contains(tx.statements[0], "status='read'") {
+		t.Fatalf("statements=%q", tx.statements)
+	}
+}

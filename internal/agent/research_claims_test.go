@@ -300,3 +300,12 @@ func TestSourceCoverageCountsCardAndLinkCitations(t *testing.T) {
 		t.Fatalf("broad, fully cited report produced guidance %q", guidance)
 	}
 }
+
+func TestRunningSubagentsGuidance(t *testing.T) {
+	if guidance := researchRunningSubagentsGuidance(nil); guidance != "" {
+		t.Fatalf("guidance=%q", guidance)
+	}
+	if guidance := researchRunningSubagentsGuidance([]researchRunningSubagent{{AgentID: "run_a", TaskName: "Read: Paper"}}); !strings.Contains(guidance, "wait_agent") {
+		t.Fatalf("guidance=%q", guidance)
+	}
+}

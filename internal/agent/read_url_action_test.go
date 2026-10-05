@@ -10,6 +10,7 @@ import (
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/documentreading"
+	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/huangxinxinyu/nano-notebook/internal/objectstore"
 	"github.com/huangxinxinyu/nano-notebook/internal/webreader"
 )
@@ -328,5 +329,84 @@ func TestReadURLReadsArxivPapersThroughTheirHTMLRendering(t *testing.T) {
 	result, err = (&readURLAction{sourceFirst: failing}).Execute(context.Background(), request("https://arxiv.org/abs/2310.11511"))
 	if err != nil || result.Status != ActionDomainError || len(failing.requests) != 3 {
 		t.Fatalf("all candidates failing result=%+v requests=%v err=%v", result, failing.requests, err)
+	}
+}
+
+type readerSpawnerStub struct {
+	result   ActionResult
+	requests []ActionRequest
+}
+
+func (*readerSpawnerStub) Definition() models.ActionDefinition {
+	return models.ActionDefinition{Name: "spawn_agent"}
+}
+func (*readerSpawnerStub) ValidateInput(json.RawMessage) error { return nil }
+func (s *readerSpawnerStub) Execute(_ context.Context, request ActionRequest) (ActionResult, error) {
+	s.requests = append(s.requests, request)
+	return s.result, nil
+}
+
+type longPageAcquirer struct{ content string }
+
+func (a longPageAcquirer) Acquire(_ context.Context, request webreader.Request) (webreader.Content, error) {
+	return webreader.Content{MediaType: webreader.MediaTypeHTML, Page: webreader.Page{Title: "A long paper", FinalURL: request.URL, Content: a.content, WordCount: 5000}}, nil
+}
+
+func TestRootResearcherHandsLongDocumentsToReaderSubagents(t *testing.T) {
+	long := strings.Repeat("Evidence sentence. ", 2000)
+	request := func(version int) ActionRequest {
+		return ActionRequest{ActionID: "decision:3/action:1", Input: json.RawMessage(`{"url":"https://example.com/paper"}`), Definition: agentcatalog.Reference{Identity: "research.executor", Version: version}}
+	}
+	spawner := &readerSpawnerStub{result: ActionResult{Status: ActionSucceeded, Output: json.RawMessage(`{"agent_id":"run_reader","task_name":"Read: A long paper"}`)}}
+	action := &readURLAction{sourceFirst: longPageAcquirer{content: long}}
+	if err := SetResearchReaderSpawner(action, spawner); err != nil {
+		t.Fatal(err)
+	}
+	result, err := action.Execute(context.Background(), request(22))
+	if err != nil || result.Status != ActionSucceeded {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	var output readURLOutput
+	_ = json.Unmarshal(result.Output, &output)
+	if !isResearchReaderDelegation(output) || output.ReaderAgentID != "run_reader" || output.RequestedURL != "https://example.com/paper" {
+		t.Fatalf("output=%+v", output)
+	}
+	if len(spawner.requests) != 1 || spawner.requests[0].ActionID != "decision:3/action:1" {
+		t.Fatalf("spawn requests=%+v", spawner.requests)
+	}
+	var spawnInput spawnAgentInput
+	_ = json.Unmarshal(spawner.requests[0].Input, &spawnInput)
+	if !strings.Contains(spawnInput.Message, "https://example.com/paper") || !strings.Contains(spawnInput.Message, "record_claim") || spawnInput.TaskName != "Read: A long paper" {
+		t.Fatalf("spawn input=%+v", spawnInput)
+	}
+
+	for name, tc := range map[string]struct {
+		version int
+		content string
+		spawn   ActionResult
+	}{
+		"older executor":     {21, long, spawner.result},
+		"short page":         {22, "A short page.", spawner.result},
+		"child or full tree": {22, long, ActionResult{Status: ActionDomainError, ErrorCode: "subagent_cannot_delegate"}},
+	} {
+		fallback := &readURLAction{sourceFirst: longPageAcquirer{content: tc.content}, readerSpawner: &readerSpawnerStub{result: tc.spawn}}
+		result, err := fallback.Execute(context.Background(), request(tc.version))
+		var output readURLOutput
+		_ = json.Unmarshal(result.Output, &output)
+		if err != nil || result.Status != ActionSucceeded || output.Markdown != tc.content || output.Outcome != "" {
+			t.Fatalf("%s: result=%+v err=%v", name, output.Outcome, err)
+		}
+	}
+}
+
+func TestRootResearcherGetsAnExcerptWhenReadersAreBusy(t *testing.T) {
+	long := strings.Repeat("Evidence sentence. ", 2000)
+	action := &readURLAction{sourceFirst: longPageAcquirer{content: long}, readerSpawner: &readerSpawnerStub{result: ActionResult{Status: ActionDomainError, ErrorCode: "subagent_capacity_exhausted"}}}
+	result, err := action.Execute(context.Background(), ActionRequest{Input: json.RawMessage(`{"url":"https://example.com/paper"}`), Definition: agentcatalog.Reference{Identity: "research.executor", Version: 22}})
+	var output readURLOutput
+	_ = json.Unmarshal(result.Output, &output)
+	if err != nil || result.Status != ActionSucceeded || output.Outcome != researchReaderCapacityOutcome ||
+		len([]rune(output.Markdown)) != researchReaderExcerptRunes || !output.Truncated || !strings.Contains(output.Note, "spawn_agent") {
+		t.Fatalf("output outcome=%q runes=%d err=%v", output.Outcome, len([]rune(output.Markdown)), err)
 	}
 }

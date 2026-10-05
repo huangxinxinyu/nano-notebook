@@ -1121,3 +1121,46 @@ func researchSourceCoverageGuidance(coverage researchSourceCoverage) string {
 	}
 	return strings.Join(parts, " ")
 }
+
+type researchRunningSubagent struct {
+	AgentID  string `json:"agent_id"`
+	TaskName string `json:"task_name"`
+}
+
+type researchSubagentLister interface {
+	RunningResearchSubagents(ctx context.Context, runID string) ([]researchRunningSubagent, error)
+}
+
+// RunningResearchSubagents lists the Run's subagents that have not finished,
+// such as readers still extracting claim cards from long documents.
+func (b postgresResearchClaimBackend) RunningResearchSubagents(ctx context.Context, runID string) ([]researchRunningSubagent, error) {
+	tx, err := b.workerTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, `
+		select s.child_run_id,s.task_name from agent_subagents s join agent_runs child on child.id=s.child_run_id
+		where s.parent_run_id=$1 and child.status in ('queued','running') order by s.created_at
+	`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	running := make([]researchRunningSubagent, 0)
+	for rows.Next() {
+		var agent researchRunningSubagent
+		if err := rows.Scan(&agent.AgentID, &agent.TaskName); err != nil {
+			return nil, err
+		}
+		running = append(running, agent)
+	}
+	return running, rows.Err()
+}
+
+func researchRunningSubagentsGuidance(running []researchRunningSubagent) string {
+	if len(running) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Subagents still running: %d (listed in running_subagents). Their claim cards are not in this report yet; collect them with wait_agent, revise with their cards, and assemble again before Final.", len(running))
+}
