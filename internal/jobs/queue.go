@@ -29,11 +29,16 @@ type ClaimedJob struct {
 	AttemptNo          int
 	LeaseToken         string
 	MaxAttempts        int
+	FailedAttempts     int
 	DeadlineAt         time.Time
 	DefinitionIdentity string
 	DefinitionVersion  int
 	AdmittedAt         time.Time
 }
+
+// MaxAgentLeases bounds every lease of one Agent Job, including resumptions
+// after waits, and matches the agent_jobs attempt_no constraint.
+const MaxAgentLeases = 100
 
 func NewQueue(pool *pgxpool.Pool) *Queue {
 	return &Queue{pool: pool, leaseDuration: DefaultLeaseDuration}
@@ -81,7 +86,7 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 		var definitionIdentity *string
 		var definitionVersion *int
 		err = tx.QueryRow(ctx, `
-			select j.id, j.run_id, j.status, j.attempt_no, coalesce(j.lease_token::text,''),
+			select j.id, j.run_id, j.status, j.attempt_no, j.failed_attempts, coalesce(j.lease_token::text,''),
 				coalesce(profile.max_attempts,(definition.limits->>'attempts')::integer),
 				coalesce(r.deadline_at,tree.absolute_deadline),
 				j.available_at, r.definition_identity, r.definition_version, r.created_at
@@ -94,7 +99,7 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 				or (j.status = 'running' and r.status = 'running' and j.lease_expires_at <= now())
 			order by j.available_at, j.created_at, j.id
 			for update of r, j skip locked
-			limit 1`).Scan(&job.ID, &job.RunID, &status, &job.AttemptNo, &job.LeaseToken, &job.MaxAttempts, &job.DeadlineAt,
+			limit 1`).Scan(&job.ID, &job.RunID, &status, &job.AttemptNo, &job.FailedAttempts, &job.LeaseToken, &job.MaxAttempts, &job.DeadlineAt,
 			&availableAt, &definitionIdentity, &definitionVersion, &job.AdmittedAt)
 		if errors.Is(err, pgx.ErrNoRows) {
 			if err := tx.Commit(ctx); err != nil {
@@ -116,7 +121,11 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 		}
 		taskKind, taskVariant := agent.ClassifyTask(job.DefinitionIdentity, job.DefinitionVersion)
 
-		if status == "running" && job.AttemptNo >= job.MaxAttempts {
+		// A running Job claimed here lost its lease, which counts as a failed
+		// Attempt; resumptions after a wait do not.
+		leaseLost := status == "running"
+		if leaseLost && (job.FailedAttempts+1 >= job.MaxAttempts || job.AttemptNo >= MaxAgentLeases) ||
+			!leaseLost && job.AttemptNo >= MaxAgentLeases {
 			if err := exhaustRecovery(traceCtx, tx, job); err != nil {
 				return ClaimedJob{}, false, err
 			}
@@ -135,16 +144,20 @@ func (q *Queue) ClaimNext(ctx context.Context) (ClaimedJob, bool, error) {
 
 		previousAttemptNo := job.AttemptNo
 		job.AttemptNo++
+		if leaseLost {
+			job.FailedAttempts++
+		}
 		job.LeaseToken = uuid.NewString()
 		jobTag, err := tx.Exec(ctx, `
 			update agent_jobs
 			set status = 'running',
 				attempt_no = $2,
+				failed_attempts = $5,
 				lease_token = $3,
 				lease_expires_at = now() + ($4 * interval '1 second'),
 				started_at = coalesce(started_at, now()),
 				updated_at = now()
-			where id = $1`, job.ID, job.AttemptNo, job.LeaseToken, q.leaseDuration.Seconds())
+			where id = $1`, job.ID, job.AttemptNo, job.LeaseToken, q.leaseDuration.Seconds(), job.FailedAttempts)
 		if err != nil {
 			return ClaimedJob{}, false, err
 		}
@@ -257,13 +270,13 @@ func (q *Queue) ResolveAttempt(ctx context.Context, job ClaimedJob, requested ag
 	}
 	var status string
 	var deadline time.Time
-	var maxAttempts int
+	var maxAttempts, failedAttempts int
 	var currentLease *string
 	var storedErrorCode string
 	if err := tx.QueryRow(ctx, `
 		select j.status,coalesce(r.deadline_at,tree.absolute_deadline),
 			coalesce(profile.max_attempts,(definition.limits->>'attempts')::integer),j.lease_token::text,
-			coalesce(j.last_error_code,r.error_code,'already_terminal')
+			coalesce(j.last_error_code,r.error_code,'already_terminal'),j.failed_attempts
 		from agent_jobs j
 		join agent_runs r on r.id=j.run_id
 		left join agent_role_profiles profile on profile.configuration_set_id=r.agent_config_id and profile.role=r.agent_role
@@ -271,7 +284,7 @@ func (q *Queue) ResolveAttempt(ctx context.Context, job ClaimedJob, requested ag
 		left join agent_trees tree on tree.id=r.tree_id
 		where j.id=$1 and j.run_id=$2
 		for update of j,r
-	`, job.ID, job.RunID).Scan(&status, &deadline, &maxAttempts, &currentLease, &storedErrorCode); err != nil {
+	`, job.ID, job.RunID).Scan(&status, &deadline, &maxAttempts, &currentLease, &storedErrorCode, &failedAttempts); err != nil {
 		return agent.AttemptResolution{}, err
 	}
 	taskKind, taskVariant := agent.ClassifyTask(job.DefinitionIdentity, job.DefinitionVersion)
@@ -295,13 +308,13 @@ func (q *Queue) ResolveAttempt(ctx context.Context, job ClaimedJob, requested ag
 	}
 	if actual.Disposition == agent.AttemptRetryable {
 		switch {
-		case job.AttemptNo >= maxAttempts:
+		case failedAttempts+1 >= maxAttempts || job.AttemptNo >= MaxAgentLeases:
 			actual = agent.AttemptResolution{Disposition: agent.AttemptTerminal, ErrorCode: "retry_exhausted"}
 		case !time.Now().Add(actual.Backoff).Before(deadline):
 			actual = agent.AttemptResolution{Disposition: agent.AttemptTerminal, ErrorCode: "run_deadline_exceeded"}
 		default:
 			jobTag, err := tx.Exec(ctx, `
-				update agent_jobs set status='queued',lease_token=null,lease_expires_at=null,
+				update agent_jobs set status='queued',lease_token=null,lease_expires_at=null,failed_attempts=failed_attempts+1,
 					available_at=now()+($4*interval '1 second'),last_error_code=$5,updated_at=now()
 				where id=$1 and run_id=$2 and status='running' and lease_token=$3::uuid
 			`, job.ID, job.RunID, job.LeaseToken, actual.Backoff.Seconds(), actual.ErrorCode)

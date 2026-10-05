@@ -296,3 +296,57 @@ func assertLeaseRemaining(t *testing.T, api *testAPI, jobID string, minimum, max
 		t.Fatalf("lease remaining = %s, want %s..%s", remaining, minimum, maximum)
 	}
 }
+
+func TestWaitResumptionsDoNotSpendTheFailedAttemptBudget(t *testing.T) {
+	api, sessionCookie, csrfCookie, chatID := newChatFixture(t, "wait-resumptions@example.com")
+	runID := admitRunForLeaseTest(t, api, sessionCookie, csrfCookie, chatID, "0190cdd2-5f2d-7ad8-b3f5-1b588788c0a1")
+	ctx := context.Background()
+	queue := jobs.NewQueue(api.db.Pool())
+	// A wait_agent yield requeues the Job without a failure, as five
+	// resumptions exceed any definition's attempt limit.
+	for wait := 1; wait <= 5; wait++ {
+		claimed, ok, err := queue.ClaimNext(ctx)
+		if err != nil || !ok || claimed.AttemptNo != wait || claimed.FailedAttempts != 0 {
+			t.Fatalf("wait %d claim=%+v ok=%v err=%v", wait, claimed, ok, err)
+		}
+		if _, err := api.db.Pool().Exec(ctx, `update agent_runs set status='queued' where id=$1`, runID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := api.db.Pool().Exec(ctx, `update agent_jobs set status='queued',lease_token=null,lease_expires_at=null,available_at=now() where run_id=$1`, runID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	retry := agent.AttemptResolution{Disposition: agent.AttemptRetryable, ErrorCode: "model_timeout", Backoff: time.Millisecond}
+	var maxAttempts int
+	for failure := 1; ; failure++ {
+		if _, err := api.db.Pool().Exec(ctx, `update agent_jobs set available_at=now()-interval '1 second' where run_id=$1`, runID); err != nil {
+			t.Fatal(err)
+		}
+		claimed, ok, err := queue.ClaimNext(ctx)
+		if err != nil || !ok || claimed.FailedAttempts != failure-1 {
+			t.Fatalf("failure %d claim=%+v ok=%v err=%v", failure, claimed, ok, err)
+		}
+		maxAttempts = claimed.MaxAttempts
+		actual, err := queue.ResolveAttempt(ctx, claimed, retry)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if failure < maxAttempts {
+			if actual.Disposition != agent.AttemptRetryable {
+				t.Fatalf("failure %d of %d after waits resolved %+v", failure, maxAttempts, actual)
+			}
+			continue
+		}
+		if actual.Disposition != agent.AttemptTerminal || actual.ErrorCode != "retry_exhausted" {
+			t.Fatalf("failure %d of %d resolved %+v, want retry_exhausted", failure, maxAttempts, actual)
+		}
+		break
+	}
+	var attemptNo, failedAttempts int
+	if err := api.db.Pool().QueryRow(ctx, `select attempt_no,failed_attempts from agent_jobs where run_id=$1`, runID).Scan(&attemptNo, &failedAttempts); err != nil {
+		t.Fatal(err)
+	}
+	if attemptNo != 5+maxAttempts || failedAttempts != maxAttempts-1 {
+		t.Fatalf("attempt_no=%d failed_attempts=%d max=%d", attemptNo, failedAttempts, maxAttempts)
+	}
+}

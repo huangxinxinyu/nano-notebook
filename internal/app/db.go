@@ -2329,10 +2329,10 @@ create table if not exists agent_jobs (
 	finished_at timestamptz,
 	updated_at timestamptz not null default now(),
 	constraint agent_jobs_execution_state_check check (
-		(status = 'queued' and attempt_no between 0 and 10 and lease_token is null and lease_expires_at is null)
-		or (status = 'running' and attempt_no between 1 and 10 and lease_token is not null and lease_expires_at is not null)
-		or (status = 'waiting' and attempt_no between 1 and 10 and lease_token is null and lease_expires_at is null)
-		or (status in ('succeeded', 'failed', 'cancelled') and attempt_no between 0 and 10 and lease_token is null and lease_expires_at is null)
+		(status = 'queued' and attempt_no between 0 and 100 and lease_token is null and lease_expires_at is null)
+		or (status = 'running' and attempt_no between 1 and 100 and lease_token is not null and lease_expires_at is not null)
+		or (status = 'waiting' and attempt_no between 1 and 100 and lease_token is null and lease_expires_at is null)
+		or (status in ('succeeded', 'failed', 'cancelled') and attempt_no between 0 and 100 and lease_token is null and lease_expires_at is null)
 	)
 );
 
@@ -2372,6 +2372,12 @@ create index if not exists agent_jobs_expired_lease_idx
 	on agent_jobs(lease_expires_at, created_at, id)
 	where status = 'running';
 alter table agent_jobs drop constraint if exists agent_jobs_status_check;
+-- attempt_no counts every lease, including resumptions after a wait;
+-- failed_attempts counts only Attempts that failed or lost their lease and
+-- is what the definition's attempt limit bounds.
+alter table agent_jobs add column if not exists failed_attempts integer not null default 0;
+alter table agent_jobs drop constraint if exists agent_jobs_failed_attempts_check;
+alter table agent_jobs add constraint agent_jobs_failed_attempts_check check (failed_attempts between 0 and 10);
 alter table agent_jobs drop constraint if exists agent_jobs_execution_state_check;
 update agent_runs r
 	set status = 'queued', started_at = null, updated_at = now()
@@ -2383,10 +2389,10 @@ update agent_jobs
 alter table agent_jobs add constraint agent_jobs_status_check
 	check (status in ('queued', 'running', 'waiting', 'succeeded', 'failed', 'cancelled'));
 alter table agent_jobs add constraint agent_jobs_execution_state_check check (
-	(status = 'queued' and attempt_no between 0 and 10 and lease_token is null and lease_expires_at is null)
-	or (status = 'running' and attempt_no between 1 and 10 and lease_token is not null and lease_expires_at is not null)
-	or (status = 'waiting' and attempt_no between 1 and 10 and lease_token is null and lease_expires_at is null)
-	or (status in ('succeeded', 'failed', 'cancelled') and attempt_no between 0 and 10 and lease_token is null and lease_expires_at is null)
+	(status = 'queued' and attempt_no between 0 and 100 and lease_token is null and lease_expires_at is null)
+	or (status = 'running' and attempt_no between 1 and 100 and lease_token is not null and lease_expires_at is not null)
+	or (status = 'waiting' and attempt_no between 1 and 100 and lease_token is null and lease_expires_at is null)
+	or (status in ('succeeded', 'failed', 'cancelled') and attempt_no between 0 and 100 and lease_token is null and lease_expires_at is null)
 );
 
 -- Contract migration is allowed only after this database-owned projection
