@@ -15,6 +15,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/text/unicode/norm"
 )
 
 // Claim cards bind one claim to a verbatim quote from a Source the Run has
@@ -61,6 +62,7 @@ var (
 	researchClaimIDSplitPattern = regexp.MustCompile(`\s*[,，;；、]\s*`)
 	claimMarkdownLinkURLPattern = regexp.MustCompile(`\]\([^)\s]*\)`)
 	claimEllipsisPattern        = regexp.MustCompile(`\.{3,}|…+`)
+	claimTeXCommandPattern      = regexp.MustCompile(`\\[A-Za-z]+`)
 )
 
 type recordClaimInput struct {
@@ -468,7 +470,34 @@ func normalizeClaimText(text string) normalizedClaimText {
 	return normalized
 }
 
+// cleanClaimMathText undoes how arXiv HTML extraction renders math: each
+// formula appears twice, as rendered symbols and as its TeX source, so
+// "0.182 nats" reads "0.1820.182 nats" and "in-house C" reads
+// "in-house 𝒞\mathcal{C}". TeX commands and braces go, math alphanumerics
+// fold to plain letters, and a token made of one run repeated twice keeps
+// one copy. Quote and source are cleaned alike, so a genuinely doubled
+// token such as 55 still matches itself.
+func cleanClaimMathText(text string) string {
+	text = claimTeXCommandPattern.ReplaceAllString(text, "")
+	text = strings.NewReplacer("{", "", "}", "", "\\", "").Replace(norm.NFKC.String(text))
+	fields := strings.Fields(text)
+	for index, field := range fields {
+		start := strings.IndexFunc(field, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) })
+		end := strings.LastIndexFunc(field, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '%' })
+		if start < 0 || end < start {
+			continue
+		}
+		_, size := utf8.DecodeRuneInString(field[end:])
+		core := field[start : end+size]
+		if half := len(core) / 2; len(core)%2 == 0 && half > 0 && core[:half] == core[half:] {
+			fields[index] = field[:start] + core[:half] + field[end+size:]
+		}
+	}
+	return strings.Join(fields, " ")
+}
+
 func matchClaimQuote(sourceText, quote string) claimQuoteMatch {
+	sourceText, quote = cleanClaimMathText(sourceText), cleanClaimMathText(quote)
 	source := claimMarkdownLinkURLPattern.ReplaceAllString(sourceText, "]")
 	haystack := normalizeClaimText(source)
 	segments := make([][]rune, 0, 2)

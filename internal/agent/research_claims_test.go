@@ -402,3 +402,20 @@ func TestCardRangesCiteEveryCardBetweenTheirEnds(t *testing.T) {
 		t.Fatalf("two-letter range=%q", got)
 	}
 }
+
+func TestClaimQuotesMatchArxivTextWithDuplicatedMath(t *testing.T) {
+	source := `### 6.2 Why The Margin Is Necessary Under the canonical prompt, 96.5%96.5\% of verbalized confidence values are 55, yielding an entropy of 0.1820.182 nats (Figure 3). By construction the rule cannot fire at r\=1r{=}1, so the minimum cost is two LLM calls per question. We create supervised data by prompting GPT-4 to generate reflection tokens and then distill their knowledge into an in-house 𝒞\mathcal{C}. For each group of reflection tokens, we sample 55 instances.`
+	for _, quote := range []string{
+		"Under the canonical prompt, 96.5% of verbalized confidence values are 5, yielding an entropy of 0.182 nats",
+		"By construction the rule cannot fire at r=1, so the minimum cost is two LLM calls per question.",
+		"distill their knowledge into an in-house C.",
+		"we sample 55 instances",
+	} {
+		if got := matchClaimQuote(source, quote); got.Status != claimStatusVerified {
+			t.Fatalf("quote %q status=%s nearest=%q", quote, got.Status, got.Nearest)
+		}
+	}
+	if got := matchClaimQuote(source, "Under the canonical prompt, 12.5% of verbalized confidence values are 3"); got.Status == claimStatusVerified {
+		t.Fatalf("changed numbers verified: %+v", got)
+	}
+}
