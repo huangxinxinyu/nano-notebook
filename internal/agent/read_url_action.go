@@ -171,8 +171,10 @@ func (a *readURLAction) executeSourceFirst(ctx context.Context, request ActionRe
 
 // arXiv abstract pages have no extractable main body, and arXiv PDFs need a
 // slow Source import. Their HTML renderings read directly, so an arXiv
-// abstract or PDF URL is read through arxiv.org/html, then ar5iv, before the
-// original URL. The result's requested_url stays the URL the model asked for.
+// abstract or PDF URL is read through arxiv.org/html, then ar5iv. A paper
+// with neither rendering falls back to its PDF, which returns
+// pdf_requires_source_import with an importable URL instead of a dead end.
+// The result's requested_url stays the URL the model asked for.
 var arxivPaperURLPattern = regexp.MustCompile(`^https?://(?:www\.|export\.)?arxiv\.org/(?:abs|pdf)/([^?#]+?)(?:\.pdf)?/?(?:[?#].*)?$`)
 
 func arxivReadableCandidates(url string) []string {
@@ -181,7 +183,7 @@ func arxivReadableCandidates(url string) []string {
 		return []string{url}
 	}
 	id := match[1]
-	return []string{"https://arxiv.org/html/" + id, "https://ar5iv.labs.arxiv.org/html/" + id, url}
+	return []string{"https://arxiv.org/html/" + id, "https://ar5iv.labs.arxiv.org/html/" + id, "https://arxiv.org/pdf/" + id}
 }
 
 func (a *readURLAction) acquireReadable(ctx context.Context, url string) (webreader.Content, error) {

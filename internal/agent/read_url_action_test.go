@@ -267,11 +267,15 @@ func TestReadURLActionRejectsMutableOrUnsafeInput(t *testing.T) {
 
 type arxivAcquirer struct {
 	readable map[string]bool
+	pdf      map[string]bool
 	requests []string
 }
 
 func (a *arxivAcquirer) Acquire(_ context.Context, request webreader.Request) (webreader.Content, error) {
 	a.requests = append(a.requests, request.URL)
+	if a.pdf[request.URL] {
+		return webreader.Content{MediaType: webreader.MediaTypePDF, FinalURL: request.URL, PDF: []byte("%PDF-1.7")}, nil
+	}
 	if !a.readable[request.URL] {
 		return webreader.Content{}, errors.New("page has no extractable main content")
 	}
@@ -299,13 +303,25 @@ func TestReadURLReadsArxivPapersThroughTheirHTMLRendering(t *testing.T) {
 
 	for url, want := range map[string][]string{
 		"https://arxiv.org/pdf/2510.22344v1":     {"https://arxiv.org/html/2510.22344v1", "https://ar5iv.labs.arxiv.org/html/2510.22344v1", "https://arxiv.org/pdf/2510.22344v1"},
-		"https://arxiv.org/pdf/2510.22344v1.pdf": {"https://arxiv.org/html/2510.22344v1", "https://ar5iv.labs.arxiv.org/html/2510.22344v1", "https://arxiv.org/pdf/2510.22344v1.pdf"},
-		"https://arxiv.org/abs/cs/0112017":       {"https://arxiv.org/html/cs/0112017", "https://ar5iv.labs.arxiv.org/html/cs/0112017", "https://arxiv.org/abs/cs/0112017"},
+		"https://arxiv.org/pdf/2510.22344v1.pdf": {"https://arxiv.org/html/2510.22344v1", "https://ar5iv.labs.arxiv.org/html/2510.22344v1", "https://arxiv.org/pdf/2510.22344v1"},
+		"https://arxiv.org/abs/cs/0112017":       {"https://arxiv.org/html/cs/0112017", "https://ar5iv.labs.arxiv.org/html/cs/0112017", "https://arxiv.org/pdf/cs/0112017"},
+		"https://arxiv.org/abs/2310.11511v2":     {"https://arxiv.org/html/2310.11511v2", "https://ar5iv.labs.arxiv.org/html/2310.11511v2", "https://arxiv.org/pdf/2310.11511v2"},
 		"https://example.com/arxiv.org/abs/1":    {"https://example.com/arxiv.org/abs/1"},
 	} {
 		if got := arxivReadableCandidates(url); strings.Join(got, " ") != strings.Join(want, " ") {
 			t.Fatalf("%s candidates=%v", url, got)
 		}
+	}
+
+	pdfOnly := &arxivAcquirer{pdf: map[string]bool{"https://arxiv.org/pdf/2609.11111": true}}
+	result, err = (&readURLAction{sourceFirst: pdfOnly}).Execute(context.Background(), request("https://arxiv.org/abs/2609.11111"))
+	if err != nil || result.Status != ActionSucceeded {
+		t.Fatalf("pdf fallback result=%+v err=%v", result, err)
+	}
+	var pdfOutput readURLOutput
+	_ = json.Unmarshal(result.Output, &pdfOutput)
+	if !isResearchPDFImportRequired(pdfOutput) || pdfOutput.RequestedURL != "https://arxiv.org/abs/2609.11111" || pdfOutput.FinalURL != "https://arxiv.org/pdf/2609.11111" {
+		t.Fatalf("pdf fallback output=%+v", pdfOutput)
 	}
 
 	failing := &arxivAcquirer{}
