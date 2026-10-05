@@ -1022,7 +1022,10 @@ func researchCitationCheckGuidance(check researchCitationCheck) string {
 }
 
 const (
-	sourceCoverageMaxUncited = 8
+	// A source is listed for uncited cards once this many of them go unused.
+	sourceCoverageMinUnusedCards = 3
+	sourceCoverageMaxUnusedList  = 6
+	sourceCoverageMaxUncited     = 8
 	// researchBreadthTarget is the read-source count below which assembly
 	// suggests another discovery round; the executor prompt cites 8-15.
 	researchBreadthTarget  = 8
@@ -1036,10 +1039,22 @@ type researchReadSource struct {
 }
 
 type researchSourceCoverage struct {
-	ReadSources   int                  `json:"read_sources"`
-	CitedSources  int                  `json:"cited_sources"`
-	UncitedSample []researchReadSource `json:"uncited_read_sources,omitempty"`
-	UnreadLeads   []researchReadSource `json:"unread_leads,omitempty"`
+	ReadSources   int                      `json:"read_sources"`
+	CitedSources  int                      `json:"cited_sources"`
+	UncitedSample []researchReadSource     `json:"uncited_read_sources,omitempty"`
+	UnreadLeads   []researchReadSource     `json:"unread_leads,omitempty"`
+	Cards         int                      `json:"usable_cards"`
+	CitedCards    int                      `json:"cited_cards"`
+	UnusedCards   []researchUnusedCardStat `json:"sources_with_uncited_cards,omitempty"`
+}
+
+// researchUnusedCardStat counts one source's usable cards that the report
+// never cites, which usually means its findings were cut, not checked.
+type researchUnusedCardStat struct {
+	URL     string `json:"url"`
+	Title   string `json:"title,omitempty"`
+	Cards   int    `json:"cards"`
+	Uncited int    `json:"uncited"`
 }
 
 type researchReadSourceLister interface {
@@ -1112,6 +1127,7 @@ func (b postgresResearchClaimBackend) ResearchReadSources(ctx context.Context, r
 // Like the number check it only informs revision.
 func checkResearchSourceCoverage(report string, claims []researchClaim, sources []researchReadSource) researchSourceCoverage {
 	cited := map[string]bool{}
+	citedCards := map[string]bool{}
 	byID := make(map[string]researchClaim, len(claims))
 	for _, claim := range claims {
 		byID[claim.ID] = claim
@@ -1119,6 +1135,7 @@ func checkResearchSourceCoverage(report string, claims []researchClaim, sources 
 	for _, match := range researchClaimCitationPattern.FindAllStringSubmatch(report, -1) {
 		for _, id := range citedClaimIDs(match[1]) {
 			if claim, ok := byID[id]; ok {
+				citedCards[id] = true
 				cited[normalizeClaimURL(claim.URL)] = true
 				cited[normalizeClaimURL(claim.Source)] = true
 			}
@@ -1137,6 +1154,38 @@ func checkResearchSourceCoverage(report string, claims []researchClaim, sources 
 			coverage.UncitedSample = append(coverage.UncitedSample, source)
 		}
 	}
+	bySource := map[string]*researchUnusedCardStat{}
+	order := make([]string, 0)
+	for _, claim := range claims {
+		if claim.Status != claimStatusVerified && claim.Status != claimStatusNearMatch {
+			continue
+		}
+		coverage.Cards++
+		if citedCards[claim.ID] {
+			coverage.CitedCards++
+		}
+		url := firstNonEmpty(claim.URL, claim.Source)
+		key := normalizeClaimURL(url)
+		stat, ok := bySource[key]
+		if !ok {
+			stat = &researchUnusedCardStat{URL: url, Title: claim.Title}
+			bySource[key] = stat
+			order = append(order, key)
+		}
+		stat.Cards++
+		if !citedCards[claim.ID] {
+			stat.Uncited++
+		}
+	}
+	for _, key := range order {
+		if stat := bySource[key]; stat.Uncited >= sourceCoverageMinUnusedCards {
+			coverage.UnusedCards = append(coverage.UnusedCards, *stat)
+		}
+	}
+	sort.SliceStable(coverage.UnusedCards, func(i, j int) bool { return coverage.UnusedCards[i].Uncited > coverage.UnusedCards[j].Uncited })
+	if len(coverage.UnusedCards) > sourceCoverageMaxUnusedList {
+		coverage.UnusedCards = coverage.UnusedCards[:sourceCoverageMaxUnusedList]
+	}
 	return coverage
 }
 
@@ -1144,6 +1193,9 @@ func researchSourceCoverageGuidance(coverage researchSourceCoverage) string {
 	parts := make([]string, 0, 2)
 	if coverage.ReadSources > 0 && coverage.CitedSources < coverage.ReadSources {
 		parts = append(parts, fmt.Sprintf("Source coverage: the report cites %d of the %d sources read in this Run. Cite an uncited read source where it supports or qualifies a claim, record a card from it if needed, or leave it out deliberately.", coverage.CitedSources, coverage.ReadSources))
+	}
+	if len(coverage.UnusedCards) > 0 {
+		parts = append(parts, fmt.Sprintf("Card use: the report cites %d of %d usable claim cards; sources_with_uncited_cards lists sources whose verified findings the report leaves out. Plan source lists and reference lists are a starting map, not a limit: use these cards wherever they support, qualify, or contradict a claim. If the Member set a length limit, make room by tightening prose and replacing weaker evidence rather than dropping a source's main findings.", coverage.CitedCards, coverage.Cards))
 	}
 	if coverage.ReadSources < researchBreadthTarget {
 		advice := fmt.Sprintf("Source breadth: only %d sources have been read, while a substantial report usually rests on about %d-15 across several source families. Before Final, consider another round of discovery and parallel reading, especially independent evaluations, critiques, and alternatives, then revise and assemble again.", coverage.ReadSources, researchBreadthTarget)

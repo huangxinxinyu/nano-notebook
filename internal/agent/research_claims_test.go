@@ -357,3 +357,27 @@ func TestChildCardLettersCiteAndRender(t *testing.T) {
 		t.Fatal("claims.md does not tell the model to cite exact ids")
 	}
 }
+
+func TestSourceCoverageListsSourcesWithUncitedCards(t *testing.T) {
+	card := func(id, url, status string) researchClaim {
+		return researchClaim{recordClaimOutput: recordClaimOutput{ID: id, Source: url, URL: url, Title: url, Status: status}}
+	}
+	claims := []researchClaim{
+		card("a1", "https://example.com/core", claimStatusVerified), card("a2", "https://example.com/core", claimStatusVerified),
+		card("b1", "https://example.com/found", claimStatusVerified), card("b2", "https://example.com/found", claimStatusNearMatch),
+		card("b3", "https://example.com/found", claimStatusVerified), card("b4", "https://example.com/found", claimStatusVerified),
+		card("d1", "https://example.com/minor", claimStatusVerified), card("d2", "https://example.com/minor", claimStatusVerified),
+		card("d3", "https://example.com/minor", claimStatusNotFound), card("d4", "https://example.com/minor", claimStatusNotFound),
+	}
+	coverage := checkResearchSourceCoverage("Core result [a1, a2]. One finding [b1].", claims, nil)
+	if coverage.Cards != 8 || coverage.CitedCards != 3 {
+		t.Fatalf("cards=%d cited=%d", coverage.Cards, coverage.CitedCards)
+	}
+	if len(coverage.UnusedCards) != 1 || coverage.UnusedCards[0].URL != "https://example.com/found" || coverage.UnusedCards[0].Cards != 4 || coverage.UnusedCards[0].Uncited != 3 {
+		t.Fatalf("unused=%+v", coverage.UnusedCards)
+	}
+	coverage.ReadSources, coverage.CitedSources = researchBreadthTarget, researchBreadthTarget
+	if guidance := researchSourceCoverageGuidance(coverage); !strings.Contains(guidance, "cites 3 of 8 usable claim cards") || !strings.Contains(guidance, "not a limit") {
+		t.Fatalf("guidance=%q", guidance)
+	}
+}
