@@ -264,3 +264,53 @@ func TestReadURLActionRejectsMutableOrUnsafeInput(t *testing.T) {
 		}
 	}
 }
+
+type arxivAcquirer struct {
+	readable map[string]bool
+	requests []string
+}
+
+func (a *arxivAcquirer) Acquire(_ context.Context, request webreader.Request) (webreader.Content, error) {
+	a.requests = append(a.requests, request.URL)
+	if !a.readable[request.URL] {
+		return webreader.Content{}, errors.New("page has no extractable main content")
+	}
+	return webreader.Content{MediaType: webreader.MediaTypeHTML, Page: webreader.Page{Title: "Self-RAG", FinalURL: request.URL, Content: "Self-RAG trains a single LM to retrieve, generate, and critique.", WordCount: 11}}, nil
+}
+
+func TestReadURLReadsArxivPapersThroughTheirHTMLRendering(t *testing.T) {
+	request := func(url string) ActionRequest {
+		return ActionRequest{Input: json.RawMessage(`{"url":"` + url + `"}`), Definition: agentcatalog.MustParseReference("research.executor@20")}
+	}
+	acquirer := &arxivAcquirer{readable: map[string]bool{"https://ar5iv.labs.arxiv.org/html/2310.11511": true}}
+	action := &readURLAction{sourceFirst: acquirer}
+	result, err := action.Execute(context.Background(), request("https://arxiv.org/abs/2310.11511"))
+	if err != nil || result.Status != ActionSucceeded {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	var output readURLOutput
+	_ = json.Unmarshal(result.Output, &output)
+	if output.FinalURL != "https://ar5iv.labs.arxiv.org/html/2310.11511" || !strings.Contains(output.Markdown, "critique") {
+		t.Fatalf("output=%+v", output)
+	}
+	if want := []string{"https://arxiv.org/html/2310.11511", "https://ar5iv.labs.arxiv.org/html/2310.11511"}; strings.Join(acquirer.requests, " ") != strings.Join(want, " ") {
+		t.Fatalf("requests=%v", acquirer.requests)
+	}
+
+	for url, want := range map[string][]string{
+		"https://arxiv.org/pdf/2510.22344v1":     {"https://arxiv.org/html/2510.22344v1", "https://ar5iv.labs.arxiv.org/html/2510.22344v1", "https://arxiv.org/pdf/2510.22344v1"},
+		"https://arxiv.org/pdf/2510.22344v1.pdf": {"https://arxiv.org/html/2510.22344v1", "https://ar5iv.labs.arxiv.org/html/2510.22344v1", "https://arxiv.org/pdf/2510.22344v1.pdf"},
+		"https://arxiv.org/abs/cs/0112017":       {"https://arxiv.org/html/cs/0112017", "https://ar5iv.labs.arxiv.org/html/cs/0112017", "https://arxiv.org/abs/cs/0112017"},
+		"https://example.com/arxiv.org/abs/1":    {"https://example.com/arxiv.org/abs/1"},
+	} {
+		if got := arxivReadableCandidates(url); strings.Join(got, " ") != strings.Join(want, " ") {
+			t.Fatalf("%s candidates=%v", url, got)
+		}
+	}
+
+	failing := &arxivAcquirer{}
+	result, err = (&readURLAction{sourceFirst: failing}).Execute(context.Background(), request("https://arxiv.org/abs/2310.11511"))
+	if err != nil || result.Status != ActionDomainError || len(failing.requests) != 3 {
+		t.Fatalf("all candidates failing result=%+v requests=%v err=%v", result, failing.requests, err)
+	}
+}

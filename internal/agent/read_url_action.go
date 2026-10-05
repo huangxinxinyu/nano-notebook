@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"regexp"
+	"strings"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
@@ -131,9 +133,7 @@ func (a *readURLAction) executeSourceFirst(ctx context.Context, request ActionRe
 	if a.sourceFirst == nil {
 		return ActionResult{Status: ActionDomainError, ErrorCode: "read_url_unavailable"}, nil
 	}
-	content, err := a.sourceFirst.Acquire(ctx, webreader.Request{
-		URL: input.URL, Format: webreader.FormatMarkdown, MaxChars: ResearchReadURLMaxChars,
-	})
+	content, err := a.acquireReadable(ctx, input.URL)
 	if err != nil {
 		if contextErr := ctx.Err(); contextErr != nil {
 			return ActionResult{}, contextErr
@@ -167,6 +167,38 @@ func (a *readURLAction) executeSourceFirst(ctx context.Context, request ActionRe
 		return ActionResult{}, err
 	}
 	return ActionResult{Status: ActionSucceeded, Output: payload}, nil
+}
+
+// arXiv abstract pages have no extractable main body, and arXiv PDFs need a
+// slow Source import. Their HTML renderings read directly, so an arXiv
+// abstract or PDF URL is read through arxiv.org/html, then ar5iv, before the
+// original URL. The result's requested_url stays the URL the model asked for.
+var arxivPaperURLPattern = regexp.MustCompile(`^https?://(?:www\.|export\.)?arxiv\.org/(?:abs|pdf)/([^?#]+?)(?:\.pdf)?/?(?:[?#].*)?$`)
+
+func arxivReadableCandidates(url string) []string {
+	match := arxivPaperURLPattern.FindStringSubmatch(strings.TrimSpace(url))
+	if match == nil {
+		return []string{url}
+	}
+	id := match[1]
+	return []string{"https://arxiv.org/html/" + id, "https://ar5iv.labs.arxiv.org/html/" + id, url}
+}
+
+func (a *readURLAction) acquireReadable(ctx context.Context, url string) (webreader.Content, error) {
+	var lastErr error
+	for _, candidate := range arxivReadableCandidates(url) {
+		content, err := a.sourceFirst.Acquire(ctx, webreader.Request{
+			URL: candidate, Format: webreader.FormatMarkdown, MaxChars: ResearchReadURLMaxChars,
+		})
+		if err == nil {
+			return content, nil
+		}
+		if ctx.Err() != nil {
+			return webreader.Content{}, err
+		}
+		lastErr = err
+	}
+	return webreader.Content{}, lastErr
 }
 
 func classifyReadURLError(err error) string {
