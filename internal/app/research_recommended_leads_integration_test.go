@@ -101,9 +101,39 @@ func TestScoutCandidatesBecomeRecommendedLeadsAtAssembly(t *testing.T) {
 }
 
 func TestWaitingResearchRootSeesRecommendedUnreadSources(t *testing.T) {
+	output := waitAfterScoutRecommends(t, "nano.default@46", "research.executor@33")
+	if len(output.Recommended) != 2 || output.Recommended[0].URL != "https://arxiv.org/abs/2401.14887" || !strings.Contains(output.Note, "queued") || len(output.AutoReaders) != 0 {
+		t.Fatalf("wait output=%+v", output)
+	}
+}
+
+func TestWaitingResearchRootGetsReadersForTopRecommendedSources(t *testing.T) {
+	output := waitAfterScoutRecommends(t, "nano.default@47", "research.executor@34")
+	names := map[string]bool{}
+	for _, reader := range output.AutoReaders {
+		names[reader.TaskName] = true
+	}
+	if len(output.AutoReaders) != 2 || !names["Read: The Power of Noise (critique)"] || !names["Read: IRCoT"] || len(output.Recommended) != 0 {
+		t.Fatalf("wait output=%+v", output)
+	}
+}
+
+type recommendedWaitOutput struct {
+	Recommended []struct {
+		URL string `json:"url"`
+	} `json:"recommended_unread"`
+	Note        string `json:"reading_note"`
+	AutoReaders []struct {
+		AgentID  string `json:"agent_id"`
+		TaskName string `json:"task_name"`
+	} `json:"auto_dispatched_readers"`
+}
+
+func waitAfterScoutRecommends(t *testing.T, release, executor string) recommendedWaitOutput {
+	t.Helper()
 	api := newTestAPI(t)
 	ctx := context.Background()
-	parent, _, _, _ := admitResearchExecutionForRelease(t, api, "wait-reading@example.com", "nano.default@46")
+	parent, _, _, _ := admitResearchExecutionForRelease(t, api, "wait-reading@example.com", release)
 	runtime, err := agent.NewResearchRuntime(api.db.Pool(), promptcatalog.MustLoadEmbedded())
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +161,7 @@ func TestWaitingResearchRootSeesRecommendedUnreadSources(t *testing.T) {
 	if err := runtime.PublishFinal(ctx, attemptFromClaim(scout), draft); err != nil {
 		t.Fatal(err)
 	}
-	definition, _ := agentcatalog.MustLoadEmbedded().ResolveDefinition(agentcatalog.MustParseReference("research.executor@33"))
+	definition, _ := agentcatalog.MustLoadEmbedded().ResolveDefinition(agentcatalog.MustParseReference(executor))
 	wait := agent.NewRuntimeSubagentToolRegistrations(api.db.Pool())
 	var waitAction agent.Action
 	for _, registration := range wait {
@@ -145,14 +175,9 @@ func TestWaitingResearchRootSeesRecommendedUnreadSources(t *testing.T) {
 	if err != nil || result.Status != agent.ActionSucceeded {
 		t.Fatalf("wait=%+v err=%v", result, err)
 	}
-	var output struct {
-		Recommended []struct {
-			URL string `json:"url"`
-		} `json:"recommended_unread"`
-		Note string `json:"reading_note"`
-	}
-	if err := json.Unmarshal(result.Output, &output); err != nil || len(output.Recommended) != 2 ||
-		output.Recommended[0].URL != "https://arxiv.org/abs/2401.14887" || !strings.Contains(output.Note, "queued") {
+	var output recommendedWaitOutput
+	if err := json.Unmarshal(result.Output, &output); err != nil {
 		t.Fatalf("wait output=%s err=%v", result.Output, err)
 	}
+	return output
 }

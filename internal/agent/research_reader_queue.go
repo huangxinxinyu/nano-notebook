@@ -118,7 +118,8 @@ func dispatchQueuedResearchReadsInTx(ctx context.Context, tx pgx.Tx, request Act
 func loadResearchAutoReadersInTx(ctx context.Context, tx pgx.Tx, rootRunID string) ([]researchAutoReader, error) {
 	rows, err := tx.Query(ctx, `select s.child_run_id,s.task_name,child.status from agent_subagents s
 		join agent_runs child on child.id=s.child_run_id
-		where s.parent_run_id=$1 and s.action_id like 'reader:%' order by s.created_at,s.child_run_id`, rootRunID)
+		where s.parent_run_id=$1 and (s.action_id like 'reader:%' or s.action_id like 'recommended:%')
+		order by s.created_at,s.child_run_id`, rootRunID)
 	if err != nil {
 		return nil, err
 	}
@@ -142,6 +143,9 @@ func waitAgentResearchQueue(ctx context.Context, tx pgx.Tx, request ActionReques
 		return nil, nil
 	}
 	if err := dispatchQueuedResearchReadsInTx(ctx, tx, request); err != nil {
+		return nil, err
+	}
+	if err := dispatchRecommendedResearchReadsInTx(ctx, tx, request); err != nil {
 		return nil, err
 	}
 	return loadResearchAutoReadersInTx(ctx, tx, request.Attempt.RunID)
@@ -183,15 +187,79 @@ func waitAgentRecommendedReading(ctx context.Context, tx pgx.Tx, request ActionR
 	if request.Definition.Identity != "research.executor" || request.Definition.Version < researchWaitReadingVersion {
 		return nil, nil
 	}
-	leads, err := loadResearchUnreadLeads(ctx, tx, request.Attempt.RunID, researchWaitRecommendedMax)
+	leads, err := loadResearchUnreadLeads(ctx, tx, request.Attempt.RunID, researchWaitRecommendedMax*2)
 	if err != nil {
 		return nil, err
 	}
-	recommended := leads[:0]
+	reading, err := researchReaderDocumentKeysInTx(ctx, tx, request.Attempt.RunID)
+	if err != nil {
+		return nil, err
+	}
+	recommended := make([]researchReadSource, 0, researchWaitRecommendedMax)
 	for _, lead := range leads {
-		if lead.Recommended {
+		if lead.Recommended && !reading[researchDocumentKey(lead.URL)] && len(recommended) < researchWaitRecommendedMax {
 			recommended = append(recommended, lead)
 		}
 	}
 	return recommended, nil
+}
+
+// From executor v34 the runtime itself starts readers for the top
+// recommended unread sources when a waiting root leaves reader slots free:
+// in ds7 the root ignored ten recommended sources once it had read its first
+// wave. At most researchRecommendedReadMax such readers run per Run, keyed
+// recommended:<n>, so the extra reading has a fixed cost.
+const (
+	researchRecommendedReadVersion = 34
+	researchRecommendedReadMax     = 4
+)
+
+func dispatchRecommendedResearchReadsInTx(ctx context.Context, tx pgx.Tx, request ActionRequest) error {
+	if request.Definition.Version < researchRecommendedReadVersion {
+		return nil
+	}
+	var started int
+	if err := tx.QueryRow(ctx, `select count(*) from agent_subagents where parent_run_id=$1 and action_id like 'recommended:%'`, request.Attempt.RunID).Scan(&started); err != nil {
+		return err
+	}
+	if started >= researchRecommendedReadMax {
+		return nil
+	}
+	active, total, err := countRuntimeSubagentsInTx(ctx, tx, request.Attempt.RunID)
+	if err != nil {
+		return err
+	}
+	if active >= runtimeSubagentMaxActive || total >= runtimeSubagentMaxTotal {
+		return nil
+	}
+	leads, err := loadResearchUnreadLeads(ctx, tx, request.Attempt.RunID, sourceCoverageMaxRecommendedLeads)
+	if err != nil {
+		return err
+	}
+	reading, err := researchReaderDocumentKeysInTx(ctx, tx, request.Attempt.RunID)
+	if err != nil {
+		return err
+	}
+	for _, lead := range leads {
+		if started >= researchRecommendedReadMax || active >= runtimeSubagentMaxActive || total >= runtimeSubagentMaxTotal {
+			break
+		}
+		key := researchDocumentKey(lead.URL)
+		if !lead.Recommended || reading[key] {
+			continue
+		}
+		reading[key] = true
+		input := researchReaderSpawnInput(lead.URL, lead.Title, request.Definition.Version)
+		raw, err := json.Marshal(input)
+		if err != nil {
+			return err
+		}
+		started++
+		if _, err := createRuntimeSubagentInTx(ctx, tx, request, fmt.Sprintf("recommended:%d", started), input, len(raw)); err != nil {
+			return err
+		}
+		active++
+		total++
+	}
+	return nil
 }
