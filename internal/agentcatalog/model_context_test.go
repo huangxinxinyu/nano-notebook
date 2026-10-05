@@ -224,8 +224,12 @@ func TestEmbeddedDeepSeekResearchPolicyResolvesItsOwnCapability(t *testing.T) {
 		resolved.Capability.InvocationMode != "thinking" || resolved.Budgets.CompactionTriggerTokens != 512_000 {
 		t.Fatalf("context=%+v err=%v", resolved, err)
 	}
-	release, ok := catalog.ResolveRelease(MustParseReference("nano.default@37"))
-	if !ok || release.Roots["research"].String() != "research.executor@24" {
+	release, ok := catalog.ResolveRelease(MustParseReference("nano.default@39"))
+	if !ok || release.Roots["research"].String() != "research.executor@26" {
 		t.Fatalf("release=%+v ok=%v", release, ok)
+	}
+	definition, ok := catalog.ResolveDefinition(MustParseReference("research.executor@26"))
+	if !ok || definition.Limits.Actions != 1000 || definition.Limits.ModelCalls != 600 {
+		t.Fatalf("DeepSeek tree budget=%+v ok=%v", definition.Limits, ok)
 	}
 }

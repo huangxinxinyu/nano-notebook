@@ -19,6 +19,14 @@ import (
 
 const runtimeSubagentInstructions = `You are a runtime subagent working for a parent researcher. Your task is the assigned request below; the accepted plan is background context. Investigate only your assigned part and return a concise result with concrete evidence, source references, uncertainty, and unresolved gaps to your parent. You inherit its research tools, model, skills, and source scope. Your TODO, transcript, context compaction, and workspace files are independent. You cannot create or manage agents. You may use workspace files for your own analysis, but you do not have to assemble or publish a complete report. Return your findings directly as Final when your assigned task is complete. This subagent completion contract takes precedence over instructions to complete the parent's full report.`
 
+// A Research Run reads each long document through its own reader subagent,
+// so the total bounds how many long sources one Run can read; the active
+// limit bounds concurrent provider load.
+const (
+	runtimeSubagentMaxActive = 4
+	runtimeSubagentMaxTotal  = 32
+)
+
 func recordCancelledRuntimeSubagentsInTx(ctx context.Context, tx pgx.Tx, parentID string) error {
 	rows, err := tx.Query(ctx, `select child.id,coalesce(s.cancelled_attempt_no,0)
 		from agent_subagents s join agent_runs child on child.id=s.child_run_id
@@ -279,7 +287,7 @@ func (a *runtimeSubagentAction) spawn(ctx context.Context, tx pgx.Tx, request Ac
 		from agent_subagents s join agent_runs child on child.id=s.child_run_id where s.parent_run_id=$1`, request.Attempt.RunID).Scan(&active, &total); err != nil {
 		return ActionResult{}, err
 	}
-	if active >= 4 || total >= 16 {
+	if active >= runtimeSubagentMaxActive || total >= runtimeSubagentMaxTotal {
 		return ActionResult{Status: ActionDomainError, ErrorCode: "subagent_capacity_exhausted"}, nil
 	}
 	childID, jobID := "run_"+uuid.NewString(), "job_"+uuid.NewString()

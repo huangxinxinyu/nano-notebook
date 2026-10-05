@@ -409,7 +409,7 @@ func (s *Server) startResearch(w http.ResponseWriter, r *http.Request, userID, s
 		}
 		deadline := s.cfg.ResearchDeadline
 		if deadline <= 0 {
-			deadline = 45 * time.Minute
+			deadline = 90 * time.Minute
 		}
 		zone := normalizeBrowserTimeZone(request.TimeZone)
 		manifest, err := json.Marshal(map[string]any{"agent_release": s.researchAgent.Release.String(), "time_zone": zone, "mode": "research", "research_session_id": sessionID, "accepted_plan_version": request.PlanVersion})

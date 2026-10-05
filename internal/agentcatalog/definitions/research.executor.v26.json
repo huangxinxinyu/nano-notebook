@@ -1,0 +1,49 @@
+{
+  "identity": "research.executor",
+  "version": 26,
+  "executor": "research_root",
+  "model_policy": "agent.deep-research-deepseek@1",
+  "prompts": {
+    "executor": "agent.deep-research-executor@10",
+    "archival_compactor": "agent.deep-research-archival-compactor@3",
+    "task_memory_compactor": "agent.deep-research-task-memory-compactor@4",
+    "reporter": "agent.deep-research-reporter@4"
+  },
+  "contracts": {
+    "input": "research.plan-result@1",
+    "result": "research.report-result@1"
+  },
+  "skills": [
+    "skill.research-workflow@2",
+    "skill.source-reading@1"
+  ],
+  "tools": [
+    "assemble_research_report",
+    "inspect_source",
+    "list_agents",
+    "list_research_files",
+    "read_research_file",
+    "read_skill",
+    "read_tool_result",
+    "read_url",
+    "record_claim",
+    "rewrite_todo_list",
+    "run_python",
+    "save_url_as_source",
+    "search_evidence",
+    "spawn_agent",
+    "update_todo_status",
+    "wait_agent",
+    "web_search",
+    "write_research_file"
+  ],
+  "children": [],
+  "limits": {
+    "model_calls": 600,
+    "actions": 1000,
+    "action_batch": 8,
+    "context_bytes": 8388608,
+    "result_bytes": 33554432,
+    "attempts": 5
+  }
+}

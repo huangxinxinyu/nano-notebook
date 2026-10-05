@@ -256,7 +256,7 @@ func ResearchRootExecutorCapability() agentcatalog.ExecutorCapability {
 			"web_search": true, "write_research_file": true,
 		},
 		MaxLimits: agentcatalog.Limits{
-			ModelCalls: 120, Actions: 100, ActionBatch: 8, ContextBytes: 8388608, ResultBytes: 33554432, Attempts: 5,
+			ModelCalls: 600, Actions: 1000, ActionBatch: 8, ContextBytes: 8388608, ResultBytes: 33554432, Attempts: 5,
 		},
 		MemberVisible: true, CanPublish: true,
 	}
