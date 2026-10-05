@@ -732,6 +732,13 @@ func (r *ResearchRuntime) materializeCompletedResearchEvidence(ctx context.Conte
 	if proposal == nil || firstMissingResult(*proposal) >= 0 {
 		return nil
 	}
+	// A cache failure must not fail the Run: the ledger then records the
+	// read from its checkpointed projection alone.
+	if hydrated, err := r.hydrateCompletedProposal(ctx, attempt, *proposal); err == nil {
+		proposal = &hydrated
+	} else if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	tx, err := r.base.workerTx(ctx)
 	if err != nil {
 		return err
@@ -747,6 +754,28 @@ func (r *ResearchRuntime) materializeCompletedResearchEvidence(ctx context.Conte
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+// hydrateCompletedProposal restores externalized Tool Result bodies from the
+// cache, so the Evidence Ledger sees a long page's title and final URL. It
+// runs right after the result is checkpointed, while the cache is fresh.
+func (r *ResearchRuntime) hydrateCompletedProposal(ctx context.Context, attempt Attempt, proposal AcceptedProposal) (AcceptedProposal, error) {
+	if r.toolResults == nil {
+		return proposal, nil
+	}
+	var userID, chatID string
+	if err := r.pool.QueryRow(ctx, `
+		select coalesce(run.user_id,product.user_id),coalesce(run.chat_id,product.chat_id)
+		from agent_runs run
+		left join agent_trees tree on tree.id=run.tree_id
+		left join chat_runs product on product.root_agent_run_id=coalesce(tree.root_agent_run_id,run.id)
+		where run.id=$1
+	`, attempt.RunID).Scan(&userID, &chatID); err != nil {
+		return AcceptedProposal{}, err
+	}
+	return hydrateExternalizedResearchProposal(ctx, *r.toolResults, ToolResultScope{
+		UserID: userID, ChatID: chatID, RunID: attempt.RunID,
+	}, proposal)
 }
 
 func (r *ResearchRuntime) materializeCompletedStep(ctx context.Context, attempt Attempt, decisionNo int) error {
@@ -972,7 +1001,15 @@ func materializeResearchEvidence(ctx context.Context, tx pgx.Tx, sessionID, runI
 		var projection ToolResultProjection
 		if json.Unmarshal(action.Result.Output, &projection) == nil &&
 			(projection.ContentState == ToolResultNotCached || projection.ContentState == ToolResultExternalized) {
-			return nil
+			// The body is no longer retrievable, but the read itself succeeded:
+			// record it so its links stay citable, without title or final URL.
+			_, err := tx.Exec(ctx, `
+				insert into research_evidence_ledger(session_id,url,status,read_run_id,read_action_id,content_sha256,failure_reason)
+				values($1,$2,'read',$3,$4,nullif($5,''),null)
+				on conflict(session_id,url) do update set status='read',read_run_id=excluded.read_run_id,read_action_id=excluded.read_action_id,
+					content_sha256=coalesce(excluded.content_sha256,research_evidence_ledger.content_sha256),failure_reason=null,last_seen_at=now()
+			`, sessionID, input.URL, runID, action.ActionID, projection.SHA256)
+			return err
 		}
 		var output readURLOutput
 		if err := json.Unmarshal(action.Result.Output, &output); err != nil {
