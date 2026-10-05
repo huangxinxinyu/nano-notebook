@@ -224,6 +224,9 @@ const (
 	// researchQueuedReaderVersion is the first executor version whose
 	// capacity excerpts are queued for automatic reader dispatch.
 	researchQueuedReaderVersion = 27
+	// researchQuestionTagVersion is the first executor version whose readers
+	// tag claim cards with plan research questions.
+	researchQuestionTagVersion = 28
 )
 
 // SetResearchReaderSpawner lets a research read_url hand long documents to
@@ -247,7 +250,7 @@ func (a *readURLAction) delegateLongRead(ctx context.Context, request ActionRequ
 		utf8.RuneCountInString(page.Content) < researchDelegatedReadMinRune {
 		return ActionResult{}, false, nil
 	}
-	input, err := json.Marshal(researchReaderSpawnInput(requestedURL, page.Title))
+	input, err := json.Marshal(researchReaderSpawnInput(requestedURL, page.Title, request.Definition.Version))
 	if err != nil {
 		return ActionResult{}, false, err
 	}
@@ -281,8 +284,9 @@ func (a *readURLAction) delegateLongRead(ctx context.Context, request ActionRequ
 }
 
 // researchReaderSpawnInput is the reader task for one long document, shared by
-// immediate delegation and by readers dispatched later from the queue.
-func researchReaderSpawnInput(requestedURL, title string) spawnAgentInput {
+// immediate delegation and by readers dispatched later from the queue. From
+// executor v28 readers also tag each card with its plan research question.
+func researchReaderSpawnInput(requestedURL, title string, definitionVersion int) spawnAgentInput {
 	title = strings.TrimSpace(title)
 	if title == "" {
 		title = requestedURL
@@ -296,6 +300,9 @@ func researchReaderSpawnInput(requestedURL, title string) spawnAgentInput {
 		"For every fact relevant to the accepted Research Plan, such as methods, settings, results and numbers, comparisons, and stated limitations, record a claim card with record_claim using that URL as source and a verbatim quote. "+
 		"A card exists only when record_claim returns its id; naming cards in your Final records nothing. "+
 		"Do not search for or read other sources. Return Final with: what the document is, each recorded card id with the claim it supports, and anything relevant you could not capture.", requestedURL, title)
+	if definitionVersion >= researchQuestionTagVersion {
+		message += " Set question on each card to the number of the plan research question it helps answer, counting from 1, and leave it out only when no question fits."
+	}
 	return spawnAgentInput{Message: message, TaskName: "Read: " + taskName}
 }
 

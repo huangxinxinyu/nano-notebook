@@ -410,3 +410,14 @@ func TestRootResearcherGetsAnExcerptWhenReadersAreBusy(t *testing.T) {
 		t.Fatalf("output outcome=%q runes=%d err=%v", output.Outcome, len([]rune(output.Markdown)), err)
 	}
 }
+
+func TestResearchReaderTaskTagsQuestionsFromExecutorV28(t *testing.T) {
+	before := researchReaderSpawnInput("https://arxiv.org/abs/2601.19827", "Paper", 27)
+	after := researchReaderSpawnInput("https://arxiv.org/abs/2601.19827", "Paper", 28)
+	if strings.Contains(before.Message, "Set question") || !strings.Contains(after.Message, "Set question on each card") {
+		t.Fatalf("v27=%q\nv28=%q", before.Message, after.Message)
+	}
+	if !isResearchReaderTask(after.Message) || after.TaskName != "Read: Paper" || !strings.HasPrefix(after.Message, before.Message) {
+		t.Fatalf("v28 task=%+v", after)
+	}
+}

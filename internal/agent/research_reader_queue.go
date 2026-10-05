@@ -84,7 +84,7 @@ func dispatchQueuedResearchReadsInTx(ctx context.Context, tx pgx.Tx, request Act
 		if active >= runtimeSubagentMaxActive || total >= runtimeSubagentMaxTotal {
 			break
 		}
-		input := researchReaderSpawnInput(item.URL, item.Title)
+		input := researchReaderSpawnInput(item.URL, item.Title, request.Definition.Version)
 		raw, err := json.Marshal(input)
 		if err != nil {
 			return err
