@@ -95,6 +95,9 @@ func (r *ResearchRuntime) publishRuntimeSubagentFinal(ctx context.Context, attem
 	if err := storeConfiguredFinalResult(ctx, tx, attempt.RunID, draft.Text); err != nil {
 		return err
 	}
+	if err := recordResearchReaderLeadsInTx(ctx, tx, attempt.RunID, draft.Text); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `update agent_runs set status='completed',finished_at=now(),updated_at=now() where id=$1`, attempt.RunID); err != nil {
 		return err
 	}

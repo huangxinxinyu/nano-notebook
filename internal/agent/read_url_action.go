@@ -303,6 +303,9 @@ func researchReaderSpawnInput(requestedURL, title string, definitionVersion int)
 	if definitionVersion >= researchQuestionTagVersion {
 		message += " Set question on each card to the number of the plan research question it helps answer, counting from 1, and leave it out only when no question fits."
 	}
+	if definitionVersion >= researchReaderLeadsVersion {
+		message += researchReaderLeadsInstruction
+	}
 	return spawnAgentInput{Message: message, TaskName: "Read: " + taskName}
 }
 
