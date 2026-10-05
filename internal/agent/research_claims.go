@@ -42,12 +42,12 @@ const (
 )
 
 var (
-	// Root cards are c1, c2, ...; each subagent's cards take one letter in
-	// spawn order (a1, b2, ...). Earlier runs used hex namespaces (16d1-c3).
-	researchClaimIDPattern = regexp.MustCompile(`^(?:(?:[0-9a-f]{4}-)?c|[abd-q])[1-9][0-9]*$`)
+	// Root cards are c1, c2, ...; each subagent's cards take a letter
+	// namespace in spawn order (a1, b2, ..., aa3). Earlier runs used hex namespaces (16d1-c3).
+	researchClaimIDPattern = regexp.MustCompile(`^(?:(?:[0-9a-f]{4}-)?c|[abd-z]{1,2})[1-9][0-9]*$`)
 	// Citations also accept the variants models write for hex child ids, such
 	// as c16d1-c3 or 16d1c3 for 16d1-c3; canonicalClaimID maps them back.
-	researchClaimCitationPattern = regexp.MustCompile(`\[((?:[abd-q][1-9][0-9]*|(?:c?[0-9a-f]{4}-?)?c[1-9][0-9]*)(?:\s*[,，;；、]\s*(?:[abd-q][1-9][0-9]*|(?:c?[0-9a-f]{4}-?)?c[1-9][0-9]*))*)\]`)
+	researchClaimCitationPattern = regexp.MustCompile(`\[((?:[abd-z]{1,2}[1-9][0-9]*|(?:c?[0-9a-f]{4}-?)?c[1-9][0-9]*)(?:\s*[,，;；、]\s*(?:[abd-z]{1,2}[1-9][0-9]*|(?:c?[0-9a-f]{4}-?)?c[1-9][0-9]*))*)\]`)
 	childClaimIDVariantPattern   = regexp.MustCompile(`^c?([0-9a-f]{4})-?c([1-9][0-9]*)$`)
 	researchClaimIDSplitPattern  = regexp.MustCompile(`\s*[,，;；、]\s*`)
 	claimMarkdownLinkURLPattern  = regexp.MustCompile(`\]\([^)\s]*\)`)
@@ -226,15 +226,22 @@ func researchClaimNamespacedID(namespace string, ordinal int) string {
 	return namespace + strconv.Itoa(ordinal)
 }
 
-// researchChildClaimLetters names up to 16 subagents in spawn order; c is
-// reserved for the root's cards.
-const researchChildClaimLetters = "abdefghijklmnopq"
+// researchChildClaimLetters names subagents in spawn order, one letter for the
+// first 25 and two letters (aa, ab, ...) after them; c is reserved for the
+// root's cards.
+const researchChildClaimLetters = "abdefghijklmnopqrstuvwxyz"
 
 func researchClaimNamespace(childIndex int) string {
-	if childIndex < 0 || childIndex >= len(researchChildClaimLetters) {
+	letters := len(researchChildClaimLetters)
+	switch {
+	case childIndex < 0 || childIndex >= letters*(letters+1):
 		return ""
+	case childIndex < letters:
+		return researchChildClaimLetters[childIndex : childIndex+1]
+	default:
+		first, second := childIndex/letters-1, childIndex%letters
+		return researchChildClaimLetters[first:first+1] + researchChildClaimLetters[second:second+1]
 	}
-	return researchChildClaimLetters[childIndex : childIndex+1]
 }
 
 func (a *recordClaimAction) resolveSource(ctx context.Context, request ActionRequest, tree researchClaimTree, source string) (researchClaimSourceText, bool, error) {

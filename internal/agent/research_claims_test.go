@@ -328,12 +328,26 @@ func TestCitationsResolveModelVariantsOfChildCardIDs(t *testing.T) {
 }
 
 func TestChildCardLettersCiteAndRender(t *testing.T) {
-	if researchClaimNamespace(0) != "a" || researchClaimNamespace(2) != "d" || researchClaimNamespace(15) != "q" || researchClaimNamespace(16) != "" {
-		t.Fatal("child letters skip c and cover 16 subagents")
+	for index, want := range map[int]string{0: "a", 2: "d", 15: "q", 24: "z", 25: "aa", 26: "ab", 31: "ah", 49: "az", 50: "ba"} {
+		if got := researchClaimNamespace(index); got != want {
+			t.Fatalf("namespace(%d)=%q, want %q", index, got, want)
+		}
+	}
+	seen := map[string]bool{"c": true}
+	for index := 0; index < runtimeSubagentMaxTotal; index++ {
+		namespace := researchClaimNamespace(index)
+		if seen[namespace] || !researchClaimIDPattern.MatchString(namespace+"1") {
+			t.Fatalf("namespace %d=%q collides or is not a card id", index, namespace)
+		}
+		seen[namespace] = true
 	}
 	claims := []researchClaim{
 		{recordClaimOutput: recordClaimOutput{ID: "a2", URL: "https://arxiv.org/html/2606.13905"}},
 		{recordClaimOutput: recordClaimOutput{ID: "c1", URL: "https://example.com/root"}},
+	}
+	claims = append(claims, researchClaim{recordClaimOutput: recordClaimOutput{ID: "ab4", URL: "https://example.com/late"}})
+	if late, _ := renderResearchClaimCitations("Late reader [ab4].", claims); late != "Late reader [1](https://example.com/late)." {
+		t.Fatalf("two-letter card rendered %q", late)
 	}
 	rendered, stats := renderResearchClaimCitations("ADORE grades relevance [a2]. Both [a2, c1].", claims)
 	if rendered != "ADORE grades relevance [1](https://arxiv.org/html/2606.13905). Both [1](https://arxiv.org/html/2606.13905)[2](https://example.com/root)." || stats.Cited != 3 {
