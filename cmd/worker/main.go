@@ -558,9 +558,10 @@ func main() {
 		}
 	}
 	runPythonTool := agent.NewResearchRunPythonAction(codeRunner, db.Pool(), workspaceObjects)
+	recordClaimTool := agent.NewRecordClaimAction(db.Pool(), &toolResultReader)
 	registryTools := []agent.Action{
 		calculateTool, currentTimeTool, discoverSourcesTool, rewriteTodoListTool, inspectSourceTool, searchEvidenceTool, updateTodoStatusTool,
-		webSearchTool, readSkillTool, readToolResultTool, readURLTool, readDocumentPagesTool, saveURLAsSourceTool, runPythonTool,
+		webSearchTool, readSkillTool, readToolResultTool, readURLTool, readDocumentPagesTool, saveURLAsSourceTool, runPythonTool, recordClaimTool,
 	}
 	registryTools = append(registryTools, workspaceTools...)
 	runtimeSubagentTools := agent.NewRuntimeSubagentToolRegistrations(db.Pool(), traceSink)
@@ -587,6 +588,7 @@ func main() {
 		agent.MCPToolRegistration{Action: readDocumentPagesTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: saveURLAsSourceTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: runPythonTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: recordClaimTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 	}
 	for _, workspaceTool := range workspaceTools {
 		scheduling := agentcatalog.ToolParallel

@@ -198,16 +198,21 @@ func decodeWriteResearchFileInput(raw json.RawMessage) (writeResearchFileInput, 
 }
 
 type readResearchFileAction struct {
-	store objectstore.Store
-	index researchWorkspaceIndex
+	store  objectstore.Store
+	index  researchWorkspaceIndex
+	claims researchClaimsReader
 }
 
 type readResearchFileInput struct {
 	Path string `json:"path"`
 }
 
-func newReadResearchFileAction(store objectstore.Store, index researchWorkspaceIndex) Action {
-	return &readResearchFileAction{store: store, index: index}
+func newReadResearchFileAction(store objectstore.Store, index researchWorkspaceIndex, claims ...researchClaimsReader) Action {
+	action := &readResearchFileAction{store: store, index: index}
+	if len(claims) > 0 {
+		action.claims = claims[0]
+	}
+	return action
 }
 
 func (*readResearchFileAction) CrashReplaySafe() bool { return true }
@@ -219,7 +224,7 @@ func (a *readResearchFileAction) Available(Execution) (bool, string) {
 func (*readResearchFileAction) Definition() models.ActionDefinition {
 	return models.ActionDefinition{
 		Name:        "read_research_file",
-		Description: "Read the latest checkpoint-accepted version of one logical Markdown or data file from this Research Run's MinIO workspace.",
+		Description: "Read the latest checkpoint-accepted version of one logical Markdown or data file from this Research Run's MinIO workspace. claims.md always lists every recorded claim card.",
 		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string","minLength":1,"maxLength":96}}}`),
 	}
 }
@@ -236,6 +241,18 @@ func (a *readResearchFileAction) Execute(ctx context.Context, request ActionRequ
 	}
 	if a == nil || a.store == nil || a.index == nil {
 		return ActionResult{Status: ActionDomainError, ErrorCode: "research_workspace_unavailable"}, nil
+	}
+	if input.Path == researchClaimsPath && a.claims != nil {
+		content, err := a.claims.ClaimsMarkdown(ctx, request.Attempt.RunID)
+		if err != nil {
+			return ActionResult{}, err
+		}
+		digest := sha256.Sum256([]byte(content))
+		output, err := json.Marshal(researchWorkspaceReadOutput{Path: researchClaimsPath, Content: content, SHA256: hex.EncodeToString(digest[:]), Bytes: int64(len(content))})
+		if err != nil {
+			return ActionResult{}, err
+		}
+		return ActionResult{Status: ActionSucceeded, Output: output}, nil
 	}
 	snapshot, err := a.index.Snapshot(ctx, request.Attempt.RunID)
 	if err != nil {
@@ -261,7 +278,7 @@ func (a *readResearchFileAction) Execute(ctx context.Context, request ActionRequ
 
 func decodeReadResearchFileInput(raw json.RawMessage) (readResearchFileInput, error) {
 	var input readResearchFileInput
-	if decodeExactJSON(raw, &input) != nil || validateResearchWorkspacePath(input.Path, true) != nil {
+	if decodeExactJSON(raw, &input) != nil || (input.Path != researchClaimsPath && validateResearchWorkspacePath(input.Path, true) != nil) {
 		return readResearchFileInput{}, errors.New("invalid read_research_file input")
 	}
 	return input, nil
@@ -536,7 +553,7 @@ func NewResearchWorkspaceActions(pool *pgxpool.Pool, store objectstore.Store) ([
 	index := postgresResearchWorkspaceIndex{pool: pool}
 	return []Action{
 		newWriteResearchFileAction(store),
-		newReadResearchFileAction(store, index),
+		newReadResearchFileAction(store, index, postgresResearchClaimBackend{pool: pool}),
 		newListResearchFilesAction(index),
 		newAssembleResearchReportAction(store, index, postgresResearchSourceImportBarrier{pool: pool}),
 	}, nil

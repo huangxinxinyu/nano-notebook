@@ -384,6 +384,13 @@ func (r *ResearchRuntime) PrepareFinal(ctx context.Context, _ Attempt, execution
 	if ok {
 		draft.Text = assembled
 	}
+	if researchClaimCitationPattern.MatchString(draft.Text) {
+		tree, err := postgresResearchClaimBackend{pool: r.pool}.ClaimTree(ctx, execution.RunID)
+		if err != nil {
+			return models.FinalDraft{}, err
+		}
+		draft.Text, _ = renderResearchClaimCitations(draft.Text, collectResearchClaims(tree))
+	}
 	var total, discoveredOnly, read, failed int
 	if err := r.pool.QueryRow(ctx, `
 		select count(*),

@@ -168,6 +168,7 @@ func NanoToolCapabilities() map[string]agentcatalog.ToolCapability {
 		"read_document_pages":      {Scheduling: agentcatalog.ToolParallel},
 		"read_skill":               {Scheduling: agentcatalog.ToolParallel},
 		"read_url":                 {Scheduling: agentcatalog.ToolParallel},
+		"record_claim":             {Scheduling: agentcatalog.ToolParallel},
 		"save_url_as_source":       {Scheduling: agentcatalog.ToolOrderedSync},
 		"rewrite_todo_list":        {Scheduling: agentcatalog.ToolOrderedSync},
 		"run_python":               {Scheduling: agentcatalog.ToolOrderedSync},
