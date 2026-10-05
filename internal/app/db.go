@@ -1436,6 +1436,9 @@ alter table research_evidence_ledger add column if not exists document_handle te
 	check (document_handle is null or document_handle ~ '^rdoc_[0-9a-f]{32}$');
 alter table research_evidence_ledger add column if not exists failure_reason text
 	check (failure_reason is null or char_length(failure_reason) between 1 and 64);
+-- A scout or reader recommended this URL; unread recommended leads rank
+-- ahead of plain search candidates.
+alter table research_evidence_ledger add column if not exists recommended_at timestamptz;
 
 create table if not exists research_step_capsules (
 	session_id text not null references research_sessions(id) on delete cascade,

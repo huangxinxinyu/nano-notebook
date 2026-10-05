@@ -1061,12 +1061,16 @@ const (
 	researchBreadthTarget          = 8
 	researchQuestionBreadthVersion = 31
 	sourceCoverageMaxLeads         = 6
+	// sourceCoverageMaxRecommendedLeads lists enough recommended leads for a
+	// second reading round.
+	sourceCoverageMaxRecommendedLeads = 10
 )
 
 type researchReadSource struct {
-	URL      string `json:"url"`
-	FinalURL string `json:"-"`
-	Title    string `json:"title,omitempty"`
+	URL         string `json:"url"`
+	FinalURL    string `json:"-"`
+	Title       string `json:"title,omitempty"`
+	Recommended bool   `json:"recommended,omitempty"`
 }
 
 type researchSourceCoverage struct {
@@ -1093,8 +1097,8 @@ type researchReadSourceLister interface {
 	ResearchUnreadLeads(ctx context.Context, runID string, limit int) ([]researchReadSource, error)
 }
 
-// ResearchUnreadLeads lists discovered but never read or failed URLs in the
-// order search first surfaced them.
+// ResearchUnreadLeads lists discovered but never read or failed URLs: those a
+// scout or reader recommended first, then in the order search surfaced them.
 func (b postgresResearchClaimBackend) ResearchUnreadLeads(ctx context.Context, runID string, limit int) ([]researchReadSource, error) {
 	tx, err := b.workerTx(ctx)
 	if err != nil {
@@ -1102,11 +1106,11 @@ func (b postgresResearchClaimBackend) ResearchUnreadLeads(ctx context.Context, r
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	rows, err := tx.Query(ctx, `
-		select ledger.url,ledger.title
+		select ledger.url,ledger.title,ledger.recommended_at is not null
 		from research_evidence_ledger ledger
 		join research_sessions session on session.id=ledger.session_id
 		where session.execution_run_id=nano_research_root_run($1) and ledger.status='discovered'
-		order by ledger.first_seen_at,ledger.url
+		order by ledger.recommended_at nulls last,ledger.first_seen_at,ledger.url
 		limit $2
 	`, runID, limit)
 	if err != nil {
@@ -1116,7 +1120,7 @@ func (b postgresResearchClaimBackend) ResearchUnreadLeads(ctx context.Context, r
 	leads := make([]researchReadSource, 0, limit)
 	for rows.Next() {
 		var lead researchReadSource
-		if err := rows.Scan(&lead.URL, &lead.Title); err != nil {
+		if err := rows.Scan(&lead.URL, &lead.Title, &lead.Recommended); err != nil {
 			return nil, err
 		}
 		leads = append(leads, lead)

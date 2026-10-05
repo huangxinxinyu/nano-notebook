@@ -470,7 +470,11 @@ func (a *assembleResearchReportAction) Execute(ctx context.Context, request Acti
 			measured := checkResearchSourceCoverage(report, claims, sources)
 			countBreadth = request.Definition.Identity != "research.executor" || request.Definition.Version < researchQuestionBreadthVersion
 			if !countBreadth || measured.ReadSources < researchBreadthTarget {
-				if measured.UnreadLeads, err = a.sources.ResearchUnreadLeads(ctx, request.Attempt.RunID, sourceCoverageMaxLeads); err != nil {
+				limit := sourceCoverageMaxLeads
+				if !countBreadth && request.Definition.Version >= researchRecommendedLeadsVersion {
+					limit = sourceCoverageMaxRecommendedLeads
+				}
+				if measured.UnreadLeads, err = a.sources.ResearchUnreadLeads(ctx, request.Attempt.RunID, limit); err != nil {
 					return ActionResult{}, err
 				}
 			}
@@ -492,6 +496,11 @@ func (a *assembleResearchReportAction) Execute(ctx context.Context, request Acti
 						guidance += " Unread leads already discovered are listed in source_coverage.unread_leads."
 					}
 				}
+			}
+		}
+		if coverage != nil && request.Definition.Identity == "research.executor" && request.Definition.Version >= researchRecommendedLeadsVersion {
+			if advice := researchRecommendedLeadsGuidance(coverage.UnreadLeads); advice != "" {
+				guidance += " " + advice
 			}
 		}
 	}

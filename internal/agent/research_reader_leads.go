@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -20,6 +21,7 @@ const (
 	// From executor v32 scouts' ranked candidates become recommended leads
 	// too, and assembly always lists unread recommended leads.
 	researchRecommendedLeadsVersion = 32
+	researchScoutMaxCandidates      = 30
 	researchReaderMaxLeads          = 8
 	researchReaderLeadTitle         = 300
 )
@@ -28,7 +30,7 @@ var (
 	researchLeadsHeadingPattern = regexp.MustCompile(`(?im)^[ \t#*_]*(?:leads|线索)[ \t*_]*[:：]?[ \t*_]*$`)
 	researchLeadArxivPattern    = regexp.MustCompile(`(?i)(?:arxiv[:./\s]*(?:abs/|pdf/|html/)?)?\b(\d{4}\.\d{4,5})(?:v\d+)?\b`)
 	researchLeadURLPattern      = regexp.MustCompile(`https?://[^\s<>()\[\]"'，。；]+`)
-	researchLeadMarkerPattern   = regexp.MustCompile(`^\s*(?:[-*+•]|\d+[.)、])\s*`)
+	researchLeadMarkerPattern   = regexp.MustCompile(`^\s*(?:[-*+•]|\d+[.)、]?)\s+`)
 )
 
 type researchReaderLead struct {
@@ -45,12 +47,22 @@ func parseResearchReaderLeads(final string) []researchReaderLead {
 	if location == nil {
 		return nil
 	}
+	return parseResearchLeadLines(final[location[1]:], true, researchReaderMaxLeads)
+}
+
+// parseResearchScoutCandidates reads a scout's ranked candidates: every line
+// of its Final that names an arXiv id or URL, in the scout's order.
+func parseResearchScoutCandidates(final string) []researchReaderLead {
+	return parseResearchLeadLines(final, false, researchScoutMaxCandidates)
+}
+
+func parseResearchLeadLines(text string, stopAtHeading bool, limit int) []researchReaderLead {
 	leads := make([]researchReaderLead, 0)
 	seen := map[string]bool{}
-	for _, line := range strings.Split(final[location[1]:], "\n") {
+	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
-			if strings.HasPrefix(line, "#") && len(leads) > 0 {
+			if stopAtHeading && strings.HasPrefix(line, "#") && len(leads) > 0 {
 				break
 			}
 			continue
@@ -59,27 +71,29 @@ func parseResearchReaderLeads(final string) []researchReaderLead {
 		if match := researchLeadArxivPattern.FindStringSubmatch(line); match != nil {
 			url = "https://arxiv.org/abs/" + match[1]
 		} else if match := researchLeadURLPattern.FindString(line); match != "" {
-			url = strings.TrimRight(match, ".,;:")
+			url = strings.TrimRight(match, ".,;:|*")
 		}
 		if url == "" || seen[url] {
 			continue
 		}
 		seen[url] = true
-		title := strings.TrimSpace(researchLeadMarkerPattern.ReplaceAllString(line, ""))
+		title := researchLeadURLPattern.ReplaceAllString(strings.ReplaceAll(line, "|", " "), " ")
+		title = strings.Join(strings.Fields(researchLeadMarkerPattern.ReplaceAllString(title, "")), " ")
 		if utf8.RuneCountInString(title) > researchReaderLeadTitle {
 			title = string([]rune(title)[:researchReaderLeadTitle]) + "…"
 		}
 		leads = append(leads, researchReaderLead{URL: url, Title: title})
-		if len(leads) == researchReaderMaxLeads {
+		if len(leads) == limit {
 			break
 		}
 	}
 	return leads
 }
 
-// recordResearchReaderLeadsInTx stores a completed reader's leads in the
-// Research Session's ledger. A lead never downgrades a read or failed URL.
-func recordResearchReaderLeadsInTx(ctx context.Context, tx pgx.Tx, runID, final string) error {
+// recordResearchSubagentLeadsInTx stores the sources a completed reader or
+// scout recommends as recommended unread leads in the Research Session's
+// ledger. A lead never downgrades a read or failed URL.
+func recordResearchSubagentLeadsInTx(ctx context.Context, tx pgx.Tx, runID, final string) error {
 	var version int
 	var task string
 	err := tx.QueryRow(ctx, `select run.definition_version,s.message from agent_runs run
@@ -91,19 +105,41 @@ func recordResearchReaderLeadsInTx(ctx context.Context, tx pgx.Tx, runID, final 
 	if err != nil {
 		return err
 	}
-	if version < researchReaderLeadsVersion || !isResearchReaderTask(task) {
-		return nil
+	var leads []researchReaderLead
+	switch {
+	case isResearchReaderTask(task) && version >= researchReaderLeadsVersion:
+		leads = parseResearchReaderLeads(final)
+	case strings.HasPrefix(task, researchScoutTaskPrefix) && version >= researchRecommendedLeadsVersion:
+		leads = parseResearchScoutCandidates(final)
 	}
-	for _, lead := range parseResearchReaderLeads(final) {
+	// Each lead's recommendation time carries its rank, so the unread list
+	// keeps the order the scout or reader gave.
+	for rank, lead := range leads {
 		if _, err := tx.Exec(ctx, `
-			insert into research_evidence_ledger(session_id,url,title,status)
-			select session.id,$2,$3,'discovered' from research_sessions session
+			insert into research_evidence_ledger(session_id,url,title,status,recommended_at)
+			select session.id,$2,$3,'discovered',now()+$4*interval '1 millisecond' from research_sessions session
 			where session.execution_run_id=nano_research_root_run($1)
 			on conflict(session_id,url) do update set last_seen_at=now(),
+				recommended_at=coalesce(research_evidence_ledger.recommended_at,excluded.recommended_at),
 				title=case when research_evidence_ledger.title='' then excluded.title else research_evidence_ledger.title end
-		`, runID, lead.URL, lead.Title); err != nil {
+		`, runID, lead.URL, lead.Title, rank); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// researchRecommendedLeadsGuidance asks for a second reading round over the
+// sources scouts and readers recommended but the Run has not read.
+func researchRecommendedLeadsGuidance(leads []researchReadSource) string {
+	recommended := 0
+	for _, lead := range leads {
+		if lead.Recommended {
+			recommended++
+		}
+	}
+	if recommended == 0 {
+		return ""
+	}
+	return fmt.Sprintf("Recommended but unread: %d sources that scouts or readers recommended are still unread (marked recommended in source_coverage.unread_leads). Read those that could change, qualify, or contradict a conclusion, especially independent evaluations, replications, and critiques, then revise and assemble again. Do not describe a source in the report that you have not read.", recommended)
 }
