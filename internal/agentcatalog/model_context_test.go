@@ -194,3 +194,18 @@ func TestModelSelectionResolvesDifferentValidatedContextLimits(t *testing.T) {
 		t.Fatalf("small=%+v large=%+v", small, large)
 	}
 }
+
+func TestEmbeddedDeepResearchV7AllowsSlowThinkingCalls(t *testing.T) {
+	catalog, err := LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, ok := catalog.ResolveModelPolicy(MustParseReference("agent.deep-research-default@7"))
+	if !ok || policy.TimeoutMS != 360_000 || policy.EnableThinking == nil || !*policy.EnableThinking {
+		t.Fatalf("policy=%+v ok=%v", policy, ok)
+	}
+	resolved, err := catalog.ResolveModelContextPolicy(policy.Reference())
+	if err != nil || resolved.Budgets.CompactionTriggerTokens != 512_000 || resolved.Capability.InvocationMode != "thinking" {
+		t.Fatalf("context=%+v err=%v", resolved, err)
+	}
+}

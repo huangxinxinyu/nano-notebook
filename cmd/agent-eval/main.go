@@ -24,7 +24,7 @@ import (
 	"github.com/huangxinxinyu/nano-notebook/internal/websearch"
 )
 
-const defaultAgentRelease = "nano.default@33"
+const defaultAgentRelease = "nano.default@36"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "run" {
