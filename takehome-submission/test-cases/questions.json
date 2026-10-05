@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "knowledge_base": "AtlasDesk",
+  "cases": [
+    {
+      "id": "single-deployment",
+      "category": "single_document",
+      "question": "AtlasDesk 生产环境应如何完成一次安全部署？",
+      "expected_sources": ["03-production-deployment.md"],
+      "required_facts": ["检查备份", "校验镜像签名", "expand 迁移", "连续 3 次健康检查", "30 分钟观察窗口"]
+    },
+    {
+      "id": "single-access-token",
+      "category": "single_document",
+      "question": "当前 Access Token 的默认有效期和签名算法是什么？",
+      "expected_sources": ["05-access-token.md"],
+      "required_facts": ["15 分钟", "RS256"],
+      "forbidden_facts": ["30 分钟"]
+    },
+    {
+      "id": "single-directory-cache",
+      "category": "single_document",
+      "question": "成员目录的正常查询结果和空结果分别缓存多久？",
+      "expected_sources": ["29-directory-search.md"],
+      "required_facts": ["5 分钟", "300 秒", "30 秒"]
+    },
+    {
+      "id": "single-db-pool",
+      "category": "single_document",
+      "question": "API 进程与 Worker 进程的默认数据库连接池上限分别是多少？",
+      "expected_sources": ["13-database.md"],
+      "required_facts": ["API 40", "Worker 20"]
+    },
+    {
+      "id": "single-backup",
+      "category": "single_document",
+      "question": "生产数据库全量备份保留多久，如何证明备份确实可恢复？",
+      "expected_sources": ["15-backup-retention.md"],
+      "required_facts": ["35 天", "恢复演练", "每季度"]
+    },
+    {
+      "id": "cross-authentication",
+      "category": "cross_document",
+      "question": "AtlasDesk 支持哪些用户认证方式？登录成功后令牌如何续期并防止重放？",
+      "expected_sources": ["04-authentication-overview.md", "06-refresh-token.md", "07-oidc-sso.md"],
+      "required_facts": ["本地账号密码", "OIDC", "Authorization Code", "PKCE", "Refresh Token rotation", "token family"]
+    },
+    {
+      "id": "cross-alert-flow",
+      "category": "cross_document",
+      "question": "API 5xx 持续升高时，什么条件会触发严重告警，告警随后如何到达并升级给值班人员？",
+      "expected_sources": ["23-monitoring.md", "24-alerting.md"],
+      "required_facts": ["连续 5 分钟", "超过 2%", "Alertmanager", "PagerDuty", "5 分钟未确认升级"]
+    },
+    {
+      "id": "similar-cache-ttls",
+      "category": "similar_information",
+      "question": "请区分用户资料缓存、成员目录查询缓存、目录空结果缓存和静态资源缓存的 TTL。",
+      "expected_sources": ["11-redis-cache.md", "12-edge-cache.md", "29-directory-search.md"],
+      "required_facts": ["用户资料 20 分钟", "目录查询 5 分钟", "空结果 30 秒", "静态资源 86400 秒"]
+    },
+    {
+      "id": "absent-mobile-offline",
+      "category": "knowledge_absent",
+      "question": "AtlasDesk 移动端离线同步功能计划在哪一天正式上线？",
+      "expected_sources": [],
+      "required_behavior": "明确说明知识库未提供该信息，不猜测日期，不引用无关来源"
+    },
+    {
+      "id": "absent-payroll-encryption",
+      "category": "knowledge_absent",
+      "question": "AtlasDesk 工资系统集成使用哪一种字段级加密协议？",
+      "expected_sources": [],
+      "required_behavior": "明确说明知识库未提供工资系统集成或字段级加密协议信息，不自行补充"
+    }
+  ]
+}
