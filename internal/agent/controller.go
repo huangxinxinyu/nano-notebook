@@ -1066,6 +1066,7 @@ func (c *Controller) handleModelError(ctx context.Context, attempt Attempt, err 
 	if errors.As(err, &modelErr) {
 		code = string(modelErr.Kind)
 		if modelErr.Kind == models.ErrorTimeout || modelErr.Kind == models.ErrorUnavailable {
+			slog.Warn("Agent model call failed; the Attempt will retry", "run_id", attempt.RunID, "attempt", attempt.AttemptNo, "kind", modelErr.Kind, "error", err)
 			return err
 		}
 	}

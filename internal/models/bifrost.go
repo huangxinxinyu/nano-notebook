@@ -308,7 +308,7 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 		if providerContextOverflow(response.StatusCode, responseBody) {
 			return ModelOutcome{}, &ModelError{Kind: ErrorContextOverflow, Err: errors.New("Provider context limit exceeded")}
 		}
-		return ModelOutcome{}, &ModelError{Kind: ErrorUnavailable, Err: fmt.Errorf("Bifrost status %d", response.StatusCode)}
+		return ModelOutcome{}, &ModelError{Kind: ErrorUnavailable, Err: fmt.Errorf("Bifrost status %d: %s", response.StatusCode, providerErrorExcerpt(responseBody))}
 	}
 	var decoded struct {
 		Provider string `json:"provider"`
@@ -421,6 +421,16 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 		return ModelOutcome{ModelDecision: decision, Metadata: metadata}, nil
 	}
 	return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost response has no assistant decision")}
+}
+
+// providerErrorExcerpt keeps the start of a provider error body for logs, so
+// a deterministic rejection such as a content-safety block is diagnosable.
+func providerErrorExcerpt(body []byte) string {
+	text := strings.Join(strings.Fields(string(body)), " ")
+	if runes := []rune(text); len(runes) > 300 {
+		text = string(runes[:300]) + "…"
+	}
+	return text
 }
 
 func providerContextOverflow(statusCode int, body []byte) bool {
