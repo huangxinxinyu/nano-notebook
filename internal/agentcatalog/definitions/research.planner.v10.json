@@ -1,0 +1,30 @@
+{
+  "identity": "research.planner",
+  "version": 10,
+  "executor": "research_planner",
+  "model_policy": "agent.deep-research-default@6",
+  "prompts": {
+    "planner": "agent.deep-research-planner@8"
+  },
+  "contracts": {
+    "input": "research.plan-request@1",
+    "result": "research.plan-result@1"
+  },
+  "skills": [
+    "skill.grill-me@1"
+  ],
+  "tools": [
+    "read_skill",
+    "request_user_input",
+    "web_search"
+  ],
+  "children": [],
+  "limits": {
+    "model_calls": 16,
+    "actions": 12,
+    "action_batch": 3,
+    "context_bytes": 524288,
+    "result_bytes": 131072,
+    "attempts": 3
+  }
+}
