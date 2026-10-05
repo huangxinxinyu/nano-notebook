@@ -1538,3 +1538,37 @@ func (a *recordingAction) Execute(ctx context.Context, request ActionRequest) (A
 	output, _ := json.Marshal(map[string]string{"recorded": input.Value})
 	return ActionResult{Status: ActionSucceeded, Output: output}, nil
 }
+
+type runStarterRuntimeStub struct {
+	*controllerRuntimeStub
+	model  *decisionModelStub
+	starts []int
+	err    error
+}
+
+func (r *runStarterRuntimeStub) StartRun(_ context.Context, attempt Attempt, execution Execution) error {
+	if attempt != execution.Attempt {
+		return errors.New("StartRun received another Attempt")
+	}
+	r.starts = append(r.starts, len(r.model.requests))
+	return r.err
+}
+
+func TestControllerStartsRunBeforeFirstDecision(t *testing.T) {
+	registry, err := NewActionRegistry(&recordingAction{name: "record", order: &[]string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := &decisionModelStub{decisions: []models.ModelDecision{{Final: &models.FinalDraft{Text: "done"}}}}
+	runtime := &runStarterRuntimeStub{controllerRuntimeStub: &controllerRuntimeStub{execution: defaultControllerExecution()}, model: model}
+	if err := NewController(runtime, model, registry).Execute(context.Background(), runtime.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	if len(runtime.starts) != 1 || runtime.starts[0] != 0 {
+		t.Fatalf("starts=%v (model requests before each start)", runtime.starts)
+	}
+	failing := &runStarterRuntimeStub{controllerRuntimeStub: &controllerRuntimeStub{execution: defaultControllerExecution()}, model: &decisionModelStub{}, err: errors.New("scouts unavailable")}
+	if err := NewController(failing, failing.model, registry).Execute(context.Background(), failing.execution.Attempt); err == nil || len(failing.model.requests) != 0 {
+		t.Fatalf("err=%v requests=%d", err, len(failing.model.requests))
+	}
+}

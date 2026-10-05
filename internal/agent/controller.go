@@ -150,6 +150,11 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 	if err != nil {
 		return err
 	}
+	if starter, ok := c.runtime.(RunStarter); ok {
+		if err := starter.StartRun(ctx, attempt, execution); err != nil {
+			return err
+		}
+	}
 	var toolSession *MCPAttemptSession
 	if c.mcpHost != nil {
 		toolSession, err = c.mcpHost.OpenAttempt(ctx, AttemptToolScope{

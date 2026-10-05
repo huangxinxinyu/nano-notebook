@@ -234,6 +234,11 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 	if execution.ParentRunID != "" {
 		system += "\n\n" + runtimeSubagentInstructions
 	}
+	if scouts, err := r.researchScoutsPrompt(ctx, execution); err != nil {
+		return models.ModelRequest{}, err
+	} else if scouts != "" {
+		system += "\n\n" + scouts
+	}
 	if isSourceFirstResearchExecution(execution) {
 		projection, err := r.loadResearchSourceImportProjection(ctx, execution.RunID)
 		if err != nil {

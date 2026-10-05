@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -41,20 +40,7 @@ func (b postgresResearchClaimBackend) ResearchPlanQuestions(ctx context.Context,
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var raw []byte
-	if err := tx.QueryRow(ctx, `
-		select coalesce(plan.plan_json->'research_questions','[]'::jsonb)
-		from research_sessions session
-		join research_plan_versions plan on plan.session_id=session.id and plan.version=session.accepted_plan_version
-		where session.execution_run_id=nano_research_root_run($1)
-	`, runID).Scan(&raw); err != nil {
-		return nil, err
-	}
-	var questions []string
-	if err := json.Unmarshal(raw, &questions); err != nil {
-		return nil, nil
-	}
-	return questions, nil
+	return loadResearchPlanQuestions(ctx, tx, runID)
 }
 
 // checkResearchQuestionCoverage is empty until at least one usable card names
