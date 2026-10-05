@@ -102,16 +102,83 @@ func (r *ResearchPlanningRuntime) BuildDecisionRequest(ctx context.Context, exec
 		system += fmt.Sprintf("\n- %s: %s — %s", reference, skill.Name, skill.Description)
 	}
 	system += "\n\n" + researchPlanningContext(time.Now(), execution.TimeZone)
-	lane, err := ProjectChatLane(ctx, ChatLane{Turns: []ChatLaneTurn{{
-		MessageID: execution.InputMessageID, Content: requestText,
-		Runs: []ChatLaneRun{{RunID: execution.RunID, Prefix: &prefix}},
-	}}}, nil)
+	turns, err := r.planningLaneTurns(ctx, execution, prefix, requestText)
+	if err != nil {
+		return models.ModelRequest{}, err
+	}
+	lane, err := ProjectChatLane(ctx, ChatLane{Turns: turns}, nil)
 	if err != nil {
 		return models.ModelRequest{}, err
 	}
 	request := buildProjectedRequest(execution, system, lane, definitions)
 	request.InvocationPolicy = execution.ModelInvocation
 	return request, nil
+}
+
+// planningLaneTurns projects the whole planning conversation: the original
+// request, then each plan revision turn with the plan version it revises.
+// Every earlier planning Run contributes its full checkpointed transcript.
+func (r *ResearchPlanningRuntime) planningLaneTurns(ctx context.Context, execution Execution, prefix CheckpointPrefix, requestText string) ([]ChatLaneTurn, error) {
+	rows, err := r.pool.Query(ctx, `
+		select turn.turn_no,turn.run_id,turn.input_message_id,message.content,coalesce(plan.version,0),coalesce(plan.plan_json::text,'')
+		from research_planning_turns turn
+		join research_sessions session on session.id=turn.session_id
+		join chat_messages message on message.id=turn.input_message_id
+		left join research_plan_versions plan on plan.session_id=turn.session_id and plan.version=turn.base_plan_version
+		where session.planning_run_id=$1
+		order by turn.turn_no
+	`, execution.RunID)
+	if err != nil {
+		return nil, err
+	}
+	type storedTurn struct {
+		turnNo           int
+		runID, messageID string
+		content          string
+		planVersion      int
+		planJSON         string
+	}
+	stored := make([]storedTurn, 0)
+	for rows.Next() {
+		var turn storedTurn
+		if err := rows.Scan(&turn.turnNo, &turn.runID, &turn.messageID, &turn.content, &turn.planVersion, &turn.planJSON); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		stored = append(stored, turn)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	current := ChatLaneRun{RunID: execution.RunID, Prefix: &prefix}
+	if len(stored) == 0 {
+		return []ChatLaneTurn{{MessageID: execution.InputMessageID, Content: requestText, Runs: []ChatLaneRun{current}}}, nil
+	}
+	turns := make([]ChatLaneTurn, 0, len(stored))
+	for _, turn := range stored {
+		run := current
+		if turn.runID != execution.RunID {
+			checkpoints, err := loadRunCheckpoints(ctx, r.pool, turn.runID)
+			if err != nil {
+				return nil, err
+			}
+			run = ChatLaneRun{RunID: turn.runID, Checkpoints: checkpoints}
+		}
+		turns = append(turns, ChatLaneTurn{MessageID: turn.messageID, Content: planningTurnContent(turn.turnNo, turn.content, turn.planVersion, turn.planJSON), Runs: []ChatLaneRun{run}})
+	}
+	return turns, nil
+}
+
+func planningTurnContent(turnNo int, message string, planVersion int, planJSON string) string {
+	if turnNo == 0 {
+		return message
+	}
+	if planJSON == "" {
+		return "The Member asks to revise the proposed Research Plan:\n" + message
+	}
+	return fmt.Sprintf("The Member asks to revise Research Plan version %d. The current plan, including any edits the Member made directly, is:\n%s\n\nRevision request:\n%s\n\nRevise the plan. Ask with request_user_input only if the request leaves a consequential decision open; otherwise return the complete revised plan.", planVersion, planJSON, message)
 }
 
 func researchPlanningContext(now time.Time, timeZone string) string {
@@ -185,7 +252,7 @@ func (r *ResearchPlanningRuntime) PublishFinal(ctx context.Context, attempt Atte
 	}
 	if _, err := tx.Exec(ctx, `
 		insert into research_plan_versions(session_id,version,plan_json,producer_run_id,created_by)
-		values($1,1,$2::jsonb,$3,'model')
+		values($1,(select coalesce(max(version),0)+1 from research_plan_versions where session_id=$1),$2::jsonb,$3,'model')
 	`, sessionID, string(plan), attempt.RunID); err != nil {
 		return err
 	}

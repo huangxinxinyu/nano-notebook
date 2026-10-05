@@ -8,7 +8,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/huangxinxinyu/nano-notebook/internal/agent"
+	"github.com/huangxinxinyu/nano-notebook/internal/chat"
 	"github.com/huangxinxinyu/nano-notebook/internal/jobs"
 	"github.com/jackc/pgx/v5"
 )
@@ -69,6 +71,10 @@ func (s *Server) researchSessionByID(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(parts) == 2 && parts[0] != "" && parts[1] == "answers" && r.Method == http.MethodPost {
 		s.answerResearchQuestions(w, r, user.ID, parts[0])
+		return
+	}
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "revisions" && r.Method == http.MethodPost {
+		s.reviseResearchPlan(w, r, user.ID, parts[0])
 		return
 	}
 	writeError(w, r, http.StatusMethodNotAllowed, "method_not_allowed", "error.method_not_allowed")
@@ -178,6 +184,120 @@ func (s *Server) answerResearchQuestions(w http.ResponseWriter, r *http.Request,
 		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
 	default:
 		writeJSON(w, http.StatusAccepted, map[string]any{"session_id": sessionID, "status": "planning"})
+	}
+}
+
+// reviseResearchPlan admits a plan revision message as a new planning turn
+// that continues the session's planning conversation.
+func (s *Server) reviseResearchPlan(w http.ResponseWriter, r *http.Request, userID, sessionID string) {
+	if !validCSRF(r) {
+		writeError(w, r, http.StatusForbidden, "csrf_required", "error.csrf_required")
+		return
+	}
+	if s.researchPlanner == nil {
+		writeError(w, r, http.StatusConflict, "research_mode_unavailable", "error.research_mode_unavailable")
+		return
+	}
+	var request struct {
+		ID       string `json:"id"`
+		Content  string `json:"content"`
+		TimeZone string `json:"time_zone"`
+	}
+	if !readJSON(w, r, &request) {
+		return
+	}
+	if _, err := uuid.Parse(request.ID); err != nil || len(request.ID) != 36 || strings.TrimSpace(request.Content) == "" || len([]rune(request.Content)) > 8000 {
+		writeError(w, r, http.StatusBadRequest, "validation_failed", "error.message_invalid")
+		return
+	}
+	runID, err := newOpaqueID("run")
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	jobID, err := newOpaqueID("job")
+	if err != nil {
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+		return
+	}
+	err = s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(r.Context(), `select pg_advisory_xact_lock(hashtextextended($1,0))`, "admit_agent_run:"+userID); err != nil {
+			return err
+		}
+		var chatID string
+		if err := tx.QueryRow(r.Context(), `select chat_id from research_sessions where id=$1 and user_id=$2`, sessionID, userID).Scan(&chatID); err != nil {
+			return err
+		}
+		chatStore := chat.NewStore(tx)
+		existing, found, err := chatStore.MessageByID(r.Context(), request.ID)
+		if err != nil {
+			return err
+		}
+		if found {
+			if existing.ChatID != chatID || existing.Role != "user" || existing.Content != request.Content {
+				return chat.ErrMessageConflict
+			}
+			return tx.QueryRow(r.Context(), `select run_id from research_planning_turns where session_id=$1 and input_message_id=$2`, sessionID, request.ID).Scan(&runID)
+		}
+		store := agent.NewStore(tx)
+		if _, err := store.ExpireIfOverdueWithMetrics(r.Context(), userID, "", s.taskMetrics); err != nil {
+			return err
+		}
+		if _, active, err := store.ActiveByUser(r.Context(), userID); err != nil {
+			return err
+		} else if active {
+			return agent.ErrActiveRun
+		}
+		sourceIDs, err := chatStore.SelectedSourceIDs(r.Context(), userID, chatID)
+		if err != nil {
+			return err
+		}
+		if err := chatStore.InsertUserMessage(r.Context(), request.ID, chatID, request.Content); err != nil {
+			return err
+		}
+		manifest, err := json.Marshal(map[string]any{
+			"agent_release": s.researchPlanner.Release.String(), "time_zone": normalizeBrowserTimeZone(request.TimeZone),
+			"selected_source_count": len(sourceIDs), "mode": "research", "research_session_id": sessionID,
+		})
+		if err != nil {
+			return err
+		}
+		if err := store.CreateConfiguredResearchPlanningTurnQueued(r.Context(), sessionID, agent.ConfiguredChatAdmission{
+			RunID: runID, UserID: userID, ChatID: chatID, InputMessageID: request.ID,
+			Definition: s.researchPlanner.Definition, ModelPolicy: s.researchPlanner.Policy, ModelContext: s.researchPlanner.Context,
+			DeadlineAt: time.Now().Add(s.cfg.AgentRun.Deadline), ContextManifest: manifest,
+		}); err != nil {
+			return err
+		}
+		if err := store.PinEvidenceSet(r.Context(), runID, userID, sourceIDs); err != nil {
+			return err
+		}
+		if err := jobs.NewStore(tx).CreateAgentRun(r.Context(), jobID, runID); err != nil {
+			return err
+		}
+		if err := agent.StartRunTraceInTx(r.Context(), tx, runID, s.researchPlanner.Policy.ProviderModel, s.researchPlanner.Definition.Reference().String(), nil); err != nil {
+			return err
+		}
+		if err := store.FinalizeConfiguredChatOwnership(r.Context(), runID); err != nil {
+			return err
+		}
+		_, err = tx.Exec(r.Context(), `select pg_notify('nano_agent_jobs',$1)`, jobID)
+		return err
+	})
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		writeError(w, r, http.StatusNotFound, "not_found", "error.research_session_not_found")
+	case errors.Is(err, chat.ErrMessageConflict):
+		writeError(w, r, http.StatusConflict, "message_id_conflict", "error.message_id_conflict")
+	case errors.Is(err, agent.ErrResearchPlanNotRevisable):
+		writeError(w, r, http.StatusConflict, "research_state_conflict", "error.research_state_conflict")
+	case errors.Is(err, agent.ErrActiveRun):
+		writeError(w, r, http.StatusConflict, "active_run_conflict", "error.active_run_conflict")
+	case err != nil:
+		slog.ErrorContext(r.Context(), "Research plan revision failed", "session_id", sessionID, "run_id", runID, "error", err)
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+	default:
+		writeJSON(w, http.StatusAccepted, map[string]any{"session_id": sessionID, "message_id": request.ID, "run_id": runID, "status": "planning"})
 	}
 }
 

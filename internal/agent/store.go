@@ -935,6 +935,57 @@ func (s *Store) CreateConfiguredResearchPlanningQueued(ctx context.Context, sess
 	return nil
 }
 
+// ErrResearchPlanNotRevisable reports a revision request for a session that
+// is not waiting for plan confirmation.
+var ErrResearchPlanNotRevisable = errors.New("Research Plan is not awaiting confirmation")
+
+// CreateConfiguredResearchPlanningTurnQueued admits a plan revision turn: a
+// new planning Run for the same session that continues the planning
+// conversation from the latest plan version.
+func (s *Store) CreateConfiguredResearchPlanningTurnQueued(ctx context.Context, sessionID string, command ConfiguredChatAdmission) error {
+	if strings.TrimSpace(sessionID) == "" || command.Definition.Executor != "research_planner" {
+		return errors.New("invalid configured Research planning turn")
+	}
+	var previousRunID, inputMessageID string
+	if err := s.db.QueryRow(ctx, `
+		select planning_run_id,input_message_id from research_sessions
+		where id=$1 and status='awaiting_confirmation' and planning_run_id is not null
+		for update
+	`, sessionID).Scan(&previousRunID, &inputMessageID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrResearchPlanNotRevisable
+		}
+		return err
+	}
+	if err := s.CreateConfiguredChatQueued(ctx, command); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(ctx, `
+		insert into research_planning_turns(session_id,turn_no,run_id,input_message_id)
+		values($1,0,$2,$3) on conflict(session_id,turn_no) do nothing
+	`, sessionID, previousRunID, inputMessageID); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(ctx, `
+		insert into research_planning_turns(session_id,turn_no,run_id,input_message_id,base_plan_version)
+		values($1,(select max(turn_no)+1 from research_planning_turns where session_id=$1),$2,$3,
+			(select max(version) from research_plan_versions where session_id=$1))
+	`, sessionID, command.RunID, command.InputMessageID); err != nil {
+		return err
+	}
+	tag, err := s.db.Exec(ctx, `
+		update research_sessions set planning_run_id=$2,status='planning',updated_at=now()
+		where id=$1 and status='awaiting_confirmation'
+	`, sessionID, command.RunID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrResearchPlanNotRevisable
+	}
+	return nil
+}
+
 func (s *Store) FinalizeConfiguredChatOwnership(ctx context.Context, runID string) error {
 	if s == nil || s.db == nil || strings.TrimSpace(runID) == "" {
 		return errors.New("invalid configured Chat ownership finalization")

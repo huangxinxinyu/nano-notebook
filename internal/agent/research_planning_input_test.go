@@ -3,6 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -57,6 +58,18 @@ func TestNormalizePlanningAnswersAcceptsChoicesTextAndRecommendedDefaults(t *tes
 	} {
 		if _, err := normalizePlanningAnswers(planningTestQuestions(), answers, true); !errors.Is(err, ErrPlanningAnswerInvalid) {
 			t.Fatalf("%s err=%v", name, err)
+		}
+	}
+}
+
+func TestPlanningTurnContentCarriesTheRevisedPlan(t *testing.T) {
+	if got := planningTurnContent(0, "original request", 0, ""); got != "original request" {
+		t.Fatalf("turn 0 content=%q", got)
+	}
+	got := planningTurnContent(2, "把范围缩小到开源方案", 3, `{"title":"x"}`)
+	for _, want := range []string{"version 3", `{"title":"x"}`, "把范围缩小到开源方案", "request_user_input"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("revision content missing %q: %s", want, got)
 		}
 	}
 }
