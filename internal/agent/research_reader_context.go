@@ -18,19 +18,34 @@ import (
 
 const (
 	researchReaderContextVersion = 36
+	// From executor v38 readers keep their two latest pages: flash readers
+	// that saw only one re-read a quarter of their pages to quote them.
+	researchReaderTwoPageVersion = 38
 	researchReaderElidedRunes    = 400
 	researchReaderElisionNote    = "[earlier page text omitted to save context: its claim cards are in claims.md; call read_tool_result with this result_ref and offset to read it again]"
 )
 
-func isResearchReaderContextExecution(execution Execution) bool {
+// researchReaderKeptPages is how many latest pages a reader's request keeps
+// in full, or 0 when its requests are not elided.
+func researchReaderKeptPages(execution Execution) int {
 	reference, err := agentcatalog.ParseReference(execution.AgentConfigID)
-	return err == nil && execution.ParentRunID != "" && isResearchReaderTask(execution.SubagentTask) &&
-		reference.Identity == "research.executor" && reference.Version >= researchReaderContextVersion
+	if err != nil || execution.ParentRunID == "" || !isResearchReaderTask(execution.SubagentTask) ||
+		reference.Identity != "research.executor" || reference.Version < researchReaderContextVersion {
+		return 0
+	}
+	if reference.Version >= researchReaderTwoPageVersion {
+		return 2
+	}
+	return 1
+}
+
+func isResearchReaderContextExecution(execution Execution) bool {
+	return researchReaderKeptPages(execution) > 0
 }
 
 // elideEarlierReaderPages returns messages with every document page but the
-// latest reduced to its short fields.
-func elideEarlierReaderPages(messages []models.ModelMessage) []models.ModelMessage {
+// latest kept ones reduced to their short fields.
+func elideEarlierReaderPages(messages []models.ModelMessage, kept int) []models.ModelMessage {
 	names := map[string]string{}
 	pages := make([]int, 0)
 	for index, message := range messages {
@@ -44,11 +59,11 @@ func elideEarlierReaderPages(messages []models.ModelMessage) []models.ModelMessa
 			pages = append(pages, index)
 		}
 	}
-	if len(pages) < 2 {
+	if kept < 1 || len(pages) <= kept {
 		return messages
 	}
 	out := append([]models.ModelMessage(nil), messages...)
-	for _, index := range pages[:len(pages)-1] {
+	for _, index := range pages[:len(pages)-kept] {
 		out[index].Content = elideReaderPage(out[index].Content)
 	}
 	return out

@@ -348,8 +348,8 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 			return models.ModelRequest{}, err
 		}
 		flattened := FlattenContextUnits(trajectory)
-		if isResearchReaderContextExecution(execution) {
-			flattened = elideEarlierReaderPages(flattened)
+		if kept := researchReaderKeptPages(execution); kept > 0 {
+			flattened = elideEarlierReaderPages(flattened, kept)
 		}
 		messages = append(messages, flattened...)
 	} else if includeExactResearchSuffix(definitions, duplicateSteps) {

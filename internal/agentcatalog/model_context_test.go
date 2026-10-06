@@ -247,8 +247,14 @@ func TestEmbeddedDeepSeekFlashResearchPolicyResolvesItsOwnCapability(t *testing.
 	if err != nil || resolved.Capability.ResolvedModel != "deepseek-v4-flash" || resolved.Budgets.CompactionTriggerTokens != 512_000 {
 		t.Fatalf("context=%+v err=%v", resolved, err)
 	}
-	release, ok := catalog.ResolveRelease(MustParseReference("nano.default@50"))
-	if !ok || release.Roots["research"].String() != "research.executor@37" || release.Roots["research_planner"].String() != "research.planner@15" {
+	release, ok := catalog.ResolveRelease(MustParseReference("nano.default@51"))
+	if !ok || release.Roots["research"].String() != "research.executor@38" || release.Roots["research_planner"].String() != "research.planner@15" {
+		t.Fatalf("release=%+v ok=%v", release, ok)
+	}
+	if definition, ok := catalog.ResolveDefinition(MustParseReference("research.executor@38")); !ok || definition.Limits.InputTokens != 10_000_000 {
+		t.Fatalf("flash budget=%+v ok=%v", definition.Limits, ok)
+	}
+	if release, ok = catalog.ResolveRelease(MustParseReference("nano.default@50")); !ok || release.Roots["research"].String() != "research.executor@37" {
 		t.Fatalf("release=%+v ok=%v", release, ok)
 	}
 }

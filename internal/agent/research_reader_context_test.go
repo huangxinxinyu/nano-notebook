@@ -22,7 +22,7 @@ func TestReaderRequestsKeepOnlyTheLatestPageInFull(t *testing.T) {
 		{Role: models.RoleAssistant, ActionCalls: []models.ModelActionCall{{ID: "b", Name: "read_tool_result"}}},
 		{Role: models.RoleAction, ActionCallID: "b", Content: page(second)},
 	}
-	out := elideEarlierReaderPages(messages)
+	out := elideEarlierReaderPages(messages, 1)
 	var elided map[string]any
 	if err := json.Unmarshal([]byte(out[1].Content), &elided); err != nil {
 		t.Fatalf("elided page is not JSON: %v", err)
@@ -37,7 +37,13 @@ func TestReaderRequestsKeepOnlyTheLatestPageInFull(t *testing.T) {
 	if messages[1].Content != page(first) {
 		t.Fatal("elision mutated the input messages")
 	}
-	if single := elideEarlierReaderPages(messages[:2]); single[1].Content != messages[1].Content {
+	if single := elideEarlierReaderPages(messages[:2], 1); single[1].Content != messages[1].Content {
+		t.Fatal("a reader's only page was elided")
+	}
+	if two := elideEarlierReaderPages(messages, 2); two[1].Content != messages[1].Content || two[5].Content != messages[5].Content {
+		t.Fatal("a two-page reader lost one of its two latest pages")
+	}
+	if researchReaderKeptPages(Execution{ParentRunID: "p", SubagentTask: researchReaderTaskPrefix + " https://x (X).", AgentConfigID: "research.executor@38"}) != 2 {
 		t.Fatal("a reader's only page was elided")
 	}
 }

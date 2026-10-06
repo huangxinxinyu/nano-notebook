@@ -309,6 +309,9 @@ func researchReaderSpawnInput(requestedURL, title string, definitionVersion int)
 	if definitionVersion >= researchRecommendedLeadsVersion {
 		message += " Each model decision is slow, so after reading each page propose all of that page's record_claim calls together in one decision, up to the tool-call limit, never one card per decision."
 	}
+	if definitionVersion >= researchReaderTwoPageVersion {
+		message += " Record a page's cards before reading the next page. Skip the reference list, acknowledgements, and appendices unless a planned claim depends on them, and stop paging once only those remain; list the important references under Leads instead."
+	}
 	return spawnAgentInput{Message: message, TaskName: "Read: " + taskName}
 }
 
