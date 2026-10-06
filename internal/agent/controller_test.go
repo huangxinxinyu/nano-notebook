@@ -1622,3 +1622,41 @@ func TestControllerClosesToolUseOnceTheTokenBudgetIsSpent(t *testing.T) {
 		t.Fatalf("tools offered: first=%d after budget=%d", len(decisions.requests[0].ActionDefinitions), len(decisions.requests[1].ActionDefinitions))
 	}
 }
+
+type wrapUpRuntimeStub struct {
+	*tokenBudgetRuntimeStub
+}
+
+func (wrapUpRuntimeStub) TokenBudgetWrapUpTools(Execution) map[string]bool {
+	return map[string]bool{"finish": true}
+}
+
+func TestControllerKeepsOnlyWrapUpToolsOnceTheTokenBudgetIsSpent(t *testing.T) {
+	order := make([]string, 0, 2)
+	registry, err := NewActionRegistry(&recordingAction{name: "record", order: &order}, &recordingAction{name: "finish", order: &order})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := wrapUpRuntimeStub{&tokenBudgetRuntimeStub{controllerRuntimeStub: &controllerRuntimeStub{execution: defaultControllerExecution()}, limit: 100}}
+	decisions := &decisionModelStub{decisions: []models.ModelDecision{
+		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{{Name: "record", Input: json.RawMessage(`{"value":"gather"}`)}}}},
+		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{{Name: "finish", Input: json.RawMessage(`{"value":"write"}`)}}}},
+		{Final: &models.FinalDraft{Text: "Report written from gathered evidence."}},
+	}}
+	if err := NewController(runtime, usageModelStub{decisionModelStub: decisions, inputTokens: 100}, registry).Execute(context.Background(), runtime.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	names := func(request models.ModelRequest) []string {
+		out := make([]string, 0, len(request.ActionDefinitions))
+		for _, definition := range request.ActionDefinitions {
+			out = append(out, definition.Name)
+		}
+		return out
+	}
+	if got := names(decisions.requests[1]); len(got) != 1 || got[0] != "finish" {
+		t.Fatalf("tools after budget=%v", got)
+	}
+	if strings.Join(order, ",") != "gather,write" {
+		t.Fatalf("executed=%v", order)
+	}
+}

@@ -58,6 +58,13 @@ type ModelUsageRuntime interface {
 	ModelTokenBudgetExhausted(ctx context.Context, attempt Attempt) (bool, error)
 }
 
+// TokenBudgetWrapUpRuntime names the tools a Run keeps once its token budget
+// is spent, so it can finish its deliverable from what it already gathered
+// instead of returning a bare Final. Without it every business tool closes.
+type TokenBudgetWrapUpRuntime interface {
+	TokenBudgetWrapUpTools(execution Execution) map[string]bool
+}
+
 // RecordModelUsage adds one model call's token usage to the Run's tree. The
 // tokens are spent whether or not the response is later accepted.
 func (r *PostgresRuntime) RecordModelUsage(ctx context.Context, attempt Attempt, usage models.ModelCallMetadata) error {

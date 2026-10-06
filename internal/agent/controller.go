@@ -212,6 +212,7 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		}
 		recoveryBoundary = false
 
+		var tokenBudgetTools map[string]bool
 		remainingActions := execution.ActionLimit - acceptedBusinessActions(prefix)
 		businessDecisionAvailable := acceptedBusinessDecisions(prefix) < execution.ActionDecisionLimit && remainingActions > 0
 		if usageRuntime, ok := c.runtime.(ModelUsageRuntime); ok && businessDecisionAvailable {
@@ -221,7 +222,13 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 			if budgetErr != nil {
 				return c.handleRuntimeError(ctx, attempt, budgetErr)
 			}
-			businessDecisionAvailable = !exhausted
+			if exhausted {
+				wrapUp, ok := c.runtime.(TokenBudgetWrapUpRuntime)
+				businessDecisionAvailable = ok
+				if ok {
+					tokenBudgetTools = wrapUp.TokenBudgetWrapUpTools(execution)
+				}
+			}
 		}
 		advertisedBusinessActions := remainingActions
 		if !businessDecisionAvailable {
@@ -232,6 +239,15 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		}, tracer)
 		if err != nil {
 			return c.handleRuntimeError(ctx, attempt, err)
+		}
+		if tokenBudgetTools != nil {
+			kept := definitions[:0:0]
+			for _, definition := range definitions {
+				if tokenBudgetTools[definition.Name] {
+					kept = append(kept, definition)
+				}
+			}
+			definitions = kept
 		}
 		actionCapable := len(definitions) > 0
 		if !actionCapable && execution.FinalDecisionLimit < 1 {

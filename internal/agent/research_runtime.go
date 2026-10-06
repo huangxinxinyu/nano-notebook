@@ -157,6 +157,21 @@ func (r *ResearchRuntime) ModelTokenBudgetExhausted(ctx context.Context, attempt
 	return r.base.ModelTokenBudgetExhausted(ctx, attempt)
 }
 
+// TokenBudgetWrapUpTools lets a root Researcher whose tree spent its token
+// budget collect running subagents and write and assemble its report from
+// the cards it has; a subagent keeps no tools and returns Final.
+func (r *ResearchRuntime) TokenBudgetWrapUpTools(execution Execution) map[string]bool {
+	if execution.ParentRunID != "" {
+		return map[string]bool{}
+	}
+	return map[string]bool{
+		"assemble_research_report": true, "list_agents": true, "list_research_files": true,
+		"read_research_file": true, "wait_agent": true, "write_research_file": true,
+	}
+}
+
+const researchTokenBudgetPrompt = "Token budget: this Research has spent its input-token budget. Searching, reading, recording cards, and new subagents are closed. Collect any running subagents with wait_agent, then write the report from the cards in claims.md and assemble it; say plainly where evidence is thin."
+
 func (r *ResearchRuntime) LoadCheckpointPrefix(ctx context.Context, attempt Attempt) (CheckpointPrefix, error) {
 	return r.base.LoadCheckpointPrefix(ctx, attempt)
 }
@@ -241,6 +256,13 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 	}
 	if execution.ParentRunID != "" {
 		system += "\n\n" + runtimeSubagentInstructions
+	}
+	if execution.ParentRunID == "" && len(definitions) > 0 {
+		if exhausted, err := r.ModelTokenBudgetExhausted(ctx, execution.Attempt); err != nil {
+			return models.ModelRequest{}, err
+		} else if exhausted {
+			system += "\n\n" + researchTokenBudgetPrompt
+		}
 	}
 	if scouts, err := r.researchScoutsPrompt(ctx, execution); err != nil {
 		return models.ModelRequest{}, err
