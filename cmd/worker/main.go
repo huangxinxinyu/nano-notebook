@@ -116,6 +116,8 @@ type workerConfig struct {
 	SourceAdmissionMode            sourceadmission.Mode
 	SourceAdmissionQueryTimeout    time.Duration
 	BraveSearchAPIKey              string
+	WebSearchCacheTTL              time.Duration
+	WebSearchCacheKeyPrefix        string
 	E2BAPIKey                      string
 	E2BTemplate                    string
 	E2BDomain                      string
@@ -462,6 +464,22 @@ func main() {
 		if err != nil {
 			slog.Error("Brave Web Search Provider invalid", "error", err)
 			os.Exit(1)
+		}
+		if config.WebSearchCacheTTL > 0 {
+			searchCache, err := websearch.NewRedisResultCache(websearch.RedisResultCacheConfig{
+				URL: config.ToolResultRedisURL, KeyPrefix: config.WebSearchCacheKeyPrefix,
+				OperationTimeout: config.ToolResultOperationTimeout,
+			})
+			if err != nil {
+				slog.Error("Web Search cache configuration invalid", "error", err)
+				os.Exit(1)
+			}
+			defer searchCache.Close()
+			searchProvider, err = websearch.NewCachingProvider(searchProvider, searchCache, "brave", config.WebSearchCacheTTL)
+			if err != nil {
+				slog.Error("Web Search cache configuration invalid", "error", err)
+				os.Exit(1)
+			}
 		}
 	}
 	webReaderAdapter, err := webreader.NewHTTPAdapter(webreader.HTTPConfig{
@@ -998,6 +1016,10 @@ func loadWorkerConfig() (workerConfig, error) {
 	if err != nil {
 		return workerConfig{}, err
 	}
+	webSearchCacheTTL, err := workerEnvDuration("NANO_WEB_SEARCH_CACHE_TTL", 24*time.Hour)
+	if err != nil {
+		return workerConfig{}, err
+	}
 	sourceDiscoveryLease, err := workerEnvDuration("NANO_SOURCE_DISCOVERY_LEASE_DURATION", 30*time.Second)
 	if err != nil {
 		return workerConfig{}, err
@@ -1133,6 +1155,8 @@ func loadWorkerConfig() (workerConfig, error) {
 		SourceAdmissionMode:         sourceadmission.Mode(strings.ToLower(strings.TrimSpace(env("NANO_SOURCE_ADMISSION_MODE", "shadow")))),
 		SourceAdmissionQueryTimeout: sourceAdmissionQueryTimeout,
 		BraveSearchAPIKey:           strings.TrimSpace(os.Getenv("NANO_BRAVE_SEARCH_API_KEY")),
+		WebSearchCacheTTL:           webSearchCacheTTL,
+		WebSearchCacheKeyPrefix:     env("NANO_WEB_SEARCH_CACHE_KEY_PREFIX", "nano:web-search:v1:"),
 		E2BAPIKey:                   strings.TrimSpace(os.Getenv("NANO_E2B_API_KEY")),
 		E2BTemplate:                 strings.TrimSpace(os.Getenv("NANO_E2B_TEMPLATE")),
 		E2BDomain:                   strings.TrimSpace(os.Getenv("NANO_E2B_DOMAIN")),
