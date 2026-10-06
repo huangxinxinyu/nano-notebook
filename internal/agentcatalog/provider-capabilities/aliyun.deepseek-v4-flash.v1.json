@@ -1,0 +1,12 @@
+{
+  "identity": "aliyun.deepseek-v4-flash",
+  "version": 1,
+  "provider_model": "aliyun/deepseek-v4-flash",
+  "resolved_model": "deepseek-v4-flash",
+  "context_window_tokens": 1000000,
+  "max_input_tokens": 1000000,
+  "max_output_tokens": 393216,
+  "tokenizer_identity": "deepseek-v4",
+  "tokenizer_version": "2026-08",
+  "invocation_mode": "thinking"
+}

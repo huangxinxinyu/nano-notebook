@@ -233,3 +233,22 @@ func TestEmbeddedDeepSeekResearchPolicyResolvesItsOwnCapability(t *testing.T) {
 		t.Fatalf("DeepSeek tree budget=%+v ok=%v", definition.Limits, ok)
 	}
 }
+
+func TestEmbeddedDeepSeekFlashResearchPolicyResolvesItsOwnCapability(t *testing.T) {
+	catalog, err := LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, ok := catalog.ResolveModelPolicy(MustParseReference("agent.deep-research-deepseek-flash@1"))
+	if !ok || policy.ProviderModel != "aliyun/deepseek-v4-flash" || policy.EnableThinking == nil || !*policy.EnableThinking {
+		t.Fatalf("policy=%+v ok=%v", policy, ok)
+	}
+	resolved, err := catalog.ResolveModelContextPolicy(policy.Reference())
+	if err != nil || resolved.Capability.ResolvedModel != "deepseek-v4-flash" || resolved.Budgets.CompactionTriggerTokens != 512_000 {
+		t.Fatalf("context=%+v err=%v", resolved, err)
+	}
+	release, ok := catalog.ResolveRelease(MustParseReference("nano.default@50"))
+	if !ok || release.Roots["research"].String() != "research.executor@37" || release.Roots["research_planner"].String() != "research.planner@15" {
+		t.Fatalf("release=%+v ok=%v", release, ok)
+	}
+}

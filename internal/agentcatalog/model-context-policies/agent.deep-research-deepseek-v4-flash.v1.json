@@ -1,0 +1,12 @@
+{
+  "identity": "agent.deep-research-deepseek-v4-flash",
+  "version": 1,
+  "invocation_model_policy": "agent.deep-research-deepseek-flash@1",
+  "provider_capability": "aliyun.deepseek-v4-flash@1",
+  "pinned_max_output_tokens": 16384,
+  "soft_input_limit_tokens": 512000,
+  "estimation_safety_tokens": 8192,
+  "keep_recent_tokens": 96000,
+  "summary_max_output_tokens": 4096,
+  "overflow_retry_limit": 2
+}

@@ -9,7 +9,8 @@
           "models": [
             "qwen-plus",
             "qwen-flash",
-            "deepseek-v4-pro"
+            "deepseek-v4-pro",
+            "deepseek-v4-flash"
           ],
           "weight": 1
         }
