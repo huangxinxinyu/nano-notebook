@@ -325,7 +325,11 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 		if err != nil {
 			return models.ModelRequest{}, err
 		}
-		messages = append(messages, FlattenContextUnits(trajectory)...)
+		flattened := FlattenContextUnits(trajectory)
+		if isResearchReaderContextExecution(execution) {
+			flattened = elideEarlierReaderPages(flattened)
+		}
+		messages = append(messages, flattened...)
 	} else if includeExactResearchSuffix(definitions, duplicateSteps) {
 		projected, err := ProjectChatLane(ctx, ChatLane{Turns: []ChatLaneTurn{{
 			MessageID: execution.InputMessageID, Content: originalRequest,
