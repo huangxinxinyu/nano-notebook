@@ -743,7 +743,27 @@ func renderResearchClaimCitations(report string, claims []researchClaim) (string
 		builder.WriteString(strings.Join(rendered, ""))
 	}
 	builder.WriteString(report[last:])
-	return builder.String(), stats
+	return collapseRepeatedCitationLinks(builder.String()), stats
+}
+
+var renderedCitationLinkPattern = regexp.MustCompile(`\[[0-9]+\]\([^)\s]+\)`)
+
+// collapseRepeatedCitationLinks keeps one of adjacent identical source links,
+// which appear when a sentence cites two cards of one source as [a1][a2].
+func collapseRepeatedCitationLinks(text string) string {
+	var builder strings.Builder
+	last, previous, previousEnd := 0, "", -1
+	for _, match := range renderedCitationLinkPattern.FindAllStringIndex(text, -1) {
+		link := text[match[0]:match[1]]
+		if match[0] == previousEnd && link == previous {
+			builder.WriteString(text[last:match[0]])
+			last, previousEnd = match[1], match[1]
+			continue
+		}
+		previous, previousEnd = link, match[1]
+	}
+	builder.WriteString(text[last:])
+	return builder.String()
 }
 
 func firstNonEmpty(values ...string) string {

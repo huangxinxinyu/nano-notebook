@@ -442,3 +442,16 @@ func TestRecordClaimMatchesAnArxivPaperUnderAnotherURL(t *testing.T) {
 		t.Fatalf("output=%+v", output)
 	}
 }
+
+func TestAdjacentCitationsOfOneSourceRenderOnce(t *testing.T) {
+	claims := []researchClaim{
+		{recordClaimOutput: recordClaimOutput{ID: "a1", URL: "https://arxiv.org/abs/2604.23783"}},
+		{recordClaimOutput: recordClaimOutput{ID: "a2", URL: "https://arxiv.org/abs/2604.23783"}},
+		{recordClaimOutput: recordClaimOutput{ID: "b1", URL: "https://arxiv.org/abs/2310.11511"}},
+	}
+	rendered, _ := renderResearchClaimCitations("S2G judges sufficiency [a1][a2]. Self-RAG reflects [b1] and S2G agrees [a1], [a2].", claims)
+	want := "S2G judges sufficiency [1](https://arxiv.org/abs/2604.23783). Self-RAG reflects [2](https://arxiv.org/abs/2310.11511) and S2G agrees [1](https://arxiv.org/abs/2604.23783), [1](https://arxiv.org/abs/2604.23783)."
+	if rendered != want {
+		t.Fatalf("rendered=%q\nwant    =%q", rendered, want)
+	}
+}
