@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/agentcatalog"
 	"github.com/huangxinxinyu/nano-notebook/internal/agentobs"
@@ -376,54 +377,171 @@ func researchPlanResponseHead(text string) string {
 }
 
 func ValidateResearchPlanJSON(value string) (json.RawMessage, error) {
-	decoder := json.NewDecoder(bytes.NewBufferString(strings.TrimSpace(value)))
-	decoder.DisallowUnknownFields()
+	text := strings.TrimSpace(value)
+	decoder := json.NewDecoder(bytes.NewBufferString(text))
 	var object map[string]json.RawMessage
 	if err := decoder.Decode(&object); err != nil || object == nil {
-		return nil, errors.New("Research Plan must be one JSON object")
+		return nil, fmt.Errorf("Research Plan must be one JSON object%s", researchPlanSyntaxDetail(text, err))
 	}
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return nil, errors.New("Research Plan contains trailing content")
 	}
 	wantStrings := []string{"title", "objective"}
 	wantLists := []string{"research_questions", "investigation_tracks", "source_strategy", "analysis_method", "deliverable_outline", "completion_criteria", "clarifying_questions"}
-	if len(object) != len(wantStrings)+len(wantLists)+1 {
-		return nil, errors.New("Research Plan has unknown or missing fields")
+	known := map[string]bool{"scope": true}
+	for _, key := range append(append([]string{}, wantStrings...), wantLists...) {
+		known[key] = true
+	}
+	var missing, unknown []string
+	for key := range known {
+		if _, ok := object[key]; !ok {
+			missing = append(missing, key)
+		}
+	}
+	for key := range object {
+		if !known[key] {
+			unknown = append(unknown, key)
+		}
+	}
+	if len(missing) > 0 || len(unknown) > 0 {
+		sort.Strings(missing)
+		sort.Strings(unknown)
+		return nil, fmt.Errorf("Research Plan fields are wrong: missing %v, unknown %v", missing, unknown)
 	}
 	for _, key := range wantStrings {
 		var text string
 		if json.Unmarshal(object[key], &text) != nil || strings.TrimSpace(text) == "" {
-			return nil, fmt.Errorf("Research Plan %s is invalid", key)
+			return nil, fmt.Errorf("Research Plan %s must be a non-empty string, got %s", key, researchPlanJSONKind(object[key]))
 		}
 	}
 	var scope string
 	if err := json.Unmarshal(object["scope"], &scope); err != nil {
-		var scopeItems []string
-		if listErr := json.Unmarshal(object["scope"], &scopeItems); listErr != nil || len(scopeItems) == 0 {
-			return nil, errors.New("Research Plan scope is invalid")
-		}
-		for _, item := range scopeItems {
-			if strings.TrimSpace(item) == "" {
-				return nil, errors.New("Research Plan scope contains an empty item")
-			}
+		scopeItems, ok := researchPlanStringList(object["scope"])
+		if !ok || len(scopeItems) == 0 {
+			return nil, fmt.Errorf("Research Plan scope must be a non-empty string, got %s", researchPlanJSONKind(object["scope"]))
 		}
 		scope = strings.Join(scopeItems, "\n")
 		object["scope"], _ = json.Marshal(scope)
 	}
 	if strings.TrimSpace(scope) == "" {
-		return nil, errors.New("Research Plan scope is invalid")
+		return nil, errors.New("Research Plan scope must be a non-empty string")
 	}
 	for _, key := range wantLists {
-		var values []string
-		if json.Unmarshal(object[key], &values) != nil || (key != "clarifying_questions" && len(values) == 0) {
-			return nil, fmt.Errorf("Research Plan %s is invalid", key)
+		values, ok := researchPlanStringList(object[key])
+		if !ok {
+			return nil, fmt.Errorf("Research Plan %s must be an array of strings, got %s", key, researchPlanJSONKind(object[key]))
 		}
-		for _, item := range values {
-			if strings.TrimSpace(item) == "" {
-				return nil, fmt.Errorf("Research Plan %s contains an empty item", key)
-			}
+		if key != "clarifying_questions" && len(values) == 0 {
+			return nil, fmt.Errorf("Research Plan %s must contain at least one string", key)
 		}
+		object[key], _ = json.Marshal(values)
 	}
 	canonical, err := json.Marshal(object)
 	return canonical, err
+}
+
+// researchPlanStringList accepts the list shapes models write for a plan
+// field: an array of strings, one string, an object of named strings, or an
+// array of such objects, and flattens them to non-empty strings.
+func researchPlanStringList(raw json.RawMessage) ([]string, bool) {
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return nil, false
+	}
+	var flatten func(any) (string, bool)
+	flatten = func(item any) (string, bool) {
+		switch typed := item.(type) {
+		case string:
+			return strings.TrimSpace(typed), true
+		case map[string]any:
+			keys := make([]string, 0, len(typed))
+			for key := range typed {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			parts := make([]string, 0, len(keys))
+			for _, key := range keys {
+				text, ok := flatten(typed[key])
+				if !ok {
+					return "", false
+				}
+				if text != "" {
+					parts = append(parts, key+": "+text)
+				}
+			}
+			return strings.Join(parts, "; "), true
+		case []any:
+			parts := make([]string, 0, len(typed))
+			for _, element := range typed {
+				text, ok := flatten(element)
+				if !ok {
+					return "", false
+				}
+				if text != "" {
+					parts = append(parts, text)
+				}
+			}
+			return strings.Join(parts, "; "), true
+		}
+		return "", false
+	}
+	var items []any
+	switch typed := value.(type) {
+	case []any:
+		items = typed
+	case string, map[string]any:
+		items = []any{typed}
+	default:
+		return nil, false
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		text, ok := flatten(item)
+		if !ok {
+			return nil, false
+		}
+		if text != "" {
+			out = append(out, text)
+		}
+	}
+	return out, true
+}
+
+func researchPlanJSONKind(raw json.RawMessage) string {
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return "invalid JSON"
+	}
+	switch value.(type) {
+	case nil:
+		return "null"
+	case string:
+		return "a string"
+	case []any:
+		return "an array that is not all strings"
+	case map[string]any:
+		return "an object"
+	case bool:
+		return "a boolean"
+	default:
+		return "a number"
+	}
+}
+
+// researchPlanSyntaxDetail locates a JSON syntax error, such as an unescaped
+// ASCII quote inside Chinese text, so the model can fix that spot.
+func researchPlanSyntaxDetail(text string, err error) string {
+	var syntax *json.SyntaxError
+	if !errors.As(err, &syntax) {
+		return ""
+	}
+	offset := int(syntax.Offset)
+	start, end := max(0, offset-60), min(len(text), offset+20)
+	for start > 0 && !utf8.RuneStart(text[start]) {
+		start--
+	}
+	for end < len(text) && !utf8.RuneStart(text[end]) {
+		end++
+	}
+	return fmt.Sprintf(": %v at byte %d near %q; escape any double quote inside a string as \\\" or use 「」", syntax, offset, text[start:end])
 }

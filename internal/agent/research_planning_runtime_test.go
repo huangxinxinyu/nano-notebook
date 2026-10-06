@@ -60,3 +60,34 @@ func TestResearchPlannerFinalAcceptsAFencedOrIntroducedPlan(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestResearchPlanAcceptsCommonListShapesAndNamesTheRest(t *testing.T) {
+	plan := func(analysis string) string {
+		return `{"title":"T","objective":"O","scope":"S","research_questions":["Q"],"investigation_tracks":"One track","source_strategy":{"papers":"Read primary papers","docs":"Official docs"},"analysis_method":` + analysis + `,"deliverable_outline":["D"],"completion_criteria":["C"],"clarifying_questions":[]}`
+	}
+	canonical, err := ValidateResearchPlanJSON(plan(`[{"dimension":"cost","approach":"compare latency"},"Contrast failures"]`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	_ = json.Unmarshal(canonical, &got)
+	if tracks := got["investigation_tracks"].([]any); len(tracks) != 1 || tracks[0] != "One track" {
+		t.Fatalf("tracks=%v", tracks)
+	}
+	if sources := got["source_strategy"].([]any); len(sources) != 1 || sources[0] != "docs: Official docs; papers: Read primary papers" {
+		t.Fatalf("sources=%v", sources)
+	}
+	if methods := got["analysis_method"].([]any); len(methods) != 2 || methods[0] != "approach: compare latency; dimension: cost" {
+		t.Fatalf("methods=%v", methods)
+	}
+	if _, err := ValidateResearchPlanJSON(plan(`42`)); err == nil || !strings.Contains(err.Error(), "analysis_method must be an array of strings, got a number") {
+		t.Fatalf("err=%v", err)
+	}
+	if _, err := ValidateResearchPlanJSON(`{"title":"T","objective":"O"}`); err == nil || !strings.Contains(err.Error(), "missing [analysis_method") {
+		t.Fatalf("err=%v", err)
+	}
+	broken := `{"title":"比较 "Fishing for Answers" 的结论","objective":"O"}`
+	if _, err := ValidateResearchPlanJSON(broken); err == nil || !strings.Contains(err.Error(), "near") || !strings.Contains(err.Error(), "Fishing") {
+		t.Fatalf("err=%v", err)
+	}
+}
