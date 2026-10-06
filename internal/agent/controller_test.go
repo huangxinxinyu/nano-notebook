@@ -1572,3 +1572,53 @@ func TestControllerStartsRunBeforeFirstDecision(t *testing.T) {
 		t.Fatalf("err=%v requests=%d", err, len(failing.model.requests))
 	}
 }
+
+type tokenBudgetRuntimeStub struct {
+	*controllerRuntimeStub
+	limit, consumed int64
+}
+
+func (r *tokenBudgetRuntimeStub) RecordModelUsage(_ context.Context, _ Attempt, usage models.ModelCallMetadata) error {
+	if usage.InputTokens != nil {
+		r.consumed += *usage.InputTokens
+	}
+	return nil
+}
+
+func (r *tokenBudgetRuntimeStub) ModelTokenBudgetExhausted(context.Context, Attempt) (bool, error) {
+	return r.consumed >= r.limit, nil
+}
+
+type usageModelStub struct {
+	*decisionModelStub
+	inputTokens int64
+}
+
+func (m usageModelStub) Decide(ctx context.Context, request models.ModelRequest) (models.ModelOutcome, error) {
+	outcome, err := m.decisionModelStub.Decide(ctx, request)
+	tokens := m.inputTokens
+	outcome.Metadata.InputTokens = &tokens
+	return outcome, err
+}
+
+func TestControllerClosesToolUseOnceTheTokenBudgetIsSpent(t *testing.T) {
+	executionOrder := make([]string, 0, 1)
+	registry, err := NewActionRegistry(&recordingAction{name: "record", order: &executionOrder})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &tokenBudgetRuntimeStub{controllerRuntimeStub: &controllerRuntimeStub{execution: defaultControllerExecution()}, limit: 100}
+	decisions := &decisionModelStub{decisions: []models.ModelDecision{
+		{Proposal: &models.ActionProposalBatch{Actions: []models.ActionProposal{{Name: "record", Input: json.RawMessage(`{"value":"first"}`)}}}},
+		{Final: &models.FinalDraft{Text: "Done within budget."}},
+	}}
+	if err := NewController(runtime, usageModelStub{decisionModelStub: decisions, inputTokens: 100}, registry).Execute(context.Background(), runtime.execution.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.consumed != 200 || len(decisions.requests) != 2 {
+		t.Fatalf("consumed=%d requests=%d", runtime.consumed, len(decisions.requests))
+	}
+	if len(decisions.requests[0].ActionDefinitions) == 0 || len(decisions.requests[1].ActionDefinitions) != 0 {
+		t.Fatalf("tools offered: first=%d after budget=%d", len(decisions.requests[0].ActionDefinitions), len(decisions.requests[1].ActionDefinitions))
+	}
+}

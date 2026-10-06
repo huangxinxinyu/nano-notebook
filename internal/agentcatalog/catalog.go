@@ -84,6 +84,10 @@ type Limits struct {
 	ContextBytes        int `json:"context_bytes"`
 	ResultBytes         int `json:"result_bytes"`
 	Attempts            int `json:"attempts"`
+	// InputTokens caps the provider input tokens, cached ones included, that
+	// every model call in the Agent Tree may consume together. Once spent,
+	// the tree's Runs may only return Final. Zero leaves it unbounded.
+	InputTokens int `json:"input_tokens,omitempty"`
 }
 
 type ContractBindings struct {
@@ -679,6 +683,9 @@ func validateDefinition(value Definition) error {
 func validatePositiveLimits(limits Limits) error {
 	if limits.ModelCalls < 1 || limits.ActionDecisions < 0 || limits.Actions < 1 || limits.LegacyPlanMutations < 0 || limits.ActionBatch < 1 || limits.ContextBytes < 1 || limits.ResultBytes < 1 || limits.Attempts < 1 {
 		return errors.New("all definition limits must be positive")
+	}
+	if limits.InputTokens < 0 {
+		return errors.New("input_tokens cannot be negative")
 	}
 	if limits.ActionBatch > limits.Actions {
 		return errors.New("action_batch cannot exceed actions")

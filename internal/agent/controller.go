@@ -214,6 +214,15 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 
 		remainingActions := execution.ActionLimit - acceptedBusinessActions(prefix)
 		businessDecisionAvailable := acceptedBusinessDecisions(prefix) < execution.ActionDecisionLimit && remainingActions > 0
+		if usageRuntime, ok := c.runtime.(ModelUsageRuntime); ok && businessDecisionAvailable {
+			// A spent token budget closes tool use like a spent Action
+			// budget: the Run still returns Final from what it gathered.
+			exhausted, budgetErr := usageRuntime.ModelTokenBudgetExhausted(ctx, attempt)
+			if budgetErr != nil {
+				return c.handleRuntimeError(ctx, attempt, budgetErr)
+			}
+			businessDecisionAvailable = !exhausted
+		}
 		advertisedBusinessActions := remainingActions
 		if !businessDecisionAvailable {
 			advertisedBusinessActions = 0
@@ -308,6 +317,11 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 				})
 			} else {
 				outcome, err = c.model.Decide(ctx, request)
+			}
+			if usageRuntime, ok := c.runtime.(ModelUsageRuntime); ok && err == nil {
+				if usageErr := usageRuntime.RecordModelUsage(ctx, attempt, outcome.Metadata); usageErr != nil {
+					slog.Warn("Agent model usage was not recorded", "run_id", attempt.RunID, "error", usageErr)
+				}
 			}
 			if err == nil {
 				if runtime, ok := c.runtime.(DecisionResponsePreparationRuntime); ok {

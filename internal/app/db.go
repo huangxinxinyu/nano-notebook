@@ -1197,6 +1197,11 @@ alter table agent_runs add column if not exists runtime_kind text not null defau
 alter table agent_runs drop constraint if exists agent_runs_runtime_kind_check;
 alter table agent_runs add constraint agent_runs_runtime_kind_check check (runtime_kind in ('legacy_role','configured'));
 alter table agent_runs add column if not exists tree_id text references agent_trees(id) on delete cascade;
+-- Provider token usage of every model call in the tree; a Definition's
+-- input_tokens limit bounds input_tokens_consumed.
+alter table agent_trees add column if not exists input_tokens_consumed bigint not null default 0 check (input_tokens_consumed >= 0);
+alter table agent_trees add column if not exists cached_input_tokens_consumed bigint not null default 0 check (cached_input_tokens_consumed >= 0);
+alter table agent_trees add column if not exists output_tokens_consumed bigint not null default 0 check (output_tokens_consumed >= 0);
 alter table agent_runs add column if not exists definition_identity text;
 alter table agent_runs add column if not exists definition_version integer;
 alter table agent_runs add column if not exists definition_sha256 text;

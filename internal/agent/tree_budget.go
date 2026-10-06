@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/huangxinxinyu/nano-notebook/internal/models"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -48,4 +49,55 @@ func chargeConfiguredTreeInTx(ctx context.Context, tx pgx.Tx, runID string, char
 		return errors.New("Agent Tree budget exhausted")
 	}
 	return nil
+}
+
+// ModelUsageRuntime accounts provider token usage to the Agent Tree and
+// reports when a Definition's input_tokens limit is spent.
+type ModelUsageRuntime interface {
+	RecordModelUsage(ctx context.Context, attempt Attempt, usage models.ModelCallMetadata) error
+	ModelTokenBudgetExhausted(ctx context.Context, attempt Attempt) (bool, error)
+}
+
+// RecordModelUsage adds one model call's token usage to the Run's tree. The
+// tokens are spent whether or not the response is later accepted.
+func (r *PostgresRuntime) RecordModelUsage(ctx context.Context, attempt Attempt, usage models.ModelCallMetadata) error {
+	count := func(value *int64) int64 {
+		if value == nil || *value < 0 {
+			return 0
+		}
+		return *value
+	}
+	input, cached, output := count(usage.InputTokens), count(usage.CachedTokens), count(usage.OutputTokens)
+	if input == 0 && output == 0 {
+		return nil
+	}
+	_, err := r.pool.Exec(ctx, `
+		update agent_trees set input_tokens_consumed=input_tokens_consumed+$2,
+			cached_input_tokens_consumed=cached_input_tokens_consumed+$3,
+			output_tokens_consumed=output_tokens_consumed+$4,updated_at=now()
+		where id=(select tree_id from agent_runs where id=$1)
+	`, attempt.RunID, input, cached, output)
+	return err
+}
+
+// ModelTokenBudgetExhausted reads the limit from the tree root's Definition,
+// so every Run in a Research tree, subagents included, shares one budget.
+func (r *PostgresRuntime) ModelTokenBudgetExhausted(ctx context.Context, attempt Attempt) (bool, error) {
+	var limit, consumed int64
+	err := r.pool.QueryRow(ctx, `
+		select coalesce((definition.limits->>'input_tokens')::bigint,0),tree.input_tokens_consumed
+		from agent_runs run
+		join agent_trees tree on tree.id=run.tree_id
+		join agent_runs root on root.id=tree.root_agent_run_id
+		join agent_definition_versions definition on definition.definition_identity=root.definition_identity
+			and definition.definition_version=root.definition_version
+		where run.id=$1
+	`, attempt.RunID).Scan(&limit, &consumed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return limit > 0 && consumed >= limit, nil
 }

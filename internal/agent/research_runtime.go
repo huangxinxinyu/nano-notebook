@@ -149,6 +149,14 @@ func (r *ResearchRuntime) Load(ctx context.Context, attempt Attempt) (Execution,
 	return execution, nil
 }
 
+func (r *ResearchRuntime) RecordModelUsage(ctx context.Context, attempt Attempt, usage models.ModelCallMetadata) error {
+	return r.base.RecordModelUsage(ctx, attempt, usage)
+}
+
+func (r *ResearchRuntime) ModelTokenBudgetExhausted(ctx context.Context, attempt Attempt) (bool, error) {
+	return r.base.ModelTokenBudgetExhausted(ctx, attempt)
+}
+
 func (r *ResearchRuntime) LoadCheckpointPrefix(ctx context.Context, attempt Attempt) (CheckpointPrefix, error) {
 	return r.base.LoadCheckpointPrefix(ctx, attempt)
 }
