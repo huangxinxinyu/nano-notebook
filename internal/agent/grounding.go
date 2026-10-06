@@ -204,6 +204,18 @@ func parseResearchState(prefix CheckpointPrefix) (researchState, error) {
 	state := researchState{complete: true}
 	for _, proposal := range prefix.Proposals {
 		for _, action := range proposal.Actions {
+			if action.Name == readSourceActionName || action.Name == searchTextActionName {
+				state.performed = true
+				if action.Result == nil || action.Result.Status != ActionSucceeded {
+					state.complete = false
+					continue
+				}
+				for _, reference := range sourceTextEvidenceReferences(action) {
+					state.evidenceSeen = true
+					state.evidence = append(state.evidence, researchEvidence{SourceID: reference.SourceID, RevisionID: reference.RevisionID})
+				}
+				continue
+			}
 			if action.Name != "search_evidence" {
 				continue
 			}

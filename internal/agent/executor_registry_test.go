@@ -39,6 +39,8 @@ func TestNanoToolCapabilitiesSchedulesOnlySideEffectFreeToolsInParallel(t *testi
 		"read_tool_result":         agentcatalog.ToolParallel,
 		"read_skill":               agentcatalog.ToolParallel,
 		"read_url":                 agentcatalog.ToolParallel,
+		"read_source":              agentcatalog.ToolParallel,
+		"search_text":              agentcatalog.ToolParallel,
 		"record_claim":             agentcatalog.ToolParallel,
 		"request_user_input":       agentcatalog.ToolOrderedSync,
 		"save_url_as_source":       agentcatalog.ToolOrderedSync,
@@ -200,6 +202,8 @@ func productionToolCapabilities() map[string]agentcatalog.ToolCapability {
 		"read_tool_result":         {Scheduling: agentcatalog.ToolOrderedSync},
 		"read_skill":               {Scheduling: agentcatalog.ToolOrderedSync},
 		"read_url":                 {Scheduling: agentcatalog.ToolOrderedSync},
+		"read_source":              {Scheduling: agentcatalog.ToolParallel},
+		"search_text":              {Scheduling: agentcatalog.ToolParallel},
 		"save_url_as_source":       {Scheduling: agentcatalog.ToolOrderedSync},
 		"rewrite_todo_list":        {Scheduling: agentcatalog.ToolOrderedSync},
 		"search_evidence":          {Scheduling: agentcatalog.ToolOrderedSync},
@@ -215,7 +219,8 @@ func productionToolCapabilities() map[string]agentcatalog.ToolCapability {
 func productionExecutorRegistrations() []ExecutorRegistration {
 	return []ExecutorRegistration{
 		{Identity: "chat_leader", Executor: noopDefinitionExecutor{}, Capability: leaderExecutorCapability(map[string]bool{
-			"calculate": true, "current_time": true, "discover_sources": true, "rewrite_todo_list": true, "search_evidence": true, "update_todo_status": true,
+			"calculate": true, "current_time": true, "discover_sources": true, "read_source": true, "rewrite_todo_list": true,
+			"search_evidence": true, "search_text": true, "update_todo_status": true,
 		})},
 		{Identity: "research", Executor: noopDefinitionExecutor{}, Capability: agentcatalog.ExecutorCapability{
 			PromptPurposes: map[string]bool{"planner": true},

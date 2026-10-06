@@ -13,7 +13,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	definitions := catalog.Definitions()
-	if got, want := len(definitions), 62; got != want {
+	if got, want := len(definitions), 64; got != want {
 		t.Fatalf("definitions=%d want=%d", got, want)
 	}
 	want := map[string]struct {
@@ -41,6 +41,10 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		"chat.leader@5": {
 			executor: "chat_leader", model: "agent.chat-default@2",
 			tools: []string{"calculate", "current_time", "rewrite_todo_list", "search_evidence", "update_todo_status"}, children: []string{"research.source-discovery@2"},
+		},
+		"chat.leader@7": {
+			executor: "chat_leader", model: "agent.chat-default@2",
+			tools: []string{"calculate", "current_time", "discover_sources", "read_source", "rewrite_todo_list", "search_evidence", "search_text", "update_todo_status"},
 		},
 		"chat.leader@6": {
 			executor: "chat_leader", model: "agent.chat-default@2",
@@ -93,6 +97,10 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		"research.planner@15": {
 			executor: "research_planner", model: "agent.deep-research-deepseek@1",
 			tools: []string{"read_skill", "request_user_input", "web_search"},
+		},
+		"research.executor@39": {
+			executor: "research_root", model: "agent.deep-research-deepseek-flash@1",
+			tools: []string{"assemble_research_report", "inspect_source", "list_agents", "list_research_files", "read_research_file", "read_skill", "read_source", "read_tool_result", "read_url", "record_claim", "rewrite_todo_list", "run_python", "save_url_as_source", "search_evidence", "search_text", "spawn_agent", "update_todo_status", "wait_agent", "web_search", "write_research_file"},
 		},
 		"research.executor@38": {
 			executor: "research_root", model: "agent.deep-research-deepseek-flash@1",
@@ -699,5 +707,25 @@ func TestRetiredSourceDiscoveryDefinitionsStayArchivedAndResolvable(t *testing.T
 		if definition.Archived || len(definition.Children) != 0 {
 			t.Fatalf("current release still uses fixed subagents: %+v", definition)
 		}
+	}
+}
+
+func TestReleaseV52PinsSourceTextTools(t *testing.T) {
+	catalog, err := LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, ok := catalog.ResolveRelease(MustParseReference("nano.default@52"))
+	if !ok || release.Roots["research"].String() != "research.executor@39" || release.Roots["chat"].String() != "chat.leader@7" ||
+		release.Roots["research_planner"].String() != "research.planner@15" {
+		t.Fatalf("release=%+v ok=%v", release, ok)
+	}
+	executor, ok := catalog.ResolveDefinition(MustParseReference("research.executor@39"))
+	if !ok || executor.Prompts["executor"].String() != "agent.deep-research-executor@16" || executor.Limits.InputTokens != 10_000_000 {
+		t.Fatalf("executor=%+v ok=%v", executor, ok)
+	}
+	chat, ok := catalog.ResolveDefinition(MustParseReference("chat.leader@7"))
+	if !ok || chat.Prompts["chat_composer_grounded"].String() != "agent.chat-composer-grounded@6" {
+		t.Fatalf("chat=%+v ok=%v", chat, ok)
 	}
 }

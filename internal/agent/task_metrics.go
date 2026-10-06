@@ -65,7 +65,7 @@ var modelResultKindValues = []string{"final_draft", "action_proposal", "invalid_
 
 // toolNameValues is the closed set of MCP tools the Controller can invoke
 // through the tool plane (internal/agent/mcp_tool_plane.go, actions.go).
-var toolNameValues = []string{"search_evidence", "discover_sources", "inspect_source", "web_search", "current_time", "save_url_as_source", "configured_delegation", "read_tool_result"}
+var toolNameValues = []string{"search_evidence", "discover_sources", "inspect_source", "web_search", "current_time", "save_url_as_source", "configured_delegation", "read_tool_result", "search_text", "read_source"}
 
 // ClassifyTask maps a pinned Agent Definition identity/version to the
 // (task_kind, task_variant) pair used across every task-lifecycle metric.

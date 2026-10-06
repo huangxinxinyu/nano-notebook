@@ -1533,7 +1533,13 @@ func searchedResearchSourceEvidence(prefix CheckpointPrefix) map[researchSourceE
 	result := make(map[researchSourceEvidenceReference]struct{})
 	for _, proposal := range prefix.Proposals {
 		for _, action := range proposal.Actions {
-			if action.Name != "search_evidence" || action.Result == nil || action.Result.Status != ActionSucceeded {
+			if action.Result == nil || action.Result.Status != ActionSucceeded {
+				continue
+			}
+			if action.Name != "search_evidence" {
+				for _, reference := range sourceTextEvidenceReferences(action) {
+					result[reference] = struct{}{}
+				}
 				continue
 			}
 			manifest, err := decodeSearchEvidenceResult(action.Result.Output)
@@ -1546,6 +1552,37 @@ func searchedResearchSourceEvidence(prefix CheckpointPrefix) map[researchSourceE
 		}
 	}
 	return result
+}
+
+// sourceTextEvidenceReferences names the pinned Source revisions a succeeded
+// read_source or search_text result showed text from: the read Source, or
+// each Source with at least one match.
+func sourceTextEvidenceReferences(action AcceptedAction) []researchSourceEvidenceReference {
+	if action.Result == nil || action.Result.Status != ActionSucceeded {
+		return nil
+	}
+	switch action.Name {
+	case readSourceActionName:
+		var output readSourceOutput
+		if json.Unmarshal(action.Result.Output, &output) != nil || output.Source.SourceID == "" ||
+			output.Source.EvidenceRevisionID == "" || len(output.Units) == 0 {
+			return nil
+		}
+		return []researchSourceEvidenceReference{{SourceID: output.Source.SourceID, RevisionID: output.Source.EvidenceRevisionID}}
+	case searchTextActionName:
+		var output searchTextOutput
+		if json.Unmarshal(action.Result.Output, &output) != nil {
+			return nil
+		}
+		references := make([]researchSourceEvidenceReference, 0, len(output.Sources))
+		for _, source := range output.Sources {
+			if source.Matches > 0 && source.SourceID != "" && source.EvidenceRevisionID != "" {
+				references = append(references, researchSourceEvidenceReference{SourceID: source.SourceID, RevisionID: source.EvidenceRevisionID})
+			}
+		}
+		return references
+	}
+	return nil
 }
 
 func rewriteResearchReportLinks(report string, eligible map[string]bool) (string, []string) {

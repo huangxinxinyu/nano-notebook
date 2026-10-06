@@ -553,6 +553,9 @@ func main() {
 		MaximumPageBytes: config.ToolResultPageBytes,
 	}
 	readToolResultTool := agent.NewReadToolResultAction(toolResultReader, compactedToolResultReader)
+	sourceText := agent.NewSourceTextService(db.Pool(), sourceObjects, &toolResultReader)
+	searchTextTool := agent.NewSearchTextAction(sourceText)
+	readSourceTool := agent.NewReadSourceAction(sourceText)
 	researchURLTools := agent.NewVersionedResearchURLActions(researchURLReader, webReaderAdapter, webReaderAdapter)
 	readURLTool := agent.NewResearchDeduplicatingAction(db.Pool(), researchURLTools[0])
 	readDocumentPagesTool := researchURLTools[1]
@@ -579,7 +582,7 @@ func main() {
 	recordClaimTool := agent.NewRecordClaimAction(db.Pool(), &toolResultReader)
 	requestUserInputTool := agent.NewRequestUserInputAction(db.Pool())
 	registryTools := []agent.Action{
-		calculateTool, currentTimeTool, discoverSourcesTool, rewriteTodoListTool, inspectSourceTool, searchEvidenceTool, updateTodoStatusTool,
+		calculateTool, currentTimeTool, discoverSourcesTool, rewriteTodoListTool, inspectSourceTool, searchEvidenceTool, searchTextTool, readSourceTool, updateTodoStatusTool,
 		webSearchTool, readSkillTool, readToolResultTool, readURLTool, readDocumentPagesTool, saveURLAsSourceTool, runPythonTool, recordClaimTool, requestUserInputTool,
 	}
 	registryTools = append(registryTools, workspaceTools...)
@@ -605,6 +608,8 @@ func main() {
 		agent.MCPToolRegistration{Action: rewriteTodoListTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: inspectSourceTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: searchEvidenceTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: searchTextTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
+		agent.MCPToolRegistration{Action: readSourceTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: updateTodoStatusTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: webSearchTool, Scheduling: agentcatalog.ToolOrderedSync, CrashReplaySafe: true},
 		agent.MCPToolRegistration{Action: readSkillTool, Scheduling: agentcatalog.ToolParallel, CrashReplaySafe: true},

@@ -1,0 +1,27 @@
+{
+  "identity": "chat.leader",
+  "version": 7,
+  "executor": "chat_leader",
+  "model_policy": "agent.chat-default@2",
+  "prompts": {
+    "leader_router": "agent.leader-router@1",
+    "chat_composer_bare": "agent.chat-composer-bare@4",
+    "chat_composer_grounded": "agent.chat-composer-grounded@6"
+  },
+  "contracts": {
+    "input": "chat.turn@1",
+    "result": "chat.answer@1"
+  },
+  "tools": ["calculate", "current_time", "discover_sources", "read_source", "rewrite_todo_list", "search_evidence", "search_text", "update_todo_status"],
+  "children": [],
+  "limits": {
+    "model_calls": 17,
+    "action_decisions": 4,
+    "actions": 8,
+    "plan_mutations": 12,
+    "action_batch": 4,
+    "context_bytes": 65536,
+    "result_bytes": 65536,
+    "attempts": 3
+  }
+}

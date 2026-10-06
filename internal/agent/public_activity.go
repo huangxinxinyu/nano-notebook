@@ -44,6 +44,27 @@ func projectPublicActivity(action AcceptedAction, startedAt time.Time, context p
 			activity.Kind = "inspecting_source"
 			activity.Detail = safeActivityText(context.sourceTitles[input.SourceID], 160)
 		}
+	case searchTextActionName:
+		var input searchTextInput
+		if json.Unmarshal(action.Input, &input) == nil {
+			activity.Kind = "searching_sources"
+			if title := context.sourceTitles[input.SourceID]; title != "" {
+				activity.Detail = safeActivityText(title, 160)
+			} else if input.ResultRef == "" {
+				activity.Detail = safeActivityText(strings.Join(context.selectedTitles, "、"), 160)
+			}
+		}
+	case readSourceActionName:
+		var input readSourceInput
+		if json.Unmarshal(action.Input, &input) == nil {
+			activity.Kind = "inspecting_source"
+			title := safeActivityText(context.sourceTitles[input.SourceID], 120)
+			if title != "" && input.PageStart > 0 && input.PageEnd >= input.PageStart {
+				activity.Detail = fmt.Sprintf("%s · %d–%d", title, input.PageStart, input.PageEnd)
+			} else {
+				activity.Detail = title
+			}
+		}
 	case "read_document_pages":
 		var input readDocumentPagesInput
 		if json.Unmarshal(action.Input, &input) == nil && input.StartPage > 0 && input.EndPage >= input.StartPage {
