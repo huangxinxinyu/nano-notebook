@@ -419,3 +419,26 @@ func TestClaimQuotesMatchArxivTextWithDuplicatedMath(t *testing.T) {
 		t.Fatalf("changed numbers verified: %+v", got)
 	}
 }
+
+func TestRecordClaimMatchesAnArxivPaperUnderAnotherURL(t *testing.T) {
+	body, _ := json.Marshal(readURLOutput{Title: "RQ-RAG", FinalURL: "https://arxiv.org/html/2404.00610v1", Markdown: "In this paper, we introduce RQ-RAG, a framework that enhances LLMs by training them to refine queries."})
+	prefix := CheckpointPrefix{Proposals: []AcceptedProposal{
+		{DecisionNo: 1, Actions: []AcceptedAction{
+			claimTestAction(t, 1, 0, "read_url", readURLInput{URL: "https://arxiv.org/abs/2404.00610"}, ToolResultProjection{
+				ContentState: ToolResultExternalized, Preview: string(body), ResultRef: "tr_rqragrqragrqrag", ResultBytes: len(body),
+			}),
+		}},
+		{DecisionNo: 2, Actions: []AcceptedAction{{ActionID: "decision:2/action:0", Index: 0, Name: recordClaimActionName}}},
+	}}
+	action := &recordClaimAction{backend: fakeResearchClaimBackend{tree: researchClaimTree{Runs: []researchClaimRun{{RunID: "run_reader", Prefix: prefix}}}}}
+	input := recordClaimInput{Source: "https://arxiv.org/html/2404.00610v1", Quote: "we introduce RQ-RAG, a framework that enhances LLMs by training them to refine queries", Claim: "RQ-RAG trains query refinement"}
+	result, err := action.Execute(context.Background(), ActionRequest{ActionID: "decision:2/action:0", Input: mustClaimJSON(t, input), Attempt: Attempt{RunID: "run_reader"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output recordClaimOutput
+	_ = json.Unmarshal(result.Output, &output)
+	if output.Status != claimStatusVerified {
+		t.Fatalf("output=%+v", output)
+	}
+}

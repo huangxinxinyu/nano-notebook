@@ -283,7 +283,9 @@ func (a *recordClaimAction) resolveSource(ctx context.Context, request ActionReq
 // while it is still cached, or else its checkpointed preview plus any pages the
 // model read back with read_tool_result.
 func (a *recordClaimAction) readURLSourceText(ctx context.Context, request ActionRequest, tree researchClaimTree, url string) (researchClaimSourceText, bool, error) {
-	want := normalizeClaimURL(url)
+	// A card may name any URL of the read document: readers read an arXiv
+	// abs page but often cite the html page it resolved to.
+	want := researchDocumentKey(url)
 	var result researchClaimSourceText
 	var parts []string
 	for _, run := range tree.Runs {
@@ -297,7 +299,7 @@ func (a *recordClaimAction) readURLSourceText(ctx context.Context, request Actio
 				_ = json.Unmarshal(action.Input, &input)
 				var projection ToolResultProjection
 				if json.Unmarshal(action.Result.Output, &projection) == nil && projection.ContentState != "" {
-					if normalizeClaimURL(input.URL) != want {
+					if researchDocumentKey(input.URL) != want {
 						continue
 					}
 					if hydrated, ok, err := a.hydrateReadURL(ctx, request, run.RunID, proposal.DecisionNo, action); err != nil {
@@ -318,7 +320,7 @@ func (a *recordClaimAction) readURLSourceText(ctx context.Context, request Actio
 				if json.Unmarshal(action.Result.Output, &output) != nil || output.Markdown == "" {
 					continue
 				}
-				if normalizeClaimURL(input.URL) != want && normalizeClaimURL(output.FinalURL) != want && normalizeClaimURL(output.RequestedURL) != want {
+				if researchDocumentKey(input.URL) != want && researchDocumentKey(output.FinalURL) != want && researchDocumentKey(output.RequestedURL) != want {
 					continue
 				}
 				parts = append(parts, output.Title+"\n\n"+output.Markdown)
