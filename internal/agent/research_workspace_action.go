@@ -123,7 +123,7 @@ func researchWorkspaceSnapshotFromPrefix(prefix CheckpointPrefix) researchWorksp
 				}
 				continue
 			}
-			if action.Name != "write_research_file" && action.Name != "assemble_research_report" {
+			if action.Name != "write_research_file" && action.Name != editResearchFileActionName && action.Name != "assemble_research_report" {
 				continue
 			}
 			var file researchWorkspaceFile
@@ -198,6 +198,106 @@ func decodeWriteResearchFileInput(raw json.RawMessage) (writeResearchFileInput, 
 	if decodeExactJSON(raw, &input) != nil || validateResearchWorkspacePath(input.Path, false) != nil ||
 		strings.TrimSpace(input.Content) == "" || len([]byte(input.Content)) > int(researchWorkspaceFileMaxBytes) || !utf8.ValidString(input.Content) {
 		return writeResearchFileInput{}, errors.New("invalid write_research_file input")
+	}
+	return input, nil
+}
+
+const editResearchFileActionName = "edit_research_file"
+
+type editResearchFileAction struct {
+	store objectstore.Store
+	index researchWorkspaceIndex
+}
+
+type editResearchFileInput struct {
+	Path       string  `json:"path"`
+	OldString  string  `json:"old_string"`
+	NewString  *string `json:"new_string"`
+	ReplaceAll bool    `json:"replace_all,omitempty"`
+}
+
+func newEditResearchFileAction(store objectstore.Store, index researchWorkspaceIndex) Action {
+	return &editResearchFileAction{store: store, index: index}
+}
+
+func (*editResearchFileAction) CrashReplaySafe() bool { return true }
+
+func (a *editResearchFileAction) Available(Execution) (bool, string) {
+	return a != nil && a.store != nil && a.index != nil, "research_workspace_unavailable"
+}
+
+func (*editResearchFileAction) Definition() models.ActionDefinition {
+	return models.ActionDefinition{
+		Name:        editResearchFileActionName,
+		Description: "Replace exact text in the latest version of one Markdown or data file in this Research Run's workspace, leaving the rest of the file untouched. old_string must match the file exactly (whitespace included) and occur once; include enough surrounding text to make it unique, or set replace_all. Use it for local fixes after review; use write_research_file for a first draft or a rewrite. Creates a new immutable version.",
+		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["path","old_string","new_string"],"properties":{"path":{"type":"string","minLength":1,"maxLength":96},"old_string":{"type":"string","minLength":1,"maxLength":98304},"new_string":{"type":"string","maxLength":98304},"replace_all":{"type":"boolean","description":"Replace every occurrence instead of requiring exactly one."}}}`),
+	}
+}
+
+func (*editResearchFileAction) ValidateInput(raw json.RawMessage) error {
+	_, err := decodeEditResearchFileInput(raw)
+	return err
+}
+
+func (a *editResearchFileAction) Execute(ctx context.Context, request ActionRequest) (ActionResult, error) {
+	input, err := decodeEditResearchFileInput(request.Input)
+	if err != nil {
+		return ActionResult{}, err
+	}
+	if a == nil || a.store == nil || a.index == nil {
+		return ActionResult{Status: ActionDomainError, ErrorCode: "research_workspace_unavailable"}, nil
+	}
+	snapshot, err := a.index.Snapshot(ctx, request.Attempt.RunID)
+	if err != nil {
+		return ActionResult{}, err
+	}
+	current, ok := snapshot.Files[input.Path]
+	if !ok {
+		return ActionResult{Status: ActionDomainError, ErrorCode: "research_file_not_found"}, nil
+	}
+	payload, err := getResearchWorkspaceObject(ctx, a.store, current, researchWorkspaceFileMaxBytes)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ActionResult{}, ctx.Err()
+		}
+		return ActionResult{Status: ActionDomainError, ErrorCode: "research_workspace_read_failed"}, nil
+	}
+	content := string(payload)
+	switch occurrences := strings.Count(content, input.OldString); {
+	case occurrences == 0:
+		return ActionResult{Status: ActionDomainError, ErrorCode: "research_edit_not_found"}, nil
+	case occurrences > 1 && !input.ReplaceAll:
+		return ActionResult{Status: ActionDomainError, ErrorCode: "research_edit_not_unique"}, nil
+	}
+	limit := 1
+	if input.ReplaceAll {
+		limit = -1
+	}
+	edited := strings.Replace(content, input.OldString, *input.NewString, limit)
+	if strings.TrimSpace(edited) == "" || int64(len(edited)) > researchWorkspaceFileMaxBytes {
+		return ActionResult{Status: ActionDomainError, ErrorCode: "research_edit_result_invalid"}, nil
+	}
+	file, err := putResearchWorkspaceObject(ctx, a.store, request.Attempt.RunID, request.ActionID, input.Path, []byte(edited), false)
+	if err != nil {
+		if ctx.Err() != nil {
+			return ActionResult{}, ctx.Err()
+		}
+		return ActionResult{Status: ActionDomainError, ErrorCode: "research_workspace_write_failed"}, nil
+	}
+	output, err := json.Marshal(file)
+	if err != nil {
+		return ActionResult{}, err
+	}
+	return ActionResult{Status: ActionSucceeded, Output: output}, nil
+}
+
+func decodeEditResearchFileInput(raw json.RawMessage) (editResearchFileInput, error) {
+	var input editResearchFileInput
+	if decodeExactJSON(raw, &input) != nil || validateResearchWorkspacePath(input.Path, false) != nil ||
+		input.NewString == nil || input.OldString == "" || input.OldString == *input.NewString ||
+		len(input.OldString) > int(researchWorkspaceFileMaxBytes) || len(*input.NewString) > int(researchWorkspaceFileMaxBytes) ||
+		!utf8.ValidString(input.OldString) || !utf8.ValidString(*input.NewString) {
+		return editResearchFileInput{}, errors.New("invalid edit_research_file input")
 	}
 	return input, nil
 }
@@ -646,6 +746,7 @@ func NewResearchWorkspaceActions(pool *pgxpool.Pool, store objectstore.Store) ([
 	index := postgresResearchWorkspaceIndex{pool: pool}
 	return []Action{
 		newWriteResearchFileAction(store),
+		newEditResearchFileAction(store, index),
 		newReadResearchFileAction(store, index, postgresResearchClaimBackend{pool: pool}),
 		newListResearchFilesAction(index),
 		&assembleResearchReportAction{store: store, index: index, barrier: postgresResearchSourceImportBarrier{pool: pool}, claims: postgresResearchClaimBackend{pool: pool}, sources: postgresResearchClaimBackend{pool: pool}, agents: postgresResearchClaimBackend{pool: pool}},

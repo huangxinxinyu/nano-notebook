@@ -623,7 +623,7 @@ func main() {
 	}
 	for _, workspaceTool := range workspaceTools {
 		scheduling := agentcatalog.ToolParallel
-		if workspaceTool.Definition().Name == "write_research_file" || workspaceTool.Definition().Name == "assemble_research_report" {
+		if workspaceTool.Definition().Name == "write_research_file" || workspaceTool.Definition().Name == "edit_research_file" || workspaceTool.Definition().Name == "assemble_research_report" {
 			scheduling = agentcatalog.ToolOrderedSync
 		}
 		mcpToolRegistrations = append(mcpToolRegistrations, agent.MCPToolRegistration{

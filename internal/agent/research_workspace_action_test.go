@@ -175,7 +175,7 @@ func TestResearchWorkspaceToolsAreCrashReplaySafe(t *testing.T) {
 	store := objectstore.NewMemoryStore()
 	index := researchWorkspaceIndexStub{snapshot: researchWorkspaceSnapshot{Files: map[string]researchWorkspaceFile{}}}
 	for _, action := range []Action{
-		newWriteResearchFileAction(store), newReadResearchFileAction(store, index),
+		newWriteResearchFileAction(store), newEditResearchFileAction(store, index), newReadResearchFileAction(store, index),
 		newListResearchFilesAction(index), newAssembleResearchReportAction(store, index),
 	} {
 		policy, ok := action.(CrashReplayPolicy)
@@ -229,5 +229,90 @@ func TestAssembleInputErrorsNameTheProblem(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("%s err=%v want %q", raw, err, want)
 		}
+	}
+}
+
+func TestEditResearchFileReplacesExactTextAndKeepsTheRest(t *testing.T) {
+	ctx := context.Background()
+	store := objectstore.NewMemoryStore()
+	original := mustWorkspaceObject(t, ctx, store, "run_research", "decision:1/action:0", "sections/choice.md",
+		"## Choice\n\nUse the durable runtime.\n\nIt resumes after a crash.\n")
+	index := researchWorkspaceIndexStub{snapshot: researchWorkspaceSnapshot{Files: map[string]researchWorkspaceFile{original.Path: original}}}
+	action := newEditResearchFileAction(store, index)
+	edit := func(actionID string, input map[string]any) ActionResult {
+		t.Helper()
+		result, err := action.Execute(ctx, ActionRequest{ActionID: actionID, Attempt: Attempt{RunID: "run_research"}, Input: mustJSON(t, input)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+
+	result := edit("decision:2/action:0", map[string]any{"path": "sections/choice.md", "old_string": "durable runtime", "new_string": "checkpointed runtime"})
+	var output researchWorkspaceFileOutput
+	if result.Status != ActionSucceeded || json.Unmarshal(result.Output, &output) != nil || output.Path != "sections/choice.md" || output.SHA256 == original.SHA256 {
+		t.Fatalf("result=%+v", result)
+	}
+	payload, err := store.Get(ctx, output.ObjectKey, researchWorkspaceFileMaxBytes)
+	if err != nil || string(payload) != "## Choice\n\nUse the checkpointed runtime.\n\nIt resumes after a crash.\n" {
+		t.Fatalf("payload=%q err=%v", payload, err)
+	}
+	if old, err := store.Get(ctx, original.ObjectKey, researchWorkspaceFileMaxBytes); err != nil || !strings.Contains(string(old), "durable runtime") {
+		t.Fatalf("the previous version must stay: %q err=%v", old, err)
+	}
+	if again := edit("decision:2/action:0", map[string]any{"path": "sections/choice.md", "old_string": "durable runtime", "new_string": "checkpointed runtime"}); string(again.Output) != string(result.Output) {
+		t.Fatalf("replay differs: %s vs %s", again.Output, result.Output)
+	}
+
+	for name, tc := range map[string]struct {
+		input map[string]any
+		code  string
+	}{
+		"missing text":    {map[string]any{"path": "sections/choice.md", "old_string": "absent", "new_string": "x"}, "research_edit_not_found"},
+		"missing file":    {map[string]any{"path": "sections/other.md", "old_string": "a", "new_string": "b"}, "research_file_not_found"},
+		"emptied file":    {map[string]any{"path": "sections/choice.md", "old_string": original.Path, "new_string": ""}, "research_edit_not_found"},
+		"ambiguous match": {map[string]any{"path": "sections/choice.md", "old_string": "e", "new_string": "E"}, "research_edit_not_unique"},
+	} {
+		if got := edit("decision:9/action:0", tc.input); got.Status != ActionDomainError || got.ErrorCode != tc.code {
+			t.Errorf("%s: result=%+v want %s", name, got, tc.code)
+		}
+	}
+	if all := edit("decision:10/action:0", map[string]any{"path": "sections/choice.md", "old_string": "e", "new_string": "E", "replace_all": true}); all.Status != ActionSucceeded {
+		t.Fatalf("replace_all=%+v", all)
+	}
+}
+
+func TestEditResearchFileRejectsUnsafeInput(t *testing.T) {
+	action := newEditResearchFileAction(objectstore.NewMemoryStore(), researchWorkspaceIndexStub{})
+	for _, raw := range []string{
+		`{"path":"report.md","old_string":"a","new_string":"b"}`,
+		`{"path":"claims.md","old_string":"a","new_string":"b"}`,
+		`{"path":"sections/a.md","old_string":"","new_string":"b"}`,
+		`{"path":"sections/a.md","old_string":"same","new_string":"same"}`,
+		`{"path":"sections/a.md","old_string":"a"}`,
+	} {
+		if err := action.ValidateInput(json.RawMessage(raw)); err == nil {
+			t.Errorf("accepted %s", raw)
+		}
+	}
+	if err := action.ValidateInput(json.RawMessage(`{"path":"sections/a.md","old_string":"a","new_string":""}`)); err != nil {
+		t.Errorf("deleting text must be allowed: %v", err)
+	}
+}
+
+func TestResearchWorkspaceSnapshotFollowsEditedVersion(t *testing.T) {
+	ctx := context.Background()
+	store := objectstore.NewMemoryStore()
+	written := mustWorkspaceObject(t, ctx, store, "run_research", "decision:1/action:0", "sections/choice.md", "A one")
+	edited := mustWorkspaceObject(t, ctx, store, "run_research", "decision:2/action:0", "sections/choice.md", "A two")
+	output := func(file researchWorkspaceFile) *ActionResult {
+		return &ActionResult{Status: ActionSucceeded, Output: mustJSON(t, file)}
+	}
+	prefix := CheckpointPrefix{Proposals: []AcceptedProposal{
+		{DecisionNo: 1, Actions: []AcceptedAction{{Name: "write_research_file", Result: output(written)}}},
+		{DecisionNo: 2, Actions: []AcceptedAction{{Name: editResearchFileActionName, Result: output(edited)}}},
+	}}
+	if got := researchWorkspaceSnapshotFromPrefix(prefix).Files["sections/choice.md"]; got.SHA256 != edited.SHA256 {
+		t.Fatalf("snapshot=%+v want the edited version", got)
 	}
 }

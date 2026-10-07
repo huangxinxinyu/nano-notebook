@@ -166,7 +166,7 @@ func (r *ResearchRuntime) TokenBudgetWrapUpTools(execution Execution) map[string
 	}
 	return map[string]bool{
 		"assemble_research_report": true, "list_agents": true, "list_research_files": true,
-		"read_research_file": true, "wait_agent": true, "write_research_file": true,
+		"read_research_file": true, "wait_agent": true, "write_research_file": true, "edit_research_file": true,
 	}
 }
 
