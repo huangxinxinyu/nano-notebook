@@ -29,7 +29,7 @@ func TestEmbeddedCatalogContainsEveryProductionPrompt(t *testing.T) {
 		"agent.studio-data-table":                     "studio_data_table_result.v1",
 		"source-processing.image-evidence-normalizer": "image_evidence_regions.v1",
 	}
-	const extraVersions = 37 // chat composer upgrades plus final deep Research planner/executor/reporter/compactor upgrades, alongside their @1s
+	const extraVersions = 38 // chat composer upgrades plus final deep Research planner/executor/reporter/compactor upgrades, alongside their @1s
 	if got := len(catalog.Versions()); got != len(want)+extraVersions {
 		t.Fatalf("versions=%d want=%d", got, len(want)+extraVersions)
 	}
@@ -227,5 +227,17 @@ func TestArchivedPromptsRemainResolvableWithoutAppearingInActiveCatalog(t *testi
 	current, ok := catalog.Resolve("agent.deep-research-executor", 8)
 	if !ok || current.Archived {
 		t.Fatalf("claim card executor is not current: %+v", current)
+	}
+}
+
+func TestExecutorV17WritesSectionsInOrderAndEditsLocally(t *testing.T) {
+	prompt, ok := MustLoadEmbedded().Resolve("agent.deep-research-executor", 17)
+	if !ok || prompt.Contract != "research_execution_text.v1" {
+		t.Fatalf("executor v17=%+v ok=%v", prompt, ok)
+	}
+	for _, required := range []string{"one at a time", "read the section before it", "edit_research_file", "between sections", "hidden and counted", "changed after `review.md`"} {
+		if !strings.Contains(prompt.Content, required) {
+			t.Fatalf("executor v17 is missing %q", required)
+		}
 	}
 }

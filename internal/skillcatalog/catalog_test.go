@@ -47,6 +47,18 @@ func TestResearchWorkflowV2TeachesScopedInspectionSearch(t *testing.T) {
 	}
 }
 
+func TestSourceReadingV3RetriesThenDropsUnverifiedCards(t *testing.T) {
+	skill, ok := MustLoadEmbedded().Resolve("skill.source-reading", 3)
+	if !ok {
+		t.Fatal("missing skill.source-reading@3")
+	}
+	for _, required := range []string{"at most twice", "drop the claim", "hides cards that failed", "source's own language", "check its numbers"} {
+		if !strings.Contains(skill.Body, required) {
+			t.Fatalf("source-reading v3 is missing %q", required)
+		}
+	}
+}
+
 func TestCanonicalSHA256NormalizesSkillContent(t *testing.T) {
 	left := SkillVersion{Identity: "skill.test", Version: 2, Name: "Test Skill", Description: "Useful test skill", Body: "alpha\r\nbeta"}
 	right := SkillVersion{Identity: "skill.test", Version: 2, Name: "Test Skill", Description: "Useful test skill", Body: "alpha\nbeta\n"}
