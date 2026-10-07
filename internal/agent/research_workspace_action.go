@@ -61,6 +61,9 @@ type researchWorkspaceAssemblyOutput struct {
 
 type researchWorkspaceSnapshot struct {
 	Files map[string]researchWorkspaceFile
+	// Order numbers each path's latest write in checkpoint order, so a caller
+	// can tell which file changed after another. Nil where unknown.
+	Order map[string]int
 }
 
 type researchWorkspaceIndex interface {
@@ -104,7 +107,8 @@ func (i postgresResearchWorkspaceIndex) Snapshot(ctx context.Context, runID stri
 }
 
 func researchWorkspaceSnapshotFromPrefix(prefix CheckpointPrefix) researchWorkspaceSnapshot {
-	snapshot := researchWorkspaceSnapshot{Files: make(map[string]researchWorkspaceFile)}
+	snapshot := researchWorkspaceSnapshot{Files: make(map[string]researchWorkspaceFile), Order: make(map[string]int)}
+	writes := 0
 	for _, proposal := range prefix.Proposals {
 		for _, action := range proposal.Actions {
 			if action.Result == nil || action.Result.Status != ActionSucceeded {
@@ -117,7 +121,8 @@ func researchWorkspaceSnapshotFromPrefix(prefix CheckpointPrefix) researchWorksp
 				if json.Unmarshal(action.Result.Output, &output) == nil {
 					for _, file := range output.Files {
 						if validateResearchWorkspaceFile(file) == nil && researchWorkspaceDataPathPattern.MatchString(file.Path) {
-							snapshot.Files[file.Path] = file
+							writes++
+							snapshot.Files[file.Path], snapshot.Order[file.Path] = file, writes
 						}
 					}
 				}
@@ -130,7 +135,8 @@ func researchWorkspaceSnapshotFromPrefix(prefix CheckpointPrefix) researchWorksp
 			if json.Unmarshal(action.Result.Output, &file) != nil || validateResearchWorkspaceFile(file) != nil {
 				continue
 			}
-			snapshot.Files[file.Path] = file
+			writes++
+			snapshot.Files[file.Path], snapshot.Order[file.Path] = file, writes
 		}
 	}
 	return snapshot
@@ -546,6 +552,9 @@ func (a *assembleResearchReportAction) Execute(ctx context.Context, request Acti
 	guidance := "Assembly succeeded. Before Final, read the assembled sections as a whole, write review.md, revise weak sections, and assemble again."
 	if reviewPresent {
 		guidance = "Assembly succeeded with a checkpoint-accepted review.md. Return Final only if the reviewed sections satisfy the accepted plan."
+		if changed := sectionsEditedAfterReview(snapshot, input.SectionPaths); len(changed) > 0 {
+			guidance = "Assembly succeeded, but " + strings.Join(changed, ", ") + " changed after review.md was written. Re-read each changed section together with the sections before and after it in the report order; fix repeated points, contradictions, shifted terminology, and broken transitions; update review.md; then assemble again before Final."
+		}
 	}
 	var citationCheck *researchCitationCheck
 	var coverage *researchSourceCoverage
@@ -751,4 +760,20 @@ func NewResearchWorkspaceActions(pool *pgxpool.Pool, store objectstore.Store) ([
 		newListResearchFilesAction(index),
 		&assembleResearchReportAction{store: store, index: index, barrier: postgresResearchSourceImportBarrier{pool: pool}, claims: postgresResearchClaimBackend{pool: pool}, sources: postgresResearchClaimBackend{pool: pool}, agents: postgresResearchClaimBackend{pool: pool}},
 	}, nil
+}
+
+// sectionsEditedAfterReview lists the assembled sections last written after
+// review.md, in report order: the review no longer covers them.
+func sectionsEditedAfterReview(snapshot researchWorkspaceSnapshot, sectionPaths []string) []string {
+	reviewed, ok := snapshot.Order["review.md"]
+	if !ok {
+		return nil
+	}
+	changed := make([]string, 0)
+	for _, path := range sectionPaths {
+		if snapshot.Order[path] > reviewed {
+			changed = append(changed, path)
+		}
+	}
+	return changed
 }

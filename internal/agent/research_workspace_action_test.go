@@ -316,3 +316,39 @@ func TestResearchWorkspaceSnapshotFollowsEditedVersion(t *testing.T) {
 		t.Fatalf("snapshot=%+v want the edited version", got)
 	}
 }
+
+func TestAssembleGuidanceFlagsSectionsEditedAfterReview(t *testing.T) {
+	ctx := context.Background()
+	store := objectstore.NewMemoryStore()
+	file := func(actionID, path, content string) researchWorkspaceFile {
+		return mustWorkspaceObject(t, ctx, store, "run_research", actionID, path, content)
+	}
+	result := func(f researchWorkspaceFile) *ActionResult {
+		return &ActionResult{Status: ActionSucceeded, Output: mustJSON(t, f)}
+	}
+	intro1, results := file("d1", "sections/intro.md", "## Intro\n\nv1"), file("d2", "sections/results.md", "## Results\n\nbody")
+	review, intro2 := file("d3", "review.md", "fine"), file("d4", "sections/intro.md", "## Intro\n\nv2")
+	prefix := CheckpointPrefix{Proposals: []AcceptedProposal{
+		{DecisionNo: 1, Actions: []AcceptedAction{{Name: "write_research_file", Result: result(intro1)}, {Name: "write_research_file", Result: result(results)}}},
+		{DecisionNo: 2, Actions: []AcceptedAction{{Name: "write_research_file", Result: result(review)}}},
+		{DecisionNo: 3, Actions: []AcceptedAction{{Name: editResearchFileActionName, Result: result(intro2)}}},
+	}}
+	snapshot := researchWorkspaceSnapshotFromPrefix(prefix)
+	if got := sectionsEditedAfterReview(snapshot, []string{"sections/intro.md", "sections/results.md"}); len(got) != 1 || got[0] != "sections/intro.md" {
+		t.Fatalf("changed=%v", got)
+	}
+	assembled, err := newAssembleResearchReportAction(store, researchWorkspaceIndexStub{snapshot: snapshot}).Execute(ctx, ActionRequest{
+		ActionID: "d5", Attempt: Attempt{RunID: "run_research"},
+		Input: json.RawMessage(`{"title":"T","section_paths":["sections/intro.md","sections/results.md"]}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state researchWorkspaceAssemblyOutput
+	if json.Unmarshal(assembled.Output, &state) != nil || !strings.Contains(state.Guidance, "sections/intro.md changed after review.md") || strings.Contains(state.Guidance, "sections/results.md changed") {
+		t.Fatalf("guidance=%q", state.Guidance)
+	}
+	if got := sectionsEditedAfterReview(researchWorkspaceSnapshot{Files: snapshot.Files}, []string{"sections/intro.md"}); got != nil {
+		t.Fatalf("a snapshot without order must not flag sections: %v", got)
+	}
+}
