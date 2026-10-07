@@ -203,10 +203,35 @@ func TestClaimsMarkdownListsCardsFromRootAndChildren(t *testing.T) {
 	}}}}
 	claims := collectResearchClaims(researchClaimTree{Runs: []researchClaimRun{{RunID: "r", Prefix: root}, {RunID: "c", Namespace: "ab12", Prefix: child}}})
 	markdown := renderResearchClaimsMarkdown(claims)
-	for _, want := range []string{"- [c1] (verified) claim one", "Paper A — https://a.example", "Conditions: LIBERO only", "- [ab12-c1] (not_found) claim two"} {
+	for _, want := range []string{"- [c1] (verified) claim one", "Paper A — https://a.example", "Conditions: LIBERO only", "1 card(s) failed verification"} {
 		if !strings.Contains(markdown, want) {
 			t.Fatalf("claims.md missing %q:\n%s", want, markdown)
 		}
+	}
+	if strings.Contains(markdown, "ab12-c1") || strings.Contains(markdown, "claim two") {
+		t.Fatalf("claims.md lists an unverified card:\n%s", markdown)
+	}
+}
+
+func TestClaimsMarkdownShowsNearMatchAndHidesUnverified(t *testing.T) {
+	claims := []researchClaim{
+		{recordClaimOutput: recordClaimOutput{ID: "c1", Status: claimStatusNearMatch, URL: "https://a.example"}, Claim: "near claim", Quote: "q"},
+		{recordClaimOutput: recordClaimOutput{ID: "c2", Status: claimStatusSourceUnavailable}, Claim: "unread claim"},
+		{recordClaimOutput: recordClaimOutput{ID: "c3", Status: claimStatusNotFound}, Claim: "missing claim"},
+	}
+	markdown := renderResearchClaimsMarkdown(claims)
+	if !strings.Contains(markdown, "[c1] (near_match) near claim") || strings.Contains(markdown, "unread claim") || strings.Contains(markdown, "missing claim") {
+		t.Fatalf("markdown=%s", markdown)
+	}
+	if !strings.Contains(markdown, "2 card(s) failed verification") {
+		t.Fatalf("hidden count missing:\n%s", markdown)
+	}
+	onlyBad := renderResearchClaimsMarkdown(claims[1:])
+	if !strings.Contains(onlyBad, "No checked claim cards yet.") || strings.Contains(onlyBad, "recorded yet") {
+		t.Fatalf("markdown=%s", onlyBad)
+	}
+	if !strings.Contains(renderResearchClaimsMarkdown(nil), "No claim cards recorded yet.") {
+		t.Fatal("empty claims.md lost its placeholder")
 	}
 }
 
@@ -453,5 +478,21 @@ func TestAdjacentCitationsOfOneSourceRenderOnce(t *testing.T) {
 	want := "S2G judges sufficiency [1](https://arxiv.org/abs/2604.23783). Self-RAG reflects [2](https://arxiv.org/abs/2310.11511) and S2G agrees [1](https://arxiv.org/abs/2604.23783), [1](https://arxiv.org/abs/2604.23783)."
 	if rendered != want {
 		t.Fatalf("rendered=%q\nwant    =%q", rendered, want)
+	}
+}
+
+func TestClaimsMarkdownDropsNearMatchCorrectedByLaterVerifiedCard(t *testing.T) {
+	url := "https://a.example/paper"
+	claims := []researchClaim{
+		{recordClaimOutput: recordClaimOutput{ID: "a1", Status: claimStatusNearMatch, Source: url, URL: url}, Quote: "improves accuracy by 12% over the baseline", Claim: "early wording"},
+		{recordClaimOutput: recordClaimOutput{ID: "a2", Status: claimStatusVerified, Source: url, URL: url}, Quote: "improves accuracy by 12.5% over the baseline", Claim: "corrected wording"},
+		{recordClaimOutput: recordClaimOutput{ID: "a3", Status: claimStatusNearMatch, Source: url, URL: url}, Quote: "trained for 300 epochs on eight GPUs", Claim: "unrelated near match"},
+	}
+	markdown := renderResearchClaimsMarkdown(claims)
+	if strings.Contains(markdown, "early wording") || !strings.Contains(markdown, "corrected wording") || !strings.Contains(markdown, "unrelated near match") {
+		t.Fatalf("markdown=%s", markdown)
+	}
+	if strings.Contains(markdown, "failed verification") {
+		t.Fatalf("a superseded card is not a failed one:\n%s", markdown)
 	}
 }

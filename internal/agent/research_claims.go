@@ -659,14 +659,55 @@ func citedClaimIDs(list string) []string {
 	return ids
 }
 
+// supersededNearMatchClaims finds near_match cards that a later verified card
+// of the same source corrects: its quote covers the earlier quote's trigrams.
+func supersededNearMatchClaims(claims []researchClaim) map[string]bool {
+	superseded := map[string]bool{}
+	for index, earlier := range claims {
+		if earlier.Status != claimStatusNearMatch {
+			continue
+		}
+		want := normalizeClaimText(cleanClaimMathText(earlier.Quote)).runes
+		for _, later := range claims[index+1:] {
+			if later.Status != claimStatusVerified || normalizeClaimURL(firstNonEmpty(later.URL, later.Source)) != normalizeClaimURL(firstNonEmpty(earlier.URL, earlier.Source)) {
+				continue
+			}
+			have := normalizeClaimText(cleanClaimMathText(later.Quote)).runes
+			if score, _, _ := nearestClaimWindow(have, want); score >= claimNearMatchScore {
+				superseded[earlier.ID] = true
+				break
+			}
+		}
+	}
+	return superseded
+}
+
 func renderResearchClaimsMarkdown(claims []researchClaim) string {
 	var builder strings.Builder
 	builder.WriteString("# Claim cards\n\nCite each card in report prose by its exact id shown in brackets below, such as [a2] or [b1, c3]; never renumber cards. The published report turns them into numbered source links.\n")
-	if len(claims) == 0 {
-		builder.WriteString("\nNo claim cards recorded yet.\n")
-		return builder.String()
-	}
+	superseded := supersededNearMatchClaims(claims)
+	shown := make([]researchClaim, 0, len(claims))
+	hidden := 0
 	for _, claim := range claims {
+		switch {
+		case superseded[claim.ID]:
+		case claim.Status == claimStatusVerified || claim.Status == claimStatusNearMatch:
+			shown = append(shown, claim)
+		default:
+			hidden++
+		}
+	}
+	if len(shown) == 0 {
+		if hidden == 0 {
+			builder.WriteString("\nNo claim cards recorded yet.\n")
+		} else {
+			builder.WriteString("\nNo checked claim cards yet.\n")
+		}
+	}
+	if hidden > 0 {
+		fmt.Fprintf(&builder, "\n%d card(s) failed verification (quote not found in the read text, or source not read) and are hidden here. Do not cite them or state their claims; where evidence is thin, say so.\n", hidden)
+	}
+	for _, claim := range shown {
 		question := ""
 		if claim.Question > 0 {
 			question = fmt.Sprintf(" Q%d", claim.Question)
