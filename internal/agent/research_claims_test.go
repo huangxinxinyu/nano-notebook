@@ -481,6 +481,26 @@ func TestAdjacentCitationsOfOneSourceRenderOnce(t *testing.T) {
 	}
 }
 
+func TestMatchClaimQuoteNumbersMustBeWholeTokens(t *testing.T) {
+	source := "Our method improves accuracy by 12.5% over the baseline, as shown in Table 2."
+	cases := []struct {
+		name, quote, want string
+	}{
+		{"exact", "improves accuracy by 12.5% over the baseline", claimStatusVerified},
+		{"integer prefix of a decimal", "improves accuracy by 12% over the baseline", claimStatusNearMatch},
+		{"swapped digits", "improves accuracy by 21.5% over the baseline", claimStatusNearMatch},
+		{"no numbers", "Our method improves accuracy by", claimStatusVerified},
+	}
+	for _, tc := range cases {
+		if got := matchClaimQuote(source, tc.quote); got.Status != tc.want {
+			t.Errorf("%s: status=%s want=%s", tc.name, got.Status, tc.want)
+		}
+	}
+	if got := matchClaimQuote(source, "improves accuracy by 12% over the baseline"); got.Nearest == "" {
+		t.Error("a number mismatch should still report the nearest excerpt")
+	}
+}
+
 func TestClaimsMarkdownDropsNearMatchCorrectedByLaterVerifiedCard(t *testing.T) {
 	url := "https://a.example/paper"
 	claims := []researchClaim{

@@ -175,9 +175,9 @@ func (a *recordClaimAction) Execute(ctx context.Context, request ActionRequest) 
 		case claimStatusVerified:
 			output.Note = "Quote found in the source text."
 		case claimStatusNearMatch:
-			output.Note = "Quote is close to, but not exactly, the source text. Compare with nearest_excerpt and record a corrected card if wording matters."
+			output.Note = "Quote is close to, but not exactly, the source text; check its numbers against nearest_excerpt. Record a corrected card with the source's exact wording."
 		default:
-			output.Note = "Quote was not found in the read source text. Copy the wording from the source, or treat this claim as unsupported."
+			output.Note = "Quote was not found in the read source text. Copy the wording from the source in the source's own language (do not translate), or treat this claim as unsupported."
 		}
 	}
 	payload, err := json.Marshal(output)
@@ -514,7 +514,11 @@ func matchClaimQuote(sourceText, quote string) claimQuoteMatch {
 	if total < claimQuoteMinRunes || len(haystack.runes) == 0 {
 		return claimQuoteMatch{Status: claimStatusNotFound}
 	}
-	if claimSegmentsInOrder(haystack.runes, segments) {
+	// Normalization drops "." and "%", so "12" is a prefix of "12.5" and a
+	// swapped digit barely moves the trigram score. A quote whose numbers the
+	// source does not state as whole numbers can reach near_match, never verified.
+	numbersHeld := claimQuoteNumbersInSource(source, quote)
+	if numbersHeld && claimSegmentsInOrder(haystack.runes, segments) {
 		return claimQuoteMatch{Status: claimStatusVerified}
 	}
 	whole := make([]rune, 0, total)
@@ -524,7 +528,7 @@ func matchClaimQuote(sourceText, quote string) claimQuoteMatch {
 	score, start, end := nearestClaimWindow(haystack.runes, whole)
 	match := claimQuoteMatch{Status: claimStatusNotFound}
 	switch {
-	case score >= claimApproximateScore:
+	case score >= claimApproximateScore && numbersHeld:
 		match.Status = claimStatusVerified
 	case score >= claimNearMatchScore:
 		match.Status = claimStatusNearMatch
@@ -533,6 +537,25 @@ func matchClaimQuote(sourceText, quote string) claimQuoteMatch {
 		match.Nearest = claimExcerpt(source, haystack, start, end)
 	}
 	return match
+}
+
+// claimQuoteNumbersInSource reports whether every number the quote states
+// also appears in the source as a whole number token, compared by value.
+func claimQuoteNumbersInSource(source, quote string) bool {
+	wanted := citationCheckNumberPattern.FindAllString(quote, -1)
+	if len(wanted) == 0 {
+		return true
+	}
+	held := map[string]bool{}
+	for _, raw := range citationCheckNumberPattern.FindAllString(source, -1) {
+		held[normalizeCitationNumber(raw)] = true
+	}
+	for _, raw := range wanted {
+		if !held[normalizeCitationNumber(raw)] {
+			return false
+		}
+	}
+	return true
 }
 
 func claimSegmentsInOrder(haystack []rune, segments [][]rune) bool {
