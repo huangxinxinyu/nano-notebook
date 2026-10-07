@@ -46,3 +46,11 @@ func TestResearchReaderTaskAsksForLeadsFromExecutorV30(t *testing.T) {
 		t.Fatal("Leads instruction is not gated at executor v30")
 	}
 }
+
+func TestReaderTaskCarriesRetryRuleFromV40(t *testing.T) {
+	before := researchReaderSpawnInput("https://x", "X", researchReaderRetryVersion-1).Message
+	after := researchReaderSpawnInput("https://x", "X", researchReaderRetryVersion).Message
+	if strings.Contains(before, "at most twice") || !strings.Contains(after, "retry a claim at most twice") || !strings.Contains(after, "Dropped heading") {
+		t.Fatalf("before=%q\nafter=%q", before, after)
+	}
+}

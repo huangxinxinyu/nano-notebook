@@ -213,6 +213,13 @@ func (a *readURLAction) acquireReadable(ctx context.Context, url string) (webrea
 	return webreader.Content{}, lastErr
 }
 
+// researchReaderRetryVersion is the first executor version whose readers retry
+// an unverified card a bounded number of times, then drop the claim; the
+// parent's claims.md lists only checked cards.
+const researchReaderRetryVersion = 40
+
+const researchReaderRetryInstruction = " When record_claim returns not_found or near_match, compare your quote with nearest_excerpt and record one corrected card with the source's exact wording, in the source's own language; retry a claim at most twice. If it still does not verify, drop that claim: record no more cards for it, and list it under a Dropped heading in your Final with a few words on why. The parent sees only cards that checked out, so never describe a dropped claim as established."
+
 const (
 	researchReaderTaskPrefix = "Read one long document for the parent researcher, in full:"
 	researchReaderOutcome    = "delegated_to_reader"
@@ -311,6 +318,9 @@ func researchReaderSpawnInput(requestedURL, title string, definitionVersion int)
 	}
 	if definitionVersion >= researchReaderTwoPageVersion {
 		message += " Record a page's cards before reading the next page. Skip the reference list, acknowledgements, and appendices unless a planned claim depends on them, and stop paging once only those remain; list the important references under Leads instead."
+	}
+	if definitionVersion >= researchReaderRetryVersion {
+		message += researchReaderRetryInstruction
 	}
 	return spawnAgentInput{Message: message, TaskName: "Read: " + taskName}
 }
