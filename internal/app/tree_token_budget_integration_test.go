@@ -47,14 +47,14 @@ func TestResearchTreeSharesOneInputTokenBudget(t *testing.T) {
 	if err := runtime.RecordModelUsage(ctx, attempt, usage(5_000_000, 4_000_000, 20_000)); err != nil {
 		t.Fatal(err)
 	}
-	if exhausted, err := runtime.ModelTokenBudgetExhausted(ctx, childAttempt); err != nil || exhausted {
+	if exhausted, err := runtime.ModelBudgetExhausted(ctx, childAttempt); err != nil || exhausted {
 		t.Fatalf("exhausted early=%v err=%v", exhausted, err)
 	}
 	if err := runtime.RecordModelUsage(ctx, childAttempt, usage(1_000_000, 900_000, 5_000)); err != nil {
 		t.Fatal(err)
 	}
 	for _, run := range []agent.Attempt{attempt, childAttempt} {
-		if exhausted, err := runtime.ModelTokenBudgetExhausted(ctx, run); err != nil || !exhausted {
+		if exhausted, err := runtime.ModelBudgetExhausted(ctx, run); err != nil || !exhausted {
 			t.Fatalf("run %s exhausted=%v err=%v", run.RunID, exhausted, err)
 		}
 	}
@@ -80,7 +80,39 @@ func TestResearchTreeWithoutTokenLimitIsNeverExhausted(t *testing.T) {
 	if err := runtime.RecordModelUsage(ctx, attemptFromClaim(parent), models.ModelCallMetadata{InputTokens: &tokens}); err != nil {
 		t.Fatal(err)
 	}
-	if exhausted, err := runtime.ModelTokenBudgetExhausted(ctx, attemptFromClaim(parent)); err != nil || exhausted {
+	if exhausted, err := runtime.ModelBudgetExhausted(ctx, attemptFromClaim(parent)); err != nil || exhausted {
 		t.Fatalf("exhausted=%v err=%v", exhausted, err)
+	}
+}
+
+func TestResearchTreeKeepsWorkPastItsModelCallAndActionLimits(t *testing.T) {
+	api := newTestAPI(t)
+	ctx := context.Background()
+	parent, _, _, _ := admitResearchExecutionForRelease(t, api, "call-budget@example.com", "nano.default@54")
+	runtime, err := agent.NewResearchRuntime(api.db.Pool(), promptcatalog.MustLoadEmbedded())
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt := attemptFromClaim(parent)
+	if exhausted, err := runtime.ModelBudgetExhausted(ctx, attempt); err != nil || exhausted {
+		t.Fatalf("fresh tree exhausted=%v err=%v", exhausted, err)
+	}
+	if _, err := api.db.Pool().Exec(ctx, `
+		update agent_trees set model_calls_consumed=model_call_limit,actions_consumed=action_limit
+		where id=(select tree_id from agent_runs where id=$1)
+	`, attempt.RunID); err != nil {
+		t.Fatal(err)
+	}
+	if exhausted, err := runtime.ModelBudgetExhausted(ctx, attempt); err != nil || !exhausted {
+		t.Fatalf("spent tree exhausted=%v err=%v", exhausted, err)
+	}
+	// The wrap-up step lands at the limit instead of failing the Run.
+	appendResearchProposal(t, runtime, attempt, 1, []models.ActionProposal{{Name: "list_research_files", Input: json.RawMessage(`{}`)}})
+	var consumed, limit int
+	if err := api.db.Pool().QueryRow(ctx, `
+		select model_calls_consumed,model_call_limit from agent_trees
+		where id=(select tree_id from agent_runs where id=$1)
+	`, attempt.RunID).Scan(&consumed, &limit); err != nil || consumed != limit {
+		t.Fatalf("consumed=%d limit=%d err=%v", consumed, limit, err)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -96,11 +97,23 @@ const (
 	ErrorUnavailable     ErrorKind = "model_unavailable"
 	ErrorInvalidResponse ErrorKind = "model_invalid_response"
 	ErrorContextOverflow ErrorKind = "model_context_overflow"
+	// ErrorRejected is a provider refusal that repeating the request cannot
+	// change, such as bad credentials, unpaid balance, or a content block.
+	ErrorRejected ErrorKind = "model_request_rejected"
+)
+
+// defaultRateLimitBackoff spaces out retries of a 429 that names no
+// Retry-After; the ordinary backoff would spend every Attempt within seconds.
+const (
+	defaultRateLimitBackoff = 15 * time.Second
+	maxRateLimitBackoff     = 5 * time.Minute
 )
 
 type ModelError struct {
 	Kind ErrorKind
 	Err  error
+	// RetryAfter is the provider's minimum wait before a retry, when known.
+	RetryAfter time.Duration
 }
 
 func (e *ModelError) Error() string {
@@ -308,7 +321,7 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 		if providerContextOverflow(response.StatusCode, responseBody) {
 			return ModelOutcome{}, &ModelError{Kind: ErrorContextOverflow, Err: errors.New("Provider context limit exceeded")}
 		}
-		return ModelOutcome{}, &ModelError{Kind: ErrorUnavailable, Err: fmt.Errorf("Bifrost status %d: %s", response.StatusCode, providerErrorExcerpt(responseBody))}
+		return ModelOutcome{}, providerStatusError(response, responseBody)
 	}
 	var decoded struct {
 		Provider string `json:"provider"`
@@ -348,9 +361,19 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 	if err := json.Unmarshal(responseBody, &decoded); err != nil {
 		return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
 	}
+	// A rejected response still spent these tokens, so they stay on the outcome.
+	usage := ModelCallMetadata{
+		InputTokens:  decoded.Usage.PromptTokens,
+		OutputTokens: decoded.Usage.CompletionTokens,
+		TotalTokens:  decoded.Usage.TotalTokens,
+		CachedTokens: decoded.Usage.PromptDetails.CachedTokens,
+	}
 	for _, choice := range decoded.Choices {
 		if choice.Message.Role != "assistant" {
 			continue
+		}
+		if len(choice.Message.ToolCalls) > 0 && choice.FinishReason == "length" {
+			return ModelOutcome{Metadata: usage}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("the response reached the output limit before its tool call finished; split the work into smaller tool calls")}
 		}
 		decision := ModelDecision{}
 		// A model may return non-empty prose alongside tool_calls (e.g. a
@@ -370,29 +393,29 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 				providerCallID := strings.TrimSpace(call.ID)
 				_, duplicateID := providerCallIDs[providerCallID]
 				if providerCallID == "" || duplicateID || call.Type != "function" || strings.TrimSpace(call.Function.Name) == "" || json.Unmarshal([]byte(call.Function.Arguments), &input) != nil || input == nil {
-					return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid Bifrost tool call")}
+					return ModelOutcome{Metadata: usage}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("invalid Bifrost tool call")}
 				}
 				if requiredName := strings.TrimSpace(request.RequiredActionName); requiredName != "" && call.Function.Name != requiredName {
-					return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost proposal violated required Action")}
+					return ModelOutcome{Metadata: usage}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost proposal violated required Action")}
 				}
 				providerCallIDs[providerCallID] = struct{}{}
 				var canonical bytes.Buffer
 				if err := json.Compact(&canonical, []byte(call.Function.Arguments)); err != nil {
-					return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
+					return ModelOutcome{Metadata: usage}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
 				}
 				actions = append(actions, ActionProposal{Name: call.Function.Name, Input: json.RawMessage(canonical.Bytes())})
 			}
 			decision.Proposal = &ActionProposalBatch{Actions: actions}
 		}
 		if err := decision.Validate(); err != nil {
-			return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
+			return ModelOutcome{Metadata: usage}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
 		}
 		requiredActionStopped := strings.TrimSpace(request.RequiredActionName) != "" && choice.FinishReason == "stop"
 		if decision.Proposal != nil && choice.FinishReason != "tool_calls" && !requiredActionStopped {
-			return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost Action proposal has inconsistent finish reason")}
+			return ModelOutcome{Metadata: usage}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost Action proposal has inconsistent finish reason")}
 		}
 		if decision.Final != nil && (strings.TrimSpace(choice.FinishReason) == "" || choice.FinishReason == "tool_calls") {
-			return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost Final Draft has inconsistent finish reason")}
+			return ModelOutcome{Metadata: usage}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost Final Draft has inconsistent finish reason")}
 		}
 		resultKind := ModelResultFinalDraft
 		if decision.Proposal != nil {
@@ -416,11 +439,11 @@ func (c *BifrostClient) request(ctx context.Context, request ModelRequest) (outc
 			metadata.Cost = ModelCost{Known: true, Amount: decoded.Cost, Currency: decoded.CostCurrency, Source: decoded.CostSource}
 		}
 		if err := metadata.Validate(); err != nil {
-			return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
+			return ModelOutcome{Metadata: usage}, &ModelError{Kind: ErrorInvalidResponse, Err: err}
 		}
 		return ModelOutcome{ModelDecision: decision, Metadata: metadata}, nil
 	}
-	return ModelOutcome{}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost response has no assistant decision")}
+	return ModelOutcome{Metadata: usage}, &ModelError{Kind: ErrorInvalidResponse, Err: errors.New("Bifrost response has no assistant decision")}
 }
 
 // providerErrorExcerpt keeps the start of a provider error body for logs, so
@@ -431,6 +454,32 @@ func providerErrorExcerpt(body []byte) string {
 		text = string(runes[:300]) + "…"
 	}
 	return text
+}
+
+// providerStatusError separates refusals that will repeat from failures worth
+// another Attempt, and carries how long a rate limit asks the caller to wait.
+func providerStatusError(response *http.Response, body []byte) *ModelError {
+	cause := fmt.Errorf("Bifrost status %d: %s", response.StatusCode, providerErrorExcerpt(body))
+	switch status := response.StatusCode; {
+	case status == http.StatusTooManyRequests:
+		return &ModelError{Kind: ErrorUnavailable, Err: cause, RetryAfter: retryAfter(response.Header.Get("Retry-After"), time.Now())}
+	case status == http.StatusRequestTimeout || status == http.StatusConflict || status == http.StatusTooEarly:
+		return &ModelError{Kind: ErrorUnavailable, Err: cause}
+	case status >= 400 && status < 500:
+		return &ModelError{Kind: ErrorRejected, Err: cause}
+	default:
+		return &ModelError{Kind: ErrorUnavailable, Err: cause}
+	}
+}
+
+func retryAfter(value string, now time.Time) time.Duration {
+	wait := defaultRateLimitBackoff
+	if seconds, err := strconv.Atoi(strings.TrimSpace(value)); err == nil && seconds > 0 {
+		wait = time.Duration(seconds) * time.Second
+	} else if at, err := http.ParseTime(value); err == nil && at.After(now) {
+		wait = at.Sub(now)
+	}
+	return min(wait, maxRateLimitBackoff)
 }
 
 func providerContextOverflow(statusCode int, body []byte) bool {
@@ -452,7 +501,7 @@ func modelErrorResultKind(err error) ModelResultKind {
 		switch modelErr.Kind {
 		case ErrorTimeout:
 			return ModelResultTimeout
-		case ErrorUnavailable:
+		case ErrorUnavailable, ErrorRejected:
 			return ModelResultUnavailable
 		}
 	}

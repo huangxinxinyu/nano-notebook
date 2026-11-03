@@ -59,6 +59,19 @@ func (r *ResearchRuntime) WithTraceSink(sink TraceSink) *ResearchRuntime {
 
 func (*ResearchRuntime) InvalidModelResponseRetryLimit() int { return 5 }
 
+// A runtime that misses one of these loses the capability silently, because
+// the Controller finds them by type assertion.
+var (
+	_ InvalidModelResponseRecoveryRuntime = (*PostgresRuntime)(nil)
+	_ InvalidModelResponseRecoveryRuntime = (*ResearchRuntime)(nil)
+	_ InvalidModelResponseRecoveryRuntime = (*ResearchPlanningRuntime)(nil)
+	_ ModelUsageRuntime                   = (*PostgresRuntime)(nil)
+	_ ModelUsageRuntime                   = (*ResearchRuntime)(nil)
+	_ TokenBudgetWrapUpRuntime            = (*ResearchRuntime)(nil)
+	_ ContextPreparationRuntime           = (*ResearchRuntime)(nil)
+	_ ContextPreparationTraceRuntime      = (*PostgresRuntime)(nil)
+)
+
 func (*ResearchRuntime) PrepareDecisionResponse(_ context.Context, execution Execution, prefix CheckpointPrefix, decision models.ModelDecision) (models.ModelDecision, error) {
 	if execution.ParentRunID != "" {
 		if decision.Final != nil && isResearchReaderTask(execution.SubagentTask) && !hasRecordedClaim(prefix) {
@@ -153,8 +166,8 @@ func (r *ResearchRuntime) RecordModelUsage(ctx context.Context, attempt Attempt,
 	return r.base.RecordModelUsage(ctx, attempt, usage)
 }
 
-func (r *ResearchRuntime) ModelTokenBudgetExhausted(ctx context.Context, attempt Attempt) (bool, error) {
-	return r.base.ModelTokenBudgetExhausted(ctx, attempt)
+func (r *ResearchRuntime) ModelBudgetExhausted(ctx context.Context, attempt Attempt) (bool, error) {
+	return r.base.ModelBudgetExhausted(ctx, attempt)
 }
 
 // TokenBudgetWrapUpTools lets a root Researcher whose tree spent its token
@@ -170,7 +183,7 @@ func (r *ResearchRuntime) TokenBudgetWrapUpTools(execution Execution) map[string
 	}
 }
 
-const researchTokenBudgetPrompt = "Token budget: this Research has spent its input-token budget. Searching, reading, recording cards, and new subagents are closed. Collect any running subagents with wait_agent, then write the report from the cards in claims.md and assemble it; say plainly where evidence is thin."
+const researchTokenBudgetPrompt = "Budget: this Research has spent its token, model-call, or Action budget. Searching, reading, recording cards, and new subagents are closed. Collect any running subagents with wait_agent, then write the report from the cards in claims.md and assemble it; say plainly where evidence is thin."
 
 func (r *ResearchRuntime) LoadCheckpointPrefix(ctx context.Context, attempt Attempt) (CheckpointPrefix, error) {
 	return r.base.LoadCheckpointPrefix(ctx, attempt)
@@ -258,7 +271,7 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 		system += "\n\n" + runtimeSubagentInstructions
 	}
 	if execution.ParentRunID == "" && len(definitions) > 0 {
-		if exhausted, err := r.ModelTokenBudgetExhausted(ctx, execution.Attempt); err != nil {
+		if exhausted, err := r.ModelBudgetExhausted(ctx, execution.Attempt); err != nil {
 			return models.ModelRequest{}, err
 		} else if exhausted {
 			system += "\n\n" + researchTokenBudgetPrompt
@@ -317,7 +330,7 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 		}
 		memory, _ = rewriteResearchReportLinks(memory, eligible)
 	}
-	if memory != "" {
+	if memory != "" && !isThresholdResearchExecution(execution) {
 		messages = append(messages, models.ModelMessage{Role: models.RoleAssistant, Content: memory})
 	}
 	if isThresholdResearchExecution(execution) {
@@ -351,7 +364,7 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 		if kept := researchReaderKeptPages(execution); kept > 0 {
 			flattened = elideEarlierReaderPages(flattened, kept)
 		}
-		messages = append(messages, flattened...)
+		messages = assembleThresholdResearchMessages(messages[0], messages[1], flattened, memory)
 	} else if includeExactResearchSuffix(definitions, duplicateSteps) {
 		projected, err := ProjectChatLane(ctx, ChatLane{Turns: []ChatLaneTurn{{
 			MessageID: execution.InputMessageID, Content: originalRequest,
@@ -371,6 +384,18 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 		Model: execution.Model, Messages: messages, ActionDefinitions: cloneActionDefinitions(definitions),
 		InvocationPolicy: execution.ModelInvocation,
 	}, nil
+}
+
+// assembleThresholdResearchMessages puts the Evidence Ledger after the
+// append-only trajectory. It changes on most decisions, and anything before the
+// trajectory would invalidate the provider's prefix cache for all of it.
+func assembleThresholdResearchMessages(system, request models.ModelMessage, trajectory []models.ModelMessage, memory string) []models.ModelMessage {
+	messages := make([]models.ModelMessage, 0, len(trajectory)+3)
+	messages = append(append(messages, system, request), trajectory...)
+	if memory != "" {
+		messages = append(messages, models.ModelMessage{Role: models.RoleAssistant, Content: memory})
+	}
+	return messages
 }
 
 func researchWorkflowSkillPrompt(execution Execution, skills skillcatalog.Catalog) (string, error) {

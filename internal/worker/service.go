@@ -192,7 +192,8 @@ func (s *Service) executeClaim(ctx context.Context, job jobs.ClaimedJob) error {
 		return nil
 	}
 	if resolution.Disposition == agent.AttemptRetryable {
-		resolution.Backoff = agent.AttemptRetryBackoff(job.AttemptNo, job.ID)
+		// A provider's Retry-After is a minimum, so it only ever lengthens this.
+		resolution.Backoff = max(resolution.Backoff, agent.AttemptRetryBackoff(job.AttemptNo, job.ID))
 	}
 	resolveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	actual, resolveErr := s.queue.ResolveAttempt(resolveCtx, job, resolution)

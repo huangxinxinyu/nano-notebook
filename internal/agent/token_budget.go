@@ -3,7 +3,7 @@ package agent
 import (
 	"encoding/json"
 	"errors"
-	"unicode/utf8"
+	"unicode"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 )
@@ -25,7 +25,8 @@ type ContextTokenCount struct {
 // Provider has not reported usage for this exact context lineage. It counts
 // the complete Provider-neutral request envelope, then applies Pi's
 // characters/4 fallback with ceiling rather than treating bytes or Message
-// count as tokens.
+// count as tokens. CJK text runs near one token per character, so charging it
+// at a quarter would start compaction several times too late.
 func EstimateModelRequestTokens(request models.ModelRequest) (ContextTokenCount, error) {
 	type actionCall struct {
 		ID    string          `json:"id"`
@@ -72,8 +73,15 @@ func EstimateModelRequestTokens(request models.ModelRequest) (ContextTokenCount,
 	if err != nil {
 		return ContextTokenCount{}, err
 	}
-	characters := utf8.RuneCount(encoded)
-	return ContextTokenCount{Tokens: maxInt(1, (characters+3)/4), Source: TokenCountEstimated}, nil
+	characters, cjk := 0, 0
+	for _, value := range string(encoded) {
+		if unicode.In(value, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Hangul) {
+			cjk++
+		} else {
+			characters++
+		}
+	}
+	return ContextTokenCount{Tokens: maxInt(1, (characters+3)/4+cjk), Source: TokenCountEstimated}, nil
 }
 
 func maxInt(left, right int) int {

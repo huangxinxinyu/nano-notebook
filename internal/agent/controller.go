@@ -218,7 +218,7 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		if usageRuntime, ok := c.runtime.(ModelUsageRuntime); ok && businessDecisionAvailable {
 			// A spent token budget closes tool use like a spent Action
 			// budget: the Run still returns Final from what it gathered.
-			exhausted, budgetErr := usageRuntime.ModelTokenBudgetExhausted(ctx, attempt)
+			exhausted, budgetErr := usageRuntime.ModelBudgetExhausted(ctx, attempt)
 			if budgetErr != nil {
 				return c.handleRuntimeError(ctx, attempt, budgetErr)
 			}
@@ -293,6 +293,11 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 				if handled, result := c.handleRecordingError(ctx, attempt, err); handled {
 					return result
 				}
+				// Compaction calls the model too; its outages are no more final
+				// than the decision call's own.
+				if isRetryableModelError(err) {
+					return c.handleModelError(ctx, attempt, err)
+				}
 				return c.fail(ctx, attempt, "context_failed", err)
 			}
 			request.ContextTelemetry.OverflowRecoveryAttempt = overflowRecoveryAttempt
@@ -334,16 +339,24 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 			} else {
 				outcome, err = c.model.Decide(ctx, request)
 			}
-			if usageRuntime, ok := c.runtime.(ModelUsageRuntime); ok && err == nil {
+			if usageRuntime, ok := c.runtime.(ModelUsageRuntime); ok {
 				if usageErr := usageRuntime.RecordModelUsage(ctx, attempt, outcome.Metadata); usageErr != nil {
 					slog.Warn("Agent model usage was not recorded", "run_id", attempt.RunID, "error", usageErr)
+				}
+			}
+			if err == nil && outcome.Final != nil && outcome.Metadata.FinishReason == "length" {
+				if invalidResponseRecoveryAttempt < c.invalidResponseRetryLimit() {
+					err = &models.ModelError{Kind: models.ErrorInvalidResponse, Err: errors.New("your answer reached the output limit and was cut off; give a shorter, complete answer")}
+				} else {
+					final := *outcome.Final
+					final.Text += truncatedFinalNotice
+					outcome.Final = &final
 				}
 			}
 			if err == nil {
 				if runtime, ok := c.runtime.(DecisionResponsePreparationRuntime); ok {
 					prepared, prepareErr := runtime.PrepareDecisionResponse(ctx, execution, prefix, outcome.ModelDecision)
 					if prepareErr != nil {
-						invalidResponseRecoveryDetail = prepareErr.Error()
 						err = &models.ModelError{Kind: models.ErrorInvalidResponse, Err: prepareErr}
 					} else {
 						outcome.ModelDecision = prepared
@@ -352,18 +365,17 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 			}
 			if err == nil {
 				if validationErr := c.validateDecisionForRequest(toolSession, prefix, outcome.ModelDecision, definitions, actionCapable, execution, remainingActions, businessDecisionAvailable); validationErr != nil {
-					invalidResponseRecoveryDetail = validationErr.Error()
 					err = &models.ModelError{Kind: models.ErrorInvalidResponse, Err: validationErr}
 				}
 			}
 			if isModelInvalidResponse(err) {
+				var invalid *models.ModelError
+				if errors.As(err, &invalid) && invalid.Err != nil {
+					invalidResponseRecoveryDetail = invalid.Err.Error()
+				}
 				slog.WarnContext(ctx, "Agent model response invalid", "run_id", attempt.RunID, "attempt", attempt.AttemptNo,
 					"recovery_attempt", invalidResponseRecoveryAttempt, "detail", invalidResponseRecoveryDetail, "error", err)
-				limit := 0
-				if runtime, ok := c.runtime.(InvalidModelResponseRecoveryRuntime); ok {
-					limit = runtime.InvalidModelResponseRetryLimit()
-				}
-				if invalidResponseRecoveryAttempt < limit {
+				if invalidResponseRecoveryAttempt < c.invalidResponseRetryLimit() {
 					invalidResponseRecoveryAttempt++
 					continue
 				}
@@ -533,6 +545,22 @@ func acceptedBusinessDecisions(prefix CheckpointPrefix) int {
 func isModelContextOverflow(err error) bool {
 	var modelErr *models.ModelError
 	return errors.As(err, &modelErr) && modelErr.Kind == models.ErrorContextOverflow
+}
+
+// truncatedFinalNotice marks a Final that still hit the output limit after its
+// retries, so a reader can tell the answer stops early.
+const truncatedFinalNotice = "\n\n[This response was cut off at the model's output limit.]"
+
+func (c *Controller) invalidResponseRetryLimit() int {
+	if runtime, ok := c.runtime.(InvalidModelResponseRecoveryRuntime); ok {
+		return runtime.InvalidModelResponseRetryLimit()
+	}
+	return 0
+}
+
+func isRetryableModelError(err error) bool {
+	var modelErr *models.ModelError
+	return errors.As(err, &modelErr) && (modelErr.Kind == models.ErrorTimeout || modelErr.Kind == models.ErrorUnavailable)
 }
 
 func isModelInvalidResponse(err error) bool {

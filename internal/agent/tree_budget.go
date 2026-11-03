@@ -29,16 +29,18 @@ func chargeConfiguredTreeInTx(ctx context.Context, tx pgx.Tx, runID string, char
 	if !configured {
 		return nil
 	}
+	// Model calls and Actions saturate instead of failing: ModelBudgetExhausted
+	// closes new work at the limit, and whatever then lands (results of Actions
+	// already running, wrap-up steps, the Final itself) must still be kept. Each
+	// Run's own Action and decision limits bound that wrap-up.
 	tag, err := tx.Exec(ctx, `
 		update agent_trees
-		set model_calls_consumed=model_calls_consumed+$2,
-			actions_consumed=actions_consumed+$3,
+		set model_calls_consumed=least(model_calls_consumed+$2,model_call_limit),
+			actions_consumed=least(actions_consumed+$3,action_limit),
 			context_bytes_consumed=context_bytes_consumed+$4,
 			result_bytes_consumed=result_bytes_consumed+$5,
 			updated_at=now()
 		where id=(select tree_id from agent_runs where id=$1)
-		  and model_calls_consumed+$2<=model_call_limit
-		  and actions_consumed+$3<=action_limit
 		  and context_bytes_consumed+$4<=context_byte_limit
 		  and result_bytes_consumed+$5<=result_byte_limit
 	`, runID, charge.ModelCalls, charge.Actions, charge.ContextBytes, charge.ResultBytes)
@@ -51,11 +53,15 @@ func chargeConfiguredTreeInTx(ctx context.Context, tx pgx.Tx, runID string, char
 	return nil
 }
 
+// InvalidModelResponseRetryLimit gives Chat and Studio the same second chance
+// as Research: one malformed tool call should not end a Run.
+func (*PostgresRuntime) InvalidModelResponseRetryLimit() int { return 2 }
+
 // ModelUsageRuntime accounts provider token usage to the Agent Tree and
-// reports when a Definition's input_tokens limit is spent.
+// reports when the tree has spent its input_tokens, model call or Action limit.
 type ModelUsageRuntime interface {
 	RecordModelUsage(ctx context.Context, attempt Attempt, usage models.ModelCallMetadata) error
-	ModelTokenBudgetExhausted(ctx context.Context, attempt Attempt) (bool, error)
+	ModelBudgetExhausted(ctx context.Context, attempt Attempt) (bool, error)
 }
 
 // TokenBudgetWrapUpRuntime names the tools a Run keeps once its token budget
@@ -87,24 +93,26 @@ func (r *PostgresRuntime) RecordModelUsage(ctx context.Context, attempt Attempt,
 	return err
 }
 
-// ModelTokenBudgetExhausted reads the limit from the tree root's Definition,
+// ModelBudgetExhausted reads the token limit from the tree root's Definition,
 // so every Run in a Research tree, subagents included, shares one budget.
-func (r *PostgresRuntime) ModelTokenBudgetExhausted(ctx context.Context, attempt Attempt) (bool, error) {
+func (r *PostgresRuntime) ModelBudgetExhausted(ctx context.Context, attempt Attempt) (bool, error) {
 	var limit, consumed int64
+	var countsSpent bool
 	err := r.pool.QueryRow(ctx, `
-		select coalesce((definition.limits->>'input_tokens')::bigint,0),tree.input_tokens_consumed
+		select coalesce((definition.limits->>'input_tokens')::bigint,0),tree.input_tokens_consumed,
+			tree.model_calls_consumed>=tree.model_call_limit or tree.actions_consumed>=tree.action_limit
 		from agent_runs run
 		join agent_trees tree on tree.id=run.tree_id
 		join agent_runs root on root.id=tree.root_agent_run_id
 		join agent_definition_versions definition on definition.definition_identity=root.definition_identity
 			and definition.definition_version=root.definition_version
 		where run.id=$1
-	`, attempt.RunID).Scan(&limit, &consumed)
+	`, attempt.RunID).Scan(&limit, &consumed, &countsSpent)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	return limit > 0 && consumed >= limit, nil
+	return countsSpent || (limit > 0 && consumed >= limit), nil
 }

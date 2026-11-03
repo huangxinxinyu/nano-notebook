@@ -61,7 +61,7 @@ var ErrorLayerValues = []string{
 // enumeration; this list is the authoritative one enforced at emit time.
 var ErrorCodeValues = []string{
 	// models.ErrorKind (internal/models/bifrost.go)
-	"model_timeout", "model_unavailable", "model_invalid_response",
+	"model_timeout", "model_unavailable", "model_invalid_response", "model_request_rejected",
 	// ToolCallError.Code literals reachable through ClassifyAttempt
 	// (internal/agent/mcp_tool_plane.go, attempt_disposition.go)
 	"action_budget_exhausted", "action_id_invalid", "action_result_invalid",

@@ -62,7 +62,11 @@ func ClassifyAttempt(err, contextCause error) AttemptResolution {
 		if modelErr.Kind == models.ErrorTimeout || modelErr.Kind == models.ErrorUnavailable {
 			disposition = AttemptRetryable
 		}
-		return AttemptResolution{Disposition: disposition, ErrorCode: string(modelErr.Kind)}
+		resolution := AttemptResolution{Disposition: disposition, ErrorCode: string(modelErr.Kind)}
+		if disposition == AttemptRetryable {
+			resolution.Backoff = modelErr.RetryAfter
+		}
+		return resolution
 	}
 	var toolErr *ToolCallError
 	if errors.As(err, &toolErr) && safeAttemptErrorCode.MatchString(toolErr.Code) {

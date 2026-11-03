@@ -1585,7 +1585,7 @@ func (r *tokenBudgetRuntimeStub) RecordModelUsage(_ context.Context, _ Attempt, 
 	return nil
 }
 
-func (r *tokenBudgetRuntimeStub) ModelTokenBudgetExhausted(context.Context, Attempt) (bool, error) {
+func (r *tokenBudgetRuntimeStub) ModelBudgetExhausted(context.Context, Attempt) (bool, error) {
 	return r.consumed >= r.limit, nil
 }
 

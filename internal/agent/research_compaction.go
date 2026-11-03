@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"unicode/utf8"
 
@@ -250,6 +251,8 @@ func (r *ResearchRuntime) PrepareDecisionRequest(
 		return models.ModelRequest{}, ErrContextBudgetExceeded
 	}
 
+	model = meteredCompactionModel{model: model, usage: r, attempt: execution.Attempt}
+
 	rawUnits, err := ProjectChatLane(ctx, ChatLane{Turns: []ChatLaneTurn{{
 		MessageID: execution.InputMessageID,
 		Content:   researchOriginalRequestFromDecisionRequest(request),
@@ -324,8 +327,13 @@ func (r *ResearchRuntime) PrepareDecisionRequest(
 	}
 	capsules, err := generateResearchArchivalCapsules(ctx, model, execution, steps, planJSON, phase, archivalPrompt)
 	if err != nil {
-		r.recordResearchCompactionFailure(ctx, execution, "archival", "model_output_invalid", steps[0].StartCheckpointSeq, steps[len(steps)-1].EndCheckpointSeq, before.Tokens, 0)
-		return models.ModelRequest{}, ErrContextBudgetExceeded
+		r.recordResearchCompactionFailure(ctx, execution, "archival", researchCompactionFailureReason(err), steps[0].StartCheckpointSeq, steps[len(steps)-1].EndCheckpointSeq, before.Tokens, 0)
+		slog.WarnContext(ctx, "Research compaction failed", "run_id", execution.RunID, "layer", "archival", "error", err)
+		if researchCompactionOptional(triggerReason, before.Tokens, execution.ModelContext.Budgets.SafeInputTokens) {
+			attachResearchContextTelemetry(&request, execution, before, triggerReason, 0, 0)
+			return request, nil
+		}
+		return models.ModelRequest{}, researchCompactionError(err)
 	}
 	candidateArchives := make(map[int]researchArchivalCapsule, len(archived)+len(capsules))
 	for decision, capsule := range archived {
@@ -430,8 +438,9 @@ func (r *ResearchRuntime) compactResearchTaskMemory(
 	}
 	memory, err := generateResearchTaskMemory(ctx, model, execution, capsules, selectedUnits, planJSON, phase, systemPrompt)
 	if err != nil {
-		r.recordResearchCompactionFailure(ctx, execution, "task_memory", "model_output_invalid", capsules[0].StartCheckpointSeq, capsules[len(capsules)-1].EndCheckpointSeq, before.Tokens, 0)
-		return models.ModelRequest{}, ContextTokenCount{}, ErrContextBudgetExceeded
+		r.recordResearchCompactionFailure(ctx, execution, "task_memory", researchCompactionFailureReason(err), capsules[0].StartCheckpointSeq, capsules[len(capsules)-1].EndCheckpointSeq, before.Tokens, 0)
+		slog.WarnContext(ctx, "Research compaction failed", "run_id", execution.RunID, "layer", "task_memory", "error", err)
+		return models.ModelRequest{}, ContextTokenCount{}, researchCompactionError(err)
 	}
 	candidateMemories := append(append([]researchTaskMemory(nil), existing...), memory)
 	candidate, err := r.buildDecisionRequest(ctx, execution, prefix, definitions, archived, candidateMemories)
@@ -461,16 +470,91 @@ func (r *ResearchRuntime) compactResearchTaskMemory(
 	return candidate, after, nil
 }
 
+const researchCompactionOutputAttempts = 2
+
+// decideResearchCompaction runs one summarizer call. Output that does not
+// decode gets another try; a model failure returns at once so the Attempt's own
+// retry policy decides what happens.
+func decideResearchCompaction[T any](ctx context.Context, model DecisionModel, request models.ModelRequest, decode func([]byte) (T, error)) (T, error) {
+	var zero T
+	var lastErr error
+	for range researchCompactionOutputAttempts {
+		outcome, err := model.Decide(ctx, request)
+		if err != nil {
+			if !isModelInvalidResponse(err) {
+				return zero, err
+			}
+			lastErr = err
+			continue
+		}
+		switch {
+		case outcome.ModelDecision.Validate() != nil || outcome.Final == nil:
+			lastErr = errors.New("Research compaction model did not return a Final")
+		case outcome.Metadata.FinishReason == "length":
+			lastErr = errors.New("Research compaction output reached the output limit")
+		default:
+			value, decodeErr := decode([]byte(strings.TrimSpace(outcome.Final.Text)))
+			if decodeErr == nil {
+				return value, nil
+			}
+			lastErr = decodeErr
+		}
+	}
+	return zero, lastErr
+}
+
+// researchCompactionOptional reports whether a request can go out uncompacted:
+// the threshold fires early on purpose, so below the safe budget a failed
+// compaction only postpones the work to the next decision.
+func researchCompactionOptional(trigger string, beforeTokens, safeTokens int) bool {
+	return trigger == CompactionTriggerThreshold && beforeTokens <= safeTokens
+}
+
+// researchCompactionError keeps a failure the Controller may retry; output that
+// stayed invalid after its retry means the context cannot be reduced.
+func researchCompactionError(err error) error {
+	var modelErr *models.ModelError
+	if errors.As(err, &modelErr) && modelErr.Kind != models.ErrorInvalidResponse {
+		return err
+	}
+	return ErrContextBudgetExceeded
+}
+
+func researchCompactionFailureReason(err error) string {
+	if isRetryableModelError(err) {
+		return "model_unavailable"
+	}
+	return "model_output_invalid"
+}
+
+type compactionUsageRecorder interface {
+	RecordModelUsage(context.Context, Attempt, models.ModelCallMetadata) error
+}
+
+// meteredCompactionModel charges summarizer calls to the tree's token budget;
+// they bypass the Controller, which accounts for decision calls.
+type meteredCompactionModel struct {
+	model   DecisionModel
+	usage   compactionUsageRecorder
+	attempt Attempt
+}
+
+func (m meteredCompactionModel) Decide(ctx context.Context, request models.ModelRequest) (models.ModelOutcome, error) {
+	outcome, err := m.model.Decide(ctx, request)
+	if usageErr := m.usage.RecordModelUsage(ctx, m.attempt, outcome.Metadata); usageErr != nil {
+		slog.WarnContext(ctx, "Research compaction usage was not recorded", "run_id", m.attempt.RunID, "error", usageErr)
+	}
+	return outcome, err
+}
+
 func generateResearchTaskMemory(ctx context.Context, model DecisionModel, execution Execution, capsules []researchArchivalCapsule, units []ContextUnit, planJSON, phase, systemPrompt string) (researchTaskMemory, error) {
 	request, err := buildResearchTaskMemoryModelRequest(execution, capsules, units, planJSON, phase, systemPrompt)
 	if err != nil {
 		return researchTaskMemory{}, err
 	}
-	outcome, err := model.Decide(ctx, request)
-	if err != nil || outcome.ModelDecision.Validate() != nil || outcome.Final == nil {
-		return researchTaskMemory{}, errors.New("Research Task Memory model did not return a Final")
-	}
-	return decodeResearchTaskMemory([]byte(strings.TrimSpace(outcome.Final.Text)), capsules)
+	return decideResearchCompaction(ctx, model, request, func(payload []byte) (researchTaskMemory, error) {
+		return decodeResearchTaskMemory(payload, capsules)
+	})
 }
 
 func buildResearchTaskMemoryModelRequest(execution Execution, capsules []researchArchivalCapsule, units []ContextUnit, planJSON, phase, systemPrompt string) (models.ModelRequest, error) {
@@ -668,11 +752,9 @@ func generateResearchArchivalCapsules(ctx context.Context, model DecisionModel, 
 	if err != nil {
 		return nil, err
 	}
-	outcome, err := model.Decide(ctx, request)
-	if err != nil || outcome.ModelDecision.Validate() != nil || outcome.Final == nil {
-		return nil, errors.New("Research Capsule model did not return a Final")
-	}
-	return decodeResearchCapsuleBatch([]byte(strings.TrimSpace(outcome.Final.Text)), steps)
+	return decideResearchCompaction(ctx, model, request, func(payload []byte) ([]researchArchivalCapsule, error) {
+		return decodeResearchCapsuleBatch(payload, steps)
+	})
 }
 
 func buildResearchArchivalModelRequest(execution Execution, steps []researchArchivalStep, planJSON, phase, systemPrompt string) (models.ModelRequest, error) {

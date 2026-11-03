@@ -458,3 +458,49 @@ func requireModelErrorKind(t *testing.T, err error, want ErrorKind) {
 		t.Fatalf("error = %v, want ModelError kind %q", err, want)
 	}
 }
+
+func decideAgainstStatus(t *testing.T, status int, headers map[string]string, body string) (ModelOutcome, error) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		for key, value := range headers {
+			w.Header().Set(key, value)
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(server.Close)
+	return NewBifrostClient(server.URL, server.Client(), 2048).Decide(context.Background(), ModelRequest{
+		Model: "aliyun/qwen-flash", Messages: []ModelMessage{{Role: RoleUser, Content: "Hello."}},
+	})
+}
+
+func TestBifrostClientSeparatesPermanentRejectionFromRateLimit(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusPaymentRequired, http.StatusNotFound} {
+		_, err := decideAgainstStatus(t, status, nil, `{"error":"no"}`)
+		requireModelErrorKind(t, err, ErrorRejected)
+	}
+	_, err := decideAgainstStatus(t, http.StatusTooManyRequests, map[string]string{"Retry-After": "40"}, `{"error":"slow"}`)
+	requireModelErrorKind(t, err, ErrorUnavailable)
+	var modelErr *ModelError
+	if !errors.As(err, &modelErr) || modelErr.RetryAfter != 40*time.Second {
+		t.Fatalf("err=%#v", err)
+	}
+	_, err = decideAgainstStatus(t, http.StatusTooManyRequests, nil, `{"error":"slow"}`)
+	if !errors.As(err, &modelErr) || modelErr.RetryAfter != defaultRateLimitBackoff {
+		t.Fatalf("err=%#v", err)
+	}
+}
+
+func TestBifrostClientNamesATruncatedToolCallAndKeepsItsUsage(t *testing.T) {
+	outcome, err := decideAgainstStatus(t, http.StatusOK, nil, `{
+		"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"write","arguments":"{\"content\":\"cut"}}]},"finish_reason":"length"}],
+		"usage":{"prompt_tokens":500,"completion_tokens":2048,"total_tokens":2548}
+	}`)
+	requireModelErrorKind(t, err, ErrorInvalidResponse)
+	if !strings.Contains(err.Error(), "output limit") {
+		t.Fatalf("err=%v", err)
+	}
+	if outcome.Metadata.InputTokens == nil || *outcome.Metadata.InputTokens != 500 {
+		t.Fatalf("metadata=%+v", outcome.Metadata)
+	}
+}

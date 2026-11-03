@@ -13,7 +13,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	definitions := catalog.Definitions()
-	if got, want := len(definitions), 65; got != want {
+	if got, want := len(definitions), 66; got != want {
 		t.Fatalf("definitions=%d want=%d", got, want)
 	}
 	want := map[string]struct {
@@ -97,6 +97,10 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		"research.planner@15": {
 			executor: "research_planner", model: "agent.deep-research-deepseek@1",
 			tools: []string{"read_skill", "request_user_input", "web_search"},
+		},
+		"research.executor@41": {
+			executor: "research_root", model: "agent.deep-research-deepseek-flash@1",
+			tools: []string{"assemble_research_report", "edit_research_file", "inspect_source", "list_agents", "list_research_files", "read_research_file", "read_skill", "read_source", "read_tool_result", "read_url", "record_claim", "rewrite_todo_list", "run_python", "save_url_as_source", "search_evidence", "search_text", "spawn_agent", "update_todo_status", "wait_agent", "web_search", "write_research_file"},
 		},
 		"research.executor@40": {
 			executor: "research_root", model: "agent.deep-research-deepseek-flash@1",
@@ -747,6 +751,21 @@ func TestReleaseV53PinsCardFilteringAndEditTool(t *testing.T) {
 	executor, ok := catalog.ResolveDefinition(MustParseReference("research.executor@40"))
 	if !ok || executor.Prompts["executor"].String() != "agent.deep-research-executor@17" || executor.Limits.InputTokens != 10_000_000 ||
 		len(executor.Skills) != 2 || executor.Skills[1].String() != "skill.source-reading@3" {
+		t.Fatalf("executor=%+v ok=%v", executor, ok)
+	}
+}
+
+func TestReleaseV54SizesTheResearchTreeFromObservedRuns(t *testing.T) {
+	catalog, err := LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, ok := catalog.ResolveRelease(MustParseReference("nano.default@54"))
+	if !ok || release.Roots["research"].String() != "research.executor@41" {
+		t.Fatalf("release=%+v ok=%v", release, ok)
+	}
+	executor, ok := catalog.ResolveDefinition(MustParseReference("research.executor@41"))
+	if !ok || executor.Limits.ModelCalls != 200 || executor.Limits.Actions != 360 || executor.Limits.InputTokens != 10_000_000 {
 		t.Fatalf("executor=%+v ok=%v", executor, ok)
 	}
 }
