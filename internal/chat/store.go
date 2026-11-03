@@ -43,6 +43,11 @@ type Message struct {
 	Role      string    `json:"role"`
 	Content   string    `json:"content"`
 	CreatedAt time.Time `json:"created_at"`
+	// SteeringRunID names the Run a mid-run Member message was sent to; it is
+	// empty for a normal turn. SteeringDelivered reports whether that Run has
+	// checkpointed the message before a decision.
+	SteeringRunID     *string `json:"steering_run_id,omitempty"`
+	SteeringDelivered *bool   `json:"steering_delivered,omitempty"`
 }
 
 func NewStore(db DBTX) *Store {
@@ -225,12 +230,26 @@ func (s *Store) InsertUserMessage(ctx context.Context, messageID, chatID, conten
 	return err
 }
 
+// InsertSteeringMessage stores a Member message addressed to a Run that is
+// still working. It is excluded from the Chat lane's turns; the Run's own
+// checkpoints place it in model context.
+func (s *Store) InsertSteeringMessage(ctx context.Context, messageID, chatID, runID, content string) error {
+	_, err := s.db.Exec(ctx, `
+		insert into chat_messages(id, chat_id, role, content, steering_run_id)
+		values($1, $2, 'user', $3, $4)`, messageID, chatID, content, runID)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(ctx, `update chat_chats set updated_at = now() where id = $1`, chatID)
+	return err
+}
+
 func (s *Store) MessageByID(ctx context.Context, messageID string) (Message, bool, error) {
 	var message Message
 	err := s.db.QueryRow(ctx, `
-		select id, chat_id, role, content
+		select id, chat_id, role, content, steering_run_id
 		from chat_messages
-		where id = $1`, messageID).Scan(&message.ID, &message.ChatID, &message.Role, &message.Content)
+		where id = $1`, messageID).Scan(&message.ID, &message.ChatID, &message.Role, &message.Content, &message.SteeringRunID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Message{}, false, nil
 	}
@@ -242,10 +261,14 @@ func (s *Store) MessageByID(ctx context.Context, messageID string) (Message, boo
 
 func (s *Store) ListMessages(ctx context.Context, chatID string) ([]Message, error) {
 	rows, err := s.db.Query(ctx, `
-		select id, chat_id, role, content, created_at
-		from chat_messages
-		where chat_id = $1
-		order by created_at, id`, chatID)
+		select m.id, m.chat_id, m.role, m.content, m.created_at, m.steering_run_id,
+			case when m.steering_run_id is null then null else exists(
+				select 1 from agent_run_checkpoints c
+				where c.run_id=m.steering_run_id and c.kind='steering_message' and c.payload->>'message_id'=m.id
+			) end
+		from chat_messages m
+		where m.chat_id = $1
+		order by m.created_at, m.id`, chatID)
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +276,7 @@ func (s *Store) ListMessages(ctx context.Context, chatID string) ([]Message, err
 	messages := make([]Message, 0)
 	for rows.Next() {
 		var message Message
-		if err := rows.Scan(&message.ID, &message.ChatID, &message.Role, &message.Content, &message.CreatedAt); err != nil {
+		if err := rows.Scan(&message.ID, &message.ChatID, &message.Role, &message.Content, &message.CreatedAt, &message.SteeringRunID, &message.SteeringDelivered); err != nil {
 			return nil, err
 		}
 		messages = append(messages, message)

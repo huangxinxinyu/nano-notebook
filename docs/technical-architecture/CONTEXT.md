@@ -304,6 +304,10 @@ _Avoid_: Raw Provider response, Chat completion, chain of thought
 One Model Decision plus the complete Action batch it requests and every corresponding Action Result; a Final-only decision is a Step with no Actions. It is the indivisible unit of context continuation and compaction, not an Agent Run or infrastructure Attempt.
 _Avoid_: Agent Run, Model Call, partial Tool round
 
+**Steering Message**:
+A Member User Message addressed to a Run that is still queued or running. It admits no Run; the Controller delivers it at the Run's next decision boundary by appending a `steering_message` checkpoint before the decision it precedes, so the model sees it exactly once at a durable position. It is excluded from the Chat lane's turns and spends no Agent budget.
+_Avoid_: Follow-up message, new turn, interrupt, mid-run prompt edit
+
 **Decision Contract**:
 A versioned schema that constrains a model's structured decision without invoking an executable capability or producing an Action Result. A Provider may encode it with function-call syntax, but the Models Module normalizes it as decision data rather than an MCP Tool; `select_leader_route` is the Sprint 10 example.
 _Avoid_: Agent Tool, MCP Tool, Provider function-call syntax

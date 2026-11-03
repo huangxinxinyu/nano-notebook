@@ -253,10 +253,11 @@ func (r *ResearchRuntime) PrepareDecisionRequest(
 
 	model = meteredCompactionModel{model: model, usage: r, attempt: execution.Attempt}
 
+	trajectoryPrefix := withoutSteering(prefix)
 	rawUnits, err := ProjectChatLane(ctx, ChatLane{Turns: []ChatLaneTurn{{
 		MessageID: execution.InputMessageID,
 		Content:   researchOriginalRequestFromDecisionRequest(request),
-		Runs:      []ChatLaneRun{{RunID: execution.RunID, Prefix: &prefix}},
+		Runs:      []ChatLaneRun{{RunID: execution.RunID, Prefix: &trajectoryPrefix}},
 	}}}, nil)
 	if err != nil || len(rawUnits) < 2 {
 		return models.ModelRequest{}, ErrContextBudgetExceeded
@@ -666,7 +667,7 @@ func (r *ResearchRuntime) loadResearchArchivalSteps(ctx context.Context, runID s
 	rows, err := r.pool.Query(ctx, `
 		select sequence_no,decision_no,kind,payload_sha256
 		from agent_run_checkpoints
-		where run_id=$1 and decision_no between $2 and $3
+		where run_id=$1 and decision_no between $2 and $3 and kind in ('action_proposal','action_result')
 		order by sequence_no
 	`, runID, units[0].DecisionNo, units[len(units)-1].DecisionNo)
 	if err != nil {

@@ -1177,6 +1177,58 @@ test("hides the Deep Research progress panel immediately after its Run is stoppe
   expect(within(chat).getByText("Stopped")).toBeVisible();
 });
 
+test("steers the running agent instead of admitting a new run", async () => {
+  window.history.pushState(null, "", "/notebooks/nb_test");
+  const steerBodies: Array<{ id: string; content: string }> = [];
+  let adminMessagePosts = 0;
+  fetchHandler = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    if (url.endsWith("/api/v1/session")) return json({ user: { id: "usr_test", email: "learner@example.com" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test")) return json({ notebook: { id: "nb_test", title: "My Research Topic" } });
+    if (url.endsWith("/api/v1/notebooks/nb_test/sources")) return json({ sources: [] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/studio-outputs") && method === "GET") return json({ outputs: [] });
+    if (url.endsWith("/api/v1/notebooks/nb_test/source-discovery-sessions/latest")) return new Response(null, { status: 204 });
+    if (url.endsWith("/api/v1/notebooks/nb_test/chats") && method === "GET") return json({ chats: [{ id: "chat_test", notebook_id: "nb_test", title: "New chat" }] });
+    if (url.endsWith("/api/v1/chats/chat_test") && method === "GET") return json({
+      chat: { id: "chat_test", notebook_id: "nb_test", title: "New chat" },
+      messages: [{ id: "msg_research", chat_id: "chat_test", role: "user", content: "Research this", created_at: "2026-07-14T12:00:00Z" }],
+      runs: [{ id: "run_research", input_message_id: "msg_research", status: "running", error_code: null, started_at: "2026-07-14T12:00:01Z" }],
+      citations: [],
+      research_sessions: [{ id: "research_test", input_message_id: "msg_research", status: "running", execution_run_id: "run_research" }]
+    });
+    if (url.endsWith("/api/v1/research-sessions/research_test") && method === "GET") return json({
+      session: { id: "research_test", chat_id: "chat_test", input_message_id: "msg_research", status: "running", execution_run_id: "run_research" },
+      evidence: { discovered: 8, read: 3, failed: 0 }
+    });
+    if (url.endsWith("/api/v1/chats/chat_test/messages") && method === "POST") {
+      adminMessagePosts++;
+      return json({ error: { code: "active_run_conflict" } }, 409);
+    }
+    if (url.endsWith("/api/v1/agent-runs/run_research/steer") && method === "POST") {
+      const body = JSON.parse(String(init?.body)) as { id: string; content: string };
+      steerBodies.push(body);
+      return json({ message_id: body.id, run_id: "run_research" }, 202);
+    }
+    return json({ error: { code: "not_found" } }, 404);
+  };
+
+  render(<App />);
+  const user = userEvent.setup();
+  const chat = await screen.findByRole("region", { name: "Chat" });
+  const composer = await within(chat).findByRole("textbox", { name: "Message Nano Notebook" });
+  expect(composer).toHaveAttribute("placeholder", "Steer the running agent…");
+  await user.type(composer, "Only compare against 2024 results");
+  await user.click(within(chat).getByRole("button", { name: "Send message" }));
+
+  expect(await within(chat).findByText("Only compare against 2024 results")).toBeInTheDocument();
+  expect(within(chat).getByText("Will reach the agent at its next step")).toBeVisible();
+  expect(steerBodies).toHaveLength(1);
+  expect(steerBodies[0].content).toBe("Only compare against 2024 results");
+  expect(adminMessagePosts).toBe(0);
+  expect(within(chat).queryByRole("alert")).not.toBeInTheDocument();
+});
+
 test("reuses the User Message UUID when admission must be retried", async () => {
   window.history.pushState(null, "", "/notebooks/nb_test");
   const attemptedIDs: string[] = [];

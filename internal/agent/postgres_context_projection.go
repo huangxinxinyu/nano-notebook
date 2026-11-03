@@ -26,7 +26,8 @@ func (r *PostgresRuntime) loadChatLane(ctx context.Context, execution Execution,
 		)
 		select m.id,m.content
 		from chat_messages m,cutoff ff
-		where m.chat_id=$1 and m.role='user' and (m.created_at,m.id)<=(ff.created_at,ff.id)
+		where m.chat_id=$1 and m.role='user' and m.steering_run_id is null
+		  and (m.created_at,m.id)<=(ff.created_at,ff.id)
 		order by m.created_at,m.id
 	`, execution.ChatID, execution.InputMessageID)
 	if err != nil {

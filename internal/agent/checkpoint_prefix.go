@@ -31,8 +31,18 @@ type AcceptedProposal struct {
 	Actions    []AcceptedAction
 }
 
+// AcceptedSteering is a Member message delivered while the Run worked. It
+// precedes the decision numbered DecisionNo; several may precede one decision
+// and keep their checkpoint order.
+type AcceptedSteering struct {
+	DecisionNo int
+	MessageID  string
+	Content    string
+}
+
 type CheckpointPrefix struct {
 	Proposals         []AcceptedProposal
+	Steering          []AcceptedSteering
 	Final             *models.FinalDraft
 	AcceptedDecisions int
 	AcceptedActions   int
@@ -132,6 +142,26 @@ func LoadCheckpointPrefix(ctx context.Context, checkpoints []Checkpoint) (Checkp
 			prefix.AcceptedDecisions++
 			nextDecision++
 			finalAccepted = true
+		case CheckpointSteeringMessage:
+			if hasIncompleteProposal(prefix) || checkpoint.DecisionNo != nextDecision {
+				return CheckpointPrefix{}, invalidCheckpoint("unexpected Steering Message before decision %d", checkpoint.DecisionNo)
+			}
+			var payload steeringCheckpointPayload
+			if err := json.Unmarshal(checkpoint.Payload, &payload); err != nil {
+				return CheckpointPrefix{}, invalidCheckpoint("invalid Steering Message payload")
+			}
+			expected, err := NewSteeringCheckpoint(checkpoint.DecisionNo, payload.MessageID, payload.Content)
+			if err != nil || !checkpointMatches(checkpoint, expected) {
+				return CheckpointPrefix{}, invalidCheckpoint("Steering Message identity or payload mismatch")
+			}
+			for _, delivered := range prefix.Steering {
+				if delivered.MessageID == payload.MessageID {
+					return CheckpointPrefix{}, invalidCheckpoint("Steering Message %q delivered twice", payload.MessageID)
+				}
+			}
+			prefix.Steering = append(prefix.Steering, AcceptedSteering{
+				DecisionNo: checkpoint.DecisionNo, MessageID: payload.MessageID, Content: payload.Content,
+			})
 		default:
 			return CheckpointPrefix{}, invalidCheckpoint("unknown kind %q", checkpoint.Kind)
 		}

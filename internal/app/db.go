@@ -1993,6 +1993,22 @@ create table if not exists agent_run_checkpoints (
 	)
 );
 
+alter table agent_run_checkpoints drop constraint if exists agent_run_checkpoints_kind_check;
+alter table agent_run_checkpoints add constraint agent_run_checkpoints_kind_check check (
+	kind in ('action_proposal', 'action_result', 'final_draft', 'steering_message')
+);
+alter table agent_run_checkpoints drop constraint if exists agent_run_checkpoints_kind_shape_check;
+alter table agent_run_checkpoints add constraint agent_run_checkpoints_kind_shape_check check (
+	(kind = 'action_proposal' and action_index is null and action_id is null)
+	or (kind = 'action_result' and action_index >= 0 and char_length(action_id) >= 1)
+	or (kind = 'final_draft' and action_index is null and action_id is null)
+	or (kind = 'steering_message' and action_index is null and action_id is null)
+);
+
+alter table chat_messages add column if not exists steering_run_id text references agent_runs(id) on delete set null;
+create index if not exists chat_messages_steering_run_idx
+	on chat_messages(steering_run_id, created_at, id) where steering_run_id is not null;
+
 create table if not exists agent_context_compactions (
 	id text primary key check (char_length(id) between 3 and 255),
 	chat_id text not null references chat_chats(id) on delete cascade,

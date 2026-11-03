@@ -5,7 +5,9 @@ import {
   ThreadPrimitive,
   useAuiState,
   useExternalStoreRuntime,
-  type AssistantRuntime
+  type AppendMessage,
+  type AssistantRuntime,
+  type ExternalThreadQueueAdapter
 } from "@assistant-ui/react";
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react";
@@ -21,6 +23,10 @@ export type ChatPanelCopy = {
   emptyTitle: string;
   emptyBody: string;
   composerPlaceholder: string;
+  steeringPlaceholder: string;
+  steeringPendingLabel: string;
+  steeringDeliveredLabel: string;
+  steeringUndeliveredLabel: string;
   composerLabel: string;
   sendLabel: string;
   waitingLabel: string;
@@ -79,6 +85,8 @@ export type ChatPanelCopy = {
   submitRevisionLabel: string;
 };
 
+const EMPTY_QUEUE_ITEMS: ExternalThreadQueueAdapter["items"] = [];
+
 export function ChatPanelContent({ copy, controller, sources, onOpenSource, selectedSourceCount = 0 }: { copy: ChatPanelCopy; controller: ChatController; sources: MemberSource[]; onOpenSource: (source: MemberSource) => void; selectedSourceCount?: number }) {
   const messages = controller.snapshot?.messages ?? [];
   const runs = controller.snapshot?.runs ?? [];
@@ -86,16 +94,28 @@ export function ChatPanelContent({ copy, controller, sources, onOpenSource, sele
   const isRunning = run?.status === "queued" || run?.status === "running";
   const latestMessageID = messages.at(-1)?.id;
   const runtimeRef = useRef<AssistantRuntime | null>(null);
+  const submit = async (message: AppendMessage) => {
+    if (!await controller.send(message)) {
+      runtimeRef.current?.thread.composer.setText(appendMessageText(message));
+    }
+  };
   const runtime = useExternalStoreRuntime<ChatMessage>({
     messages,
     isLoading: controller.isLoading,
     isDisabled: !controller.snapshot,
-    isSendDisabled: isRunning,
+    isSendDisabled: false,
     isRunning,
-    onNew: async (message) => {
-      if (!await controller.send(message)) {
-        runtimeRef.current?.thread.composer.setText(appendMessageText(message));
-      }
+    onNew: submit,
+    // assistant-ui disables sending during a run unless the thread exposes a
+    // queue. Nano's queue is the server: a message sent during a run steers
+    // it, so every send goes through controller.send and nothing is held
+    // client-side.
+    queue: {
+      items: EMPTY_QUEUE_ITEMS,
+      enqueue: (message) => { void submit(message); },
+      steer: () => {},
+      remove: () => {},
+      clear: () => {}
     },
     convertMessage: (message) => ({
       id: message.id,
@@ -144,7 +164,7 @@ export function ChatPanelContent({ copy, controller, sources, onOpenSource, sele
               <button type="button" aria-pressed={controller.mode === "chat"} onClick={() => controller.setMode("chat")}>{copy.chatModeLabel}</button>
               <button type="button" aria-pressed={controller.mode === "research"} onClick={() => controller.setMode("research")}><MaterialSymbol name="travel_explore" size={17} />{copy.researchModeLabel}</button>
             </div>
-            <ComposerPrimitive.Input className="chat-composer-input" aria-label={copy.composerLabel} placeholder={copy.composerPlaceholder} rows={1} />
+            <ComposerPrimitive.Input className="chat-composer-input" aria-label={copy.composerLabel} placeholder={isRunning ? copy.steeringPlaceholder : copy.composerPlaceholder} rows={1} />
             <ComposerPrimitive.Send className="chat-send" aria-label={copy.sendLabel}>
               <MaterialSymbol name="arrow_upward" size={22} />
             </ComposerPrimitive.Send>
@@ -327,6 +347,20 @@ function ResearchPlanEditor({ copy, controller, plan, version }: { copy: ChatPan
 
 function UserMessage({ controller, copy, latestMessageID }: { controller: ChatController; copy: ChatPanelCopy; latestMessageID?: string }) {
   const messageID = useAuiState((state) => state.message.id);
+  const message = controller.snapshot?.messages.find((item) => item.id === messageID);
+  const steeringRun = message?.steering_run_id ? controller.snapshot?.runs.find((item) => item.id === message.steering_run_id) : undefined;
+  if (message?.steering_run_id) {
+    const steeringRunActive = steeringRun?.status === "queued" || steeringRun?.status === "running";
+    const steeringLabel = message.steering_delivered
+      ? copy.steeringDeliveredLabel
+      : steeringRunActive || !steeringRun ? copy.steeringPendingLabel : copy.steeringUndeliveredLabel;
+    return (
+      <MessagePrimitive.Root className="chat-message chat-message--user chat-message--steering">
+        <MessagePrimitive.Parts />
+        <span className="chat-run-duration" data-steering-state={message.steering_delivered ? "delivered" : steeringRunActive || !steeringRun ? "pending" : "undelivered"}>{steeringLabel}</span>
+      </MessagePrimitive.Root>
+    );
+  }
   const run = controller.snapshot?.runs.find((item) => item.input_message_id === messageID);
   const isResearch = controller.snapshot?.research_sessions.some((session) => session.input_message_id === messageID);
   const canRetry = !isResearch && messageID === latestMessageID && (run?.status === "failed" || run?.status === "cancelled");

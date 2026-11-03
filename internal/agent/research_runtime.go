@@ -320,6 +320,9 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 		{Role: models.RoleSystem, Content: system},
 		{Role: models.RoleUser, Content: "Original request:\n" + originalRequest + "\n\nAccepted Research Plan (immutable):\n" + planJSON},
 	}
+	// Delivered Steering Messages are recited after the trajectory instead of
+	// being interleaved in it; see researchSteeringRecitation.
+	trajectoryPrefix := withoutSteering(prefix)
 	var memory string
 	if isThresholdResearchExecution(execution) {
 		memory, err = r.loadResearchOperationalMemory(ctx, sessionID, len(definitions) > 0)
@@ -342,7 +345,7 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 	if isThresholdResearchExecution(execution) {
 		projected, err := ProjectChatLane(ctx, ChatLane{Turns: []ChatLaneTurn{{
 			MessageID: execution.InputMessageID, Content: originalRequest,
-			Runs: []ChatLaneRun{{RunID: execution.RunID, Prefix: &prefix}},
+			Runs: []ChatLaneRun{{RunID: execution.RunID, Prefix: &trajectoryPrefix}},
 		}}}, nil)
 		if err != nil {
 			return models.ModelRequest{}, err
@@ -374,7 +377,7 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 	} else if includeExactResearchSuffix(definitions, duplicateSteps) {
 		projected, err := ProjectChatLane(ctx, ChatLane{Turns: []ChatLaneTurn{{
 			MessageID: execution.InputMessageID, Content: originalRequest,
-			Runs: []ChatLaneRun{{RunID: execution.RunID, Prefix: &prefix}},
+			Runs: []ChatLaneRun{{RunID: execution.RunID, Prefix: &trajectoryPrefix}},
 		}}}, nil)
 		if err != nil {
 			return models.ModelRequest{}, err
@@ -385,6 +388,9 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 		}
 		exact := selectRecentResearchUnits(projected[1:], keepRecent)
 		messages = append(messages, FlattenContextUnits(exact)...)
+	}
+	if recitation := researchSteeringRecitation(prefix.Steering); recitation != "" {
+		messages = append(messages, models.ModelMessage{Role: models.RoleUser, Content: recitation})
 	}
 	return models.ModelRequest{
 		Model: execution.Model, Messages: messages, ActionDefinitions: cloneActionDefinitions(definitions),
@@ -966,7 +972,7 @@ func (r *ResearchRuntime) materializeCompletedStep(ctx context.Context, attempt 
 		return err
 	}
 	var startSeq, endSeq int
-	if err := tx.QueryRow(ctx, `select min(sequence_no),max(sequence_no) from agent_run_checkpoints where run_id=$1 and decision_no=$2`, attempt.RunID, decisionNo).Scan(&startSeq, &endSeq); err != nil {
+	if err := tx.QueryRow(ctx, `select min(sequence_no),max(sequence_no) from agent_run_checkpoints where run_id=$1 and decision_no=$2 and kind in ('action_proposal','action_result')`, attempt.RunID, decisionNo).Scan(&startSeq, &endSeq); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `insert into research_step_capsules(session_id,run_id,decision_no,start_checkpoint_seq,end_checkpoint_seq,content_markdown,source_checkpoint_sha256) values($1,$2,$3,$4,$5,$6,$7) on conflict(run_id,decision_no) do nothing`, sessionID, attempt.RunID, decisionNo, startSeq, endSeq, content, sourceHash); err != nil {

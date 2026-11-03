@@ -1093,6 +1093,10 @@ func (s *Server) agentRunByID(w http.ResponseWriter, r *http.Request) {
 		s.cancelRun(w, r, user.ID, parts[0])
 		return
 	}
+	if r.Method == http.MethodPost && parts[1] == "steer" {
+		s.steerRun(w, r, user.ID, parts[0])
+		return
+	}
 	if r.Method == http.MethodPost && parts[1] == "retry" {
 		s.retryRun(w, r, user.ID, parts[0])
 		return
@@ -1132,6 +1136,79 @@ func (s *Server) cancelRun(w http.ResponseWriter, r *http.Request, userID, runID
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"run": run})
+}
+
+var errRunNotSteerable = errors.New("agent run not steerable")
+
+// steerRun stores a Member message for a Run that is still working. The
+// Worker delivers it at the Run's next decision boundary; the message never
+// admits a new Run. Only a root Chat or Research execution Run may be steered:
+// a planning Run answers from its own questions, and a subagent has no Chat.
+func (s *Server) steerRun(w http.ResponseWriter, r *http.Request, userID, runID string) {
+	if !validCSRF(r) {
+		writeError(w, r, http.StatusForbidden, "csrf_required", "error.csrf_required")
+		return
+	}
+	var req struct {
+		ID      string `json:"id"`
+		Content string `json:"content"`
+	}
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if _, err := uuid.Parse(req.ID); err != nil || len(req.ID) != 36 || strings.TrimSpace(req.Content) == "" || len([]rune(req.Content)) > 8000 {
+		writeError(w, r, http.StatusBadRequest, "validation_failed", "error.message_invalid")
+		return
+	}
+	err := s.db.WithRequestPrincipal(r.Context(), userID, func(tx pgx.Tx) error {
+		var chatID *string
+		var status string
+		var planning, subagent bool
+		err := tx.QueryRow(r.Context(), `
+			select coalesce(run.chat_id,product.chat_id),run.status,
+				exists(select 1 from research_sessions session where session.planning_run_id=run.id),
+				exists(select 1 from agent_subagents child where child.child_run_id=run.id)
+			from agent_runs run
+			left join chat_runs product on product.root_agent_run_id=run.id
+			where run.id=$1 and coalesce(run.user_id,product.user_id)=$2
+			  and ((run.runtime_kind='legacy_role' and run.agent_role='leader') or run.runtime_kind='configured')
+			for update of run`, runID, userID).Scan(&chatID, &status, &planning, &subagent)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return agent.ErrRunNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if (status != "queued" && status != "running") || planning || subagent || chatID == nil {
+			return errRunNotSteerable
+		}
+		chatStore := chat.NewStore(tx)
+		existing, found, err := chatStore.MessageByID(r.Context(), req.ID)
+		if err != nil {
+			return err
+		}
+		if found {
+			if existing.ChatID != *chatID || existing.Role != "user" || existing.Content != req.Content ||
+				existing.SteeringRunID == nil || *existing.SteeringRunID != runID {
+				return chat.ErrMessageConflict
+			}
+			return nil
+		}
+		return chatStore.InsertSteeringMessage(r.Context(), req.ID, *chatID, runID, req.Content)
+	})
+	switch {
+	case errors.Is(err, agent.ErrRunNotFound):
+		writeError(w, r, http.StatusNotFound, "not_found", "error.run_not_found")
+	case errors.Is(err, errRunNotSteerable):
+		writeError(w, r, http.StatusConflict, "run_not_steerable", "error.run_not_steerable")
+	case errors.Is(err, chat.ErrMessageConflict) || isUniqueViolation(err, "chat_messages_pkey"):
+		writeError(w, r, http.StatusConflict, "message_id_conflict", "error.message_id_conflict")
+	case err != nil:
+		slog.ErrorContext(r.Context(), "Steering Message admission failed", "error", err, "run_id", runID)
+		writeError(w, r, http.StatusInternalServerError, "internal", "error.internal")
+	default:
+		writeJSON(w, http.StatusAccepted, map[string]any{"message_id": req.ID, "run_id": runID})
+	}
 }
 
 func (s *Server) retryRun(w http.ResponseWriter, r *http.Request, userID, sourceRunID string) {
@@ -1413,7 +1490,7 @@ func (s *Server) admitMessage(w http.ResponseWriter, r *http.Request, userID, ch
 			return err
 		}
 		if found {
-			if existing.ChatID != chatID || existing.Role != "user" || existing.Content != req.Content {
+			if existing.ChatID != chatID || existing.Role != "user" || existing.Content != req.Content || existing.SteeringRunID != nil {
 				return chat.ErrMessageConflict
 			}
 			var storedResearch bool

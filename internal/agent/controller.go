@@ -212,6 +212,28 @@ func (c *Controller) Execute(ctx context.Context, attempt Attempt) error {
 		}
 		recoveryBoundary = false
 
+		// A complete Action batch is the steering boundary: Member messages
+		// sent while the batch ran are checkpointed here, before the next
+		// decision, so the model sees them exactly once at a durable point.
+		if steeringRuntime, ok := c.runtime.(SteeringRuntime); ok {
+			pending, steeringErr := steeringRuntime.PendingSteering(ctx, attempt)
+			if steeringErr != nil {
+				return c.handleRuntimeError(ctx, attempt, steeringErr)
+			}
+			if len(pending) > 0 {
+				for _, message := range pending {
+					checkpoint, checkpointErr := NewSteeringCheckpoint(prefix.AcceptedDecisions+1, message.ID, message.Content)
+					if checkpointErr != nil {
+						return c.fail(ctx, attempt, "context_failed", checkpointErr)
+					}
+					if _, appendErr := c.runtime.AppendCheckpoint(ctx, attempt, checkpoint); appendErr != nil {
+						return c.handleRuntimeError(ctx, attempt, appendErr)
+					}
+				}
+				continue
+			}
+		}
+
 		var tokenBudgetTools map[string]bool
 		remainingActions := execution.ActionLimit - acceptedBusinessActions(prefix)
 		businessDecisionAvailable := acceptedBusinessDecisions(prefix) < execution.ActionDecisionLimit && remainingActions > 0

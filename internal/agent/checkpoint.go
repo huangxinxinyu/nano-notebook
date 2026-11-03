@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
+	"strings"
 
 	"github.com/huangxinxinyu/nano-notebook/internal/models"
 )
@@ -17,6 +19,9 @@ const (
 	CheckpointActionProposal CheckpointKind = "action_proposal"
 	CheckpointActionResult   CheckpointKind = "action_result"
 	CheckpointFinalDraft     CheckpointKind = "final_draft"
+	// CheckpointSteeringMessage records that a Member message sent while the
+	// Run was working was delivered to the model before the named decision.
+	CheckpointSteeringMessage CheckpointKind = "steering_message"
 )
 
 type PendingCheckpoint struct {
@@ -137,6 +142,38 @@ func NewFinalDraftCheckpoint(decisionNo int, draft models.FinalDraft) (PendingCh
 	return PendingCheckpoint{
 		IdentityKey:    fmt.Sprintf("decision:%d/final", decisionNo),
 		Kind:           CheckpointFinalDraft,
+		DecisionNo:     decisionNo,
+		PayloadVersion: 1,
+		Payload:        encoded,
+		PayloadSHA256:  hashPayload(encoded),
+	}, nil
+}
+
+type steeringCheckpointPayload struct {
+	MessageID string `json:"message_id"`
+	Content   string `json:"content"`
+}
+
+// maxSteeringContentBytes matches the chat_messages content limit.
+const maxSteeringContentBytes = 65536
+
+var steeringMessageIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,120}$`)
+
+// NewSteeringCheckpoint records delivery of one Steering Message before the
+// decision numbered decisionNo. It is not an Agent Step: it spends no model
+// call or Action budget and never changes AcceptedDecisions.
+func NewSteeringCheckpoint(decisionNo int, messageID, content string) (PendingCheckpoint, error) {
+	if decisionNo < 1 || !steeringMessageIDPattern.MatchString(messageID) ||
+		strings.TrimSpace(content) == "" || len(content) > maxSteeringContentBytes {
+		return PendingCheckpoint{}, errors.New("invalid Steering Message checkpoint")
+	}
+	encoded, err := json.Marshal(steeringCheckpointPayload{MessageID: messageID, Content: content})
+	if err != nil {
+		return PendingCheckpoint{}, err
+	}
+	return PendingCheckpoint{
+		IdentityKey:    fmt.Sprintf("decision:%d/steer:%s", decisionNo, messageID),
+		Kind:           CheckpointSteeringMessage,
 		DecisionNo:     decisionNo,
 		PayloadVersion: 1,
 		Payload:        encoded,

@@ -15,6 +15,8 @@ export type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   created_at: string;
+  steering_run_id?: string;
+  steering_delivered?: boolean;
 };
 
 export type AgentRun = {
@@ -112,6 +114,7 @@ export type ChatController = {
   research: ResearchSessionSnapshot | undefined;
   isResearchLoading: boolean;
   send: (message: AppendMessage) => Promise<boolean>;
+  activeRunID: string | null;
   editResearchPlan: (plan: ResearchPlan) => Promise<boolean>;
   startResearch: (planVersion: number) => Promise<boolean>;
   answerResearchQuestions: (actionID: string, answers: PlanningAnswer[], useRecommended: boolean) => Promise<boolean>;
@@ -195,14 +198,20 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
       } catch {
         return;
       }
+      let steered = false;
       queryClient.setQueryData<ChatSnapshot>(queryKey, (current) => {
         if (!current || projection.run.id !== activeRunID) return current;
+        steered = current.messages.some((item) => item.steering_run_id === projection.run.id);
         const messages = projection.message
           ? upsertMessage(current.messages, projection.message)
           : current.messages;
         return { ...current, messages, runs: upsertRun(current.runs, projection.run), citations: upsertCitations(current.citations, projection.citations ?? []) };
       });
-      if (projection.run.status === "completed" || projection.run.status === "failed" || projection.run.status === "cancelled") source.close();
+      if (projection.run.status === "completed" || projection.run.status === "failed" || projection.run.status === "cancelled") {
+        source.close();
+        // Steering delivery state lives on the messages, not the Run event.
+        if (steered) void queryClient.invalidateQueries({ queryKey });
+      }
     };
     source.addEventListener("run", onRun);
     return () => {
@@ -215,6 +224,11 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
     const content = message.role === "user" ? appendMessageText(message).trim() : "";
     const snapshot = snapshotQuery.data;
     if (!snapshot || !content) return false;
+    if (activeRunID) {
+      const outcome = await steer(activeRunID, content);
+      if (outcome !== "run_ended") return outcome === "sent";
+      // The Run finished before the message reached it: admit a new turn.
+    }
 
     const pending = command?.content === content && command.mode === mode
       ? command
@@ -255,6 +269,42 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
       await snapshotQuery.refetch();
     }
     return true;
+  }
+
+  // A message typed while a Run is working steers that Run instead of
+  // admitting a new one. The Worker delivers it at the next decision boundary.
+  async function steer(runID: string, content: string): Promise<"sent" | "failed" | "run_ended"> {
+    const snapshot = snapshotQuery.data;
+    if (!snapshot) return "failed";
+    const pending = command?.content === content && command.mode === mode
+      ? command
+      : { id: crypto.randomUUID(), content, time_zone: browserTimeZone(), mode };
+    setCommand(pending);
+    setError(null);
+    const response = await api(`/api/v1/agent-runs/${runID}/steer`, {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken() },
+      body: JSON.stringify({ id: pending.id, content })
+    });
+    if (!response.ok) {
+      if (response.status === 409) {
+        const refreshed = await snapshotQuery.refetch();
+        const stillActive = refreshed.data?.runs.some((item) => item.id === runID && (item.status === "queued" || item.status === "running"));
+        if (!stillActive) return "run_ended";
+      }
+      setError(copy.unavailableLabel);
+      return "failed";
+    }
+    const admitted = (await response.json()) as { message_id: string; run_id: string };
+    setCommand(null);
+    queryClient.setQueryData<ChatSnapshot>(queryKey, (current) => current ? {
+      ...current,
+      messages: upsertMessage(current.messages, {
+        id: admitted.message_id, chat_id: current.chat.id, role: "user", content,
+        created_at: new Date().toISOString(), steering_run_id: admitted.run_id, steering_delivered: false
+      })
+    } : current);
+    return "sent";
   }
 
   async function editResearchPlan(plan: ResearchPlan) {
@@ -391,6 +441,7 @@ export function usePrivateChat(notebookID: string, copy: ChatPanelCopy): ChatCon
     research: researchQuery.data,
     isResearchLoading: researchQuery.isLoading,
     send,
+    activeRunID,
     editResearchPlan,
     startResearch,
     answerResearchQuestions,

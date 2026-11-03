@@ -1437,6 +1437,7 @@ type recordingAction struct {
 	proceed         <-chan struct{}
 	attempts        []Attempt
 	crashReplaySafe bool
+	onExecute       func()
 }
 
 type unavailableRecordingAction struct {
@@ -1520,6 +1521,9 @@ func (a *recordingAction) Execute(ctx context.Context, request ActionRequest) (A
 	}
 	a.calls++
 	a.attempts = append(a.attempts, request.Attempt)
+	if a.onExecute != nil {
+		a.onExecute()
+	}
 	if a.started != nil {
 		select {
 		case a.started <- struct{}{}:

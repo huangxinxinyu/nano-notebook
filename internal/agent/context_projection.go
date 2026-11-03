@@ -89,7 +89,17 @@ func ProjectChatLane(ctx context.Context, lane ChatLane, projectResult Historica
 					return nil, projectionError("Run %q: %v", run.RunID, err)
 				}
 			}
+			// Steering Messages sit between complete Agent Steps, before the
+			// decision they were delivered for, in checkpoint order.
+			steeringIndex := 0
+			flushSteering := func(throughDecision int) {
+				for steeringIndex < len(prefix.Steering) && prefix.Steering[steeringIndex].DecisionNo <= throughDecision {
+					units = append(units, steeringContextUnit(run.RunID, prefix.Steering[steeringIndex]))
+					steeringIndex++
+				}
+			}
 			for _, proposal := range prefix.Proposals {
+				flushSteering(proposal.DecisionNo)
 				messages := make([]models.ModelMessage, 0, 1+len(proposal.Actions))
 				proposalMessage := models.ModelMessage{Role: models.RoleAssistant, ActionCalls: make([]models.ModelActionCall, 0, len(proposal.Actions))}
 				for _, action := range proposal.Actions {
@@ -122,6 +132,9 @@ func ProjectChatLane(ctx context.Context, lane ChatLane, projectResult Historica
 					Kind: ContextUnitAgentStep, MessageID: turn.MessageID, RunID: run.RunID,
 					DecisionNo: proposal.DecisionNo, Messages: messages,
 				})
+			}
+			for ; steeringIndex < len(prefix.Steering); steeringIndex++ {
+				units = append(units, steeringContextUnit(run.RunID, prefix.Steering[steeringIndex]))
 			}
 			if prefix.Final != nil {
 				units = append(units, ContextUnit{
@@ -179,9 +192,35 @@ func cloneCheckpointPrefix(prefix CheckpointPrefix) CheckpointPrefix {
 			}
 		}
 	}
+	cloned.Steering = append([]AcceptedSteering(nil), prefix.Steering...)
 	if prefix.Final != nil {
 		final := *prefix.Final
 		cloned.Final = &final
 	}
+	return cloned
+}
+
+// steeringContextMessage is the model-visible form of one Steering Message.
+// The marker tells the model the text arrived mid-run rather than as a new
+// question, so it adjusts the current work instead of starting over.
+func steeringContextMessage(steering AcceptedSteering) models.ModelMessage {
+	return models.ModelMessage{
+		Role:    models.RoleUser,
+		Content: "[Steering from the Member, received while you were working. Adjust the current work accordingly.]\n" + steering.Content,
+	}
+}
+
+func steeringContextUnit(runID string, steering AcceptedSteering) ContextUnit {
+	return ContextUnit{
+		Kind: ContextUnitUserMessage, MessageID: steering.MessageID, RunID: runID, DecisionNo: steering.DecisionNo,
+		Messages: []models.ModelMessage{steeringContextMessage(steering)},
+	}
+}
+
+// withoutSteering returns the prefix with delivered Steering Messages removed
+// from the trajectory, for projections that recite them elsewhere.
+func withoutSteering(prefix CheckpointPrefix) CheckpointPrefix {
+	cloned := cloneCheckpointPrefix(prefix)
+	cloned.Steering = nil
 	return cloned
 }
