@@ -71,7 +71,16 @@ type recordClaimInput struct {
 	Claim      string `json:"claim"`
 	Conditions string `json:"conditions,omitempty"`
 	Question   int    `json:"question,omitempty"`
+	// Stance says whether the card supports, contradicts, or qualifies the
+	// answer the report is heading toward for its question.
+	Stance string `json:"stance,omitempty"`
 }
+
+const (
+	claimStanceSupports    = "supports"
+	claimStanceContradicts = "contradicts"
+	claimStanceQualifies   = "qualifies"
+)
 
 type recordClaimOutput struct {
 	ID             string `json:"id"`
@@ -89,6 +98,7 @@ type researchClaim struct {
 	Claim      string
 	Conditions string
 	Question   int
+	Stance     string
 }
 
 type researchClaimRun struct {
@@ -133,7 +143,7 @@ func (*recordClaimAction) Definition() models.ActionDefinition {
 	return models.ActionDefinition{
 		Name:        recordClaimActionName,
 		Description: "Record one claim card: a verbatim quote from a Source read in this Run (a read_url page URL or a search_evidence source_id) and the claim it supports. Returns a card id such as c3 and whether the quote was found in the stored source text; a mismatch is still recorded. Cite cards in report prose as [c3]. All cards are listed in claims.md.",
-		InputSchema: json.RawMessage(fmt.Sprintf(`{"type":"object","additionalProperties":false,"required":["source","quote","claim"],"properties":{"source":{"type":"string","minLength":1,"maxLength":4096,"description":"The read page URL, or the Notebook source_id."},"quote":{"type":"string","minLength":1,"maxLength":%d,"description":"Verbatim source text; use ... to elide inside a long passage."},"claim":{"type":"string","minLength":1,"maxLength":%d,"description":"What this quote establishes, in the report language."},"conditions":{"type":"string","maxLength":%d,"description":"Scope, setting, version, or caveat that limits the claim."},"question":{"type":"integer","minimum":1,"maximum":%d,"description":"Number of the accepted plan's research question this card helps answer, counting from 1; assembly reports coverage per question."}}}`,
+		InputSchema: json.RawMessage(fmt.Sprintf(`{"type":"object","additionalProperties":false,"required":["source","quote","claim"],"properties":{"source":{"type":"string","minLength":1,"maxLength":4096,"description":"The read page URL, or the Notebook source_id."},"quote":{"type":"string","minLength":1,"maxLength":%d,"description":"Verbatim source text; use ... to elide inside a long passage."},"claim":{"type":"string","minLength":1,"maxLength":%d,"description":"What this quote establishes, in the report language."},"conditions":{"type":"string","maxLength":%d,"description":"Scope, setting, version, or caveat that limits the claim."},"question":{"type":"integer","minimum":1,"maximum":%d,"description":"Number of the accepted plan's research question this card helps answer, counting from 1; assembly reports coverage per question."},"stance":{"type":"string","enum":["supports","contradicts","qualifies"],"description":"Whether this card supports, contradicts, or narrows (qualifies) the answer the report is heading toward for its question; assembly flags questions whose cards all agree."}}}`,
 			claimRecordInputMaxQuote, claimRecordInputMaxClaim, claimRecordInputMaxCondit, claimRecordMaxQuestion)),
 	}
 }
@@ -203,6 +213,11 @@ func decodeRecordClaimInput(raw json.RawMessage) (recordClaimInput, error) {
 	}
 	if input.Question < 0 || input.Question > claimRecordMaxQuestion {
 		return recordClaimInput{}, fmt.Errorf("invalid record_claim input: question must be a research question number from 1 to %d", claimRecordMaxQuestion)
+	}
+	switch input.Stance {
+	case "", claimStanceSupports, claimStanceContradicts, claimStanceQualifies:
+	default:
+		return recordClaimInput{}, errors.New("invalid record_claim input: stance must be supports, contradicts, or qualifies")
 	}
 	return input, nil
 }
@@ -646,7 +661,7 @@ func collectResearchClaims(tree researchClaimTree) []researchClaim {
 				}
 				claims = append(claims, researchClaim{
 					recordClaimOutput: output, Quote: strings.TrimSpace(input.Quote),
-					Claim: strings.TrimSpace(input.Claim), Conditions: strings.TrimSpace(input.Conditions), Question: input.Question,
+					Claim: strings.TrimSpace(input.Claim), Conditions: strings.TrimSpace(input.Conditions), Question: input.Question, Stance: input.Stance,
 				})
 			}
 		}
@@ -734,6 +749,9 @@ func renderResearchClaimsMarkdown(claims []researchClaim) string {
 		question := ""
 		if claim.Question > 0 {
 			question = fmt.Sprintf(" Q%d", claim.Question)
+		}
+		if claim.Stance != "" {
+			question += " " + claim.Stance
 		}
 		fmt.Fprintf(&builder, "\n- [%s] (%s%s) %s\n", claim.ID, claim.Status, question, claim.Claim)
 		source := claim.Source

@@ -91,3 +91,23 @@ func TestResearchPlanAcceptsCommonListShapesAndNamesTheRest(t *testing.T) {
 		t.Fatalf("err=%v", err)
 	}
 }
+
+func TestPlannerV16RequiresDecisionLinkedResearchQuestions(t *testing.T) {
+	runtime := &ResearchPlanningRuntime{}
+	plan := func(questions string) models.ModelDecision {
+		return models.ModelDecision{Final: &models.FinalDraft{Text: `{"title":"t","objective":"o","scope":"s","research_questions":` + questions +
+			`,"investigation_tracks":["i"],"source_strategy":["s"],"analysis_method":["a"],"deliverable_outline":["d"],"completion_criteria":["c"],"clarifying_questions":[]}`}}
+	}
+	loose := plan(`["Q1: What are the approaches?","Q2: Does it hurt? — Decides: whether to build retrieval"]`)
+	if _, err := runtime.PrepareDecisionResponse(context.Background(), Execution{AgentConfigID: "research.planner@15"}, CheckpointPrefix{}, loose); err != nil {
+		t.Fatalf("planner v15 was held to the decision test: %v", err)
+	}
+	_, err := runtime.PrepareDecisionResponse(context.Background(), Execution{AgentConfigID: "research.planner@16"}, CheckpointPrefix{}, loose)
+	if err == nil || !strings.Contains(err.Error(), "Q1 lacks Decides: and Settled by:") || !strings.Contains(err.Error(), "Q2 lacks Settled by:") {
+		t.Fatalf("err=%v", err)
+	}
+	linked := plan(`["Q1: Does it hurt? — Decides: whether to build retrieval — Settled by: an independent replication"]`)
+	if _, err := runtime.PrepareDecisionResponse(context.Background(), Execution{AgentConfigID: "research.planner@16"}, CheckpointPrefix{}, linked); err != nil {
+		t.Fatalf("linked plan rejected: %v", err)
+	}
+}

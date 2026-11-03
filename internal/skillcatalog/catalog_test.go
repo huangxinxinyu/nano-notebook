@@ -95,3 +95,15 @@ func TestSkillMarkdownRejectsUnknownOrDuplicateMetadata(t *testing.T) {
 		}
 	}
 }
+
+func TestSourceReadingV4ReadsResultsCriticallyAndRecordsStance(t *testing.T) {
+	skill, ok := MustLoadEmbedded().Resolve("skill.source-reading", 4)
+	if !ok {
+		t.Fatal("missing skill.source-reading@4")
+	}
+	for _, required := range []string{"`stance`", "contradicts", "Reading a result", "against which baseline", "the table is the quote"} {
+		if !strings.Contains(skill.Body, required) {
+			t.Fatalf("source-reading v4 is missing %q", required)
+		}
+	}
+}

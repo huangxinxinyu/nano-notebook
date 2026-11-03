@@ -21,11 +21,17 @@ type researchQuestionCoverage struct {
 	CitedCards   int    `json:"cited_cards"`
 	Sources      int    `json:"sources"`
 	CitedSources int    `json:"cited_sources"`
+	// Dissenting counts usable cards whose stance contradicts or qualifies
+	// the answer; a question with cards but none dissenting is untested.
+	Dissenting int `json:"dissenting_cards"`
 }
 
 type researchQuestionCoverageReport struct {
 	Questions     []researchQuestionCoverage `json:"questions"`
 	UntaggedCards int                        `json:"untagged_cards"`
+	// StanceRecorded is false when no card in the Run carries a stance, so
+	// the dissent check stays quiet for executors that never set one.
+	StanceRecorded bool `json:"stance_recorded"`
 }
 
 type researchPlanQuestionLister interface {
@@ -74,6 +80,12 @@ func checkResearchQuestionCoverage(report string, claims []researchClaim, questi
 		tagged = true
 		source := normalizeClaimURL(firstNonEmpty(claim.URL, claim.Source))
 		coverage[index].Cards++
+		if claim.Stance != "" {
+			result.StanceRecorded = true
+		}
+		if claim.Stance == claimStanceContradicts || claim.Stance == claimStanceQualifies {
+			coverage[index].Dissenting++
+		}
 		sources[index][source] = true
 		if cited[claim.ID] {
 			coverage[index].CitedCards++
@@ -107,7 +119,7 @@ func citedResearchClaimIDs(report string, claims []researchClaim) map[string]boo
 }
 
 func researchQuestionCoverageGuidance(report researchQuestionCoverageReport) string {
-	var empty, uncited, single []string
+	var empty, uncited, single, untested []string
 	for _, question := range report.Questions {
 		label := fmt.Sprintf("Q%d", question.Question)
 		switch {
@@ -117,9 +129,11 @@ func researchQuestionCoverageGuidance(report researchQuestionCoverageReport) str
 			uncited = append(uncited, label)
 		case question.Sources < 2:
 			single = append(single, label)
+		case report.StanceRecorded && question.Dissenting == 0:
+			untested = append(untested, label)
 		}
 	}
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 4)
 	if len(empty) > 0 {
 		parts = append(parts, fmt.Sprintf("%s have no claim cards yet: discover and read sources for them, or state plainly in the report that the evidence was not found.", strings.Join(empty, ", ")))
 	}
@@ -128,6 +142,9 @@ func researchQuestionCoverageGuidance(report researchQuestionCoverageReport) str
 	}
 	if len(single) > 0 {
 		parts = append(parts, fmt.Sprintf("%s rest on a single source: look for independent evaluations, replications, or critiques before treating their answers as settled.", strings.Join(single, ", ")))
+	}
+	if len(untested) > 0 {
+		parts = append(parts, fmt.Sprintf("%s have cards that all support one answer and none that contradict or qualify it (dissenting_cards is 0): the answer has been sourced but not tested. Read the strongest critique or an independent evaluation and record what it says, whichever way it points, before treating the question as settled.", strings.Join(untested, ", ")))
 	}
 	if len(parts) == 0 {
 		return ""

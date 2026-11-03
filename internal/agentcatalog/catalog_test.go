@@ -13,7 +13,7 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		t.Fatal(err)
 	}
 	definitions := catalog.Definitions()
-	if got, want := len(definitions), 67; got != want {
+	if got, want := len(definitions), 69; got != want {
 		t.Fatalf("definitions=%d want=%d", got, want)
 	}
 	want := map[string]struct {
@@ -97,6 +97,14 @@ func TestEmbeddedCatalogContainsSprint11ProductionAgents(t *testing.T) {
 		"research.planner@15": {
 			executor: "research_planner", model: "agent.deep-research-deepseek@1",
 			tools: []string{"read_skill", "request_user_input", "web_search"},
+		},
+		"research.planner@16": {
+			executor: "research_planner", model: "agent.deep-research-deepseek@1",
+			tools: []string{"read_skill", "request_user_input", "web_search"},
+		},
+		"research.executor@43": {
+			executor: "research_root", model: "agent.deep-research-deepseek-flash@1",
+			tools: []string{"assemble_research_report", "complete_research", "edit_research_file", "inspect_source", "list_agents", "list_research_files", "read_research_file", "read_skill", "read_source", "read_tool_result", "read_url", "record_claim", "rewrite_todo_list", "run_python", "save_url_as_source", "search_evidence", "search_text", "spawn_agent", "update_todo_status", "wait_agent", "web_search", "write_research_file"},
 		},
 		"research.executor@42": {
 			executor: "research_root", model: "agent.deep-research-deepseek-flash@1",
@@ -786,5 +794,31 @@ func TestReleaseV55PinsTheCompletionDeclaration(t *testing.T) {
 	executor, ok := catalog.ResolveDefinition(MustParseReference("research.executor@42"))
 	if !ok || executor.Prompts["executor"].String() != "agent.deep-research-executor@18" || executor.Limits.ModelCalls != 200 {
 		t.Fatalf("executor=%+v ok=%v", executor, ok)
+	}
+}
+
+func TestReleaseV56PinsDecisionLinkedPlanningAndTestedQuestions(t *testing.T) {
+	catalog, err := LoadEmbedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, ok := catalog.ResolveRelease(MustParseReference("nano.default@56"))
+	if !ok || release.Roots["research"].String() != "research.executor@43" || release.Roots["research_planner"].String() != "research.planner@16" {
+		t.Fatalf("release=%+v ok=%v", release, ok)
+	}
+	planner, ok := catalog.ResolveDefinition(MustParseReference("research.planner@16"))
+	if !ok || planner.Prompts["planner"].String() != "agent.deep-research-planner@14" {
+		t.Fatalf("planner=%+v ok=%v", planner, ok)
+	}
+	executor, ok := catalog.ResolveDefinition(MustParseReference("research.executor@43"))
+	if !ok || executor.Prompts["executor"].String() != "agent.deep-research-executor@19" {
+		t.Fatalf("executor=%+v ok=%v", executor, ok)
+	}
+	skills := map[string]bool{}
+	for _, skill := range executor.Skills {
+		skills[skill.String()] = true
+	}
+	if !skills["skill.source-reading@4"] {
+		t.Fatalf("executor skills=%v", executor.Skills)
 	}
 }

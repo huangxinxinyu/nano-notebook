@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -219,13 +220,18 @@ func researchPlanningContext(now time.Time, timeZone string) string {
 	return fmt.Sprintf("Operational planning context: the current date is %s in %s. This is supplied to prevent stale or fabricated dates; it does not create a date cutoff unless the Member requested one.", now.In(location).Format("2006-01-02"), timeZone)
 }
 
-func (*ResearchPlanningRuntime) PrepareDecisionResponse(_ context.Context, _ Execution, _ CheckpointPrefix, decision models.ModelDecision) (models.ModelDecision, error) {
+func (*ResearchPlanningRuntime) PrepareDecisionResponse(_ context.Context, execution Execution, _ CheckpointPrefix, decision models.ModelDecision) (models.ModelDecision, error) {
 	if decision.Final == nil {
 		return decision, nil
 	}
 	plan, err := ValidateResearchPlanJSON(researchPlanCandidate(decision.Final.Text))
 	if err != nil {
 		return models.ModelDecision{}, fmt.Errorf("%w; your response began with %q, so return only the plan object starting with {", err, researchPlanResponseHead(decision.Final.Text))
+	}
+	if isDecisionLinkedPlannerExecution(execution) {
+		if err := validateDecisionLinkedResearchQuestions(plan); err != nil {
+			return models.ModelDecision{}, err
+		}
 	}
 	prepared := decision
 	final := *decision.Final
@@ -544,4 +550,48 @@ func researchPlanSyntaxDetail(text string, err error) string {
 		end++
 	}
 	return fmt.Sprintf(": %v at byte %d near %q; escape any double quote inside a string as \\\" or use 「」", syntax, offset, text[start:end])
+}
+
+// Planners from this version write each research question with the decision
+// it informs and the evidence that settles it, so execution can tell an
+// answered question from one that only looks answered.
+const decisionLinkedPlannerVersion = 16
+
+var (
+	researchQuestionDecidesPattern   = regexp.MustCompile(`(?i)\bDecides:\s*\S`)
+	researchQuestionSettledByPattern = regexp.MustCompile(`(?i)\bSettled by:\s*\S`)
+)
+
+func isDecisionLinkedPlannerExecution(execution Execution) bool {
+	reference, err := agentcatalog.ParseReference(execution.AgentConfigID)
+	return err == nil && reference.Identity == "research.planner" && reference.Version >= decisionLinkedPlannerVersion
+}
+
+// validateDecisionLinkedResearchQuestions names every question that lacks a
+// part, because the controller feeds the error back to the planner for a
+// rewrite.
+func validateDecisionLinkedResearchQuestions(plan json.RawMessage) error {
+	var object struct {
+		Questions []string `json:"research_questions"`
+	}
+	if err := json.Unmarshal(plan, &object); err != nil {
+		return err
+	}
+	var missing []string
+	for index, question := range object.Questions {
+		var parts []string
+		if !researchQuestionDecidesPattern.MatchString(question) {
+			parts = append(parts, "Decides:")
+		}
+		if !researchQuestionSettledByPattern.MatchString(question) {
+			parts = append(parts, "Settled by:")
+		}
+		if len(parts) > 0 {
+			missing = append(missing, fmt.Sprintf("Q%d lacks %s", index+1, strings.Join(parts, " and ")))
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("Research Plan research_questions must each read \"Q<n>: <question> — Decides: <what the Member does differently> — Settled by: <the evidence that settles it>\": %s", strings.Join(missing, "; "))
 }

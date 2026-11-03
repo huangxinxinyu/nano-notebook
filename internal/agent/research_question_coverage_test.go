@@ -58,3 +58,27 @@ func TestRecordClaimQuestionIsOptionalAndBounded(t *testing.T) {
 		t.Fatalf("markdown=%s", markdown)
 	}
 }
+
+func TestQuestionCoverageFlagsQuestionsWithoutDissentOnlyWhenStanceIsRecorded(t *testing.T) {
+	card := func(id, url string, question int, stance string) researchClaim {
+		return researchClaim{recordClaimOutput: recordClaimOutput{ID: id, URL: url, Source: url, Status: claimStatusVerified}, Question: question, Stance: stance}
+	}
+	questions := []string{"Q1", "Q2"}
+	unstanced := []researchClaim{card("a1", "https://x/1", 1, ""), card("b1", "https://x/2", 1, "")}
+	result, ok := checkResearchQuestionCoverage("[a1, b1]", unstanced, questions)
+	if !ok || result.StanceRecorded || strings.Contains(researchQuestionCoverageGuidance(result), "dissenting") {
+		t.Fatalf("unstanced run was flagged: %+v %q", result, researchQuestionCoverageGuidance(result))
+	}
+	stanced := []researchClaim{
+		card("a1", "https://x/1", 1, claimStanceSupports), card("b1", "https://x/2", 1, claimStanceSupports),
+		card("a2", "https://x/1", 2, claimStanceSupports), card("b2", "https://x/2", 2, claimStanceQualifies),
+	}
+	result, ok = checkResearchQuestionCoverage("[a1, b1] [a2, b2]", stanced, questions)
+	if !ok || !result.StanceRecorded || result.Questions[0].Dissenting != 0 || result.Questions[1].Dissenting != 1 {
+		t.Fatalf("result=%+v", result)
+	}
+	guidance := researchQuestionCoverageGuidance(result)
+	if !strings.Contains(guidance, "Q1 have cards that all support one answer") || strings.Contains(guidance, "Q2 have cards that all") {
+		t.Fatalf("guidance=%q", guidance)
+	}
+}

@@ -29,7 +29,7 @@ func TestEmbeddedCatalogContainsEveryProductionPrompt(t *testing.T) {
 		"agent.studio-data-table":                     "studio_data_table_result.v1",
 		"source-processing.image-evidence-normalizer": "image_evidence_regions.v1",
 	}
-	const extraVersions = 39 // chat composer upgrades plus final deep Research planner/executor/reporter/compactor upgrades, alongside their @1s
+	const extraVersions = 41 // chat composer upgrades plus final deep Research planner/executor/reporter/compactor upgrades, alongside their @1s
 	if got := len(catalog.Versions()); got != len(want)+extraVersions {
 		t.Fatalf("versions=%d want=%d", got, len(want)+extraVersions)
 	}
@@ -250,6 +250,30 @@ func TestExecutorV18DeclaresCompletionBeforeFinal(t *testing.T) {
 	for _, required := range []string{"call `complete_research`", "`not_found`", "sent back once", "declare again", "Only after `complete_research` accepts"} {
 		if !strings.Contains(prompt.Content, required) {
 			t.Fatalf("executor v18 is missing %q", required)
+		}
+	}
+}
+
+func TestPlannerV14LinksQuestionsToDecisionsAndPriors(t *testing.T) {
+	prompt, ok := MustLoadEmbedded().Resolve("agent.deep-research-planner", 14)
+	if !ok || prompt.Contract != "research_plan_text.v1" {
+		t.Fatalf("planner v14=%+v ok=%v", prompt, ok)
+	}
+	for _, required := range []string{"Prior: none stated", "Perspectives before questions", "The decision test", "Where the disagreement is", "Settled by:", "Decides:", "never as an extra round"} {
+		if !strings.Contains(prompt.Content, required) {
+			t.Fatalf("planner v14 is missing %q", required)
+		}
+	}
+}
+
+func TestExecutorV19ChoosesSourcesByWhatTheySettleAndTakesAPosition(t *testing.T) {
+	prompt, ok := MustLoadEmbedded().Resolve("agent.deep-research-executor", 19)
+	if !ok || prompt.Contract != "research_execution_text.v1" {
+		t.Fatalf("executor v19=%+v ok=%v", prompt, ok)
+	}
+	for _, required := range []string{"most likely to disagree", "set `stance`", "skill.source-reading@4", "state a position", "confirmed, overturned, or sharpened"} {
+		if !strings.Contains(prompt.Content, required) {
+			t.Fatalf("executor v19 is missing %q", required)
 		}
 	}
 }

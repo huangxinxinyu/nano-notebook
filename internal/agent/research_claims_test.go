@@ -516,3 +516,13 @@ func TestClaimsMarkdownDropsNearMatchCorrectedByLaterVerifiedCard(t *testing.T) 
 		t.Fatalf("a superseded card is not a failed one:\n%s", markdown)
 	}
 }
+
+func TestDecodeRecordClaimInputAcceptsOnlyKnownStances(t *testing.T) {
+	input, err := decodeRecordClaimInput(json.RawMessage(`{"source":"s","quote":"quote text","claim":"c","stance":"qualifies"}`))
+	if err != nil || input.Stance != claimStanceQualifies {
+		t.Fatalf("input=%+v err=%v", input, err)
+	}
+	if _, err := decodeRecordClaimInput(json.RawMessage(`{"source":"s","quote":"quote text","claim":"c","stance":"agrees"}`)); err == nil {
+		t.Fatal("accepted an unknown stance")
+	}
+}

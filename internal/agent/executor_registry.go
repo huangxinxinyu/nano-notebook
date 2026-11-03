@@ -252,6 +252,7 @@ func ResearchRootExecutorCapability() agentcatalog.ExecutorCapability {
 			agentcatalog.MustParseReference("skill.source-reading@1"):    true,
 			agentcatalog.MustParseReference("skill.source-reading@2"):    true,
 			agentcatalog.MustParseReference("skill.source-reading@3"):    true,
+			agentcatalog.MustParseReference("skill.source-reading@4"):    true,
 		},
 		Tools: map[string]bool{
 			"spawn_agent": true, "wait_agent": true, "list_agents": true,

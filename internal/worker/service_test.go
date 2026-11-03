@@ -95,7 +95,6 @@ func TestRetryableExecutionFailureIsExplicitlyRequeuedWithBackoff(t *testing.T) 
 	}
 }
 
-
 func TestProviderRetryAfterLengthensTheRequeueBackoff(t *testing.T) {
 	queue := &recordingQueue{jobs: []jobs.ClaimedJob{{ID: "job_one", RunID: "run_one", AttemptNo: 2, LeaseToken: "lease_one"}}, heartbeatOK: true}
 	executor := errorExecutor{err: &models.ModelError{Kind: models.ErrorUnavailable, Err: errors.New("private provider detail"), RetryAfter: 40 * time.Second}}
