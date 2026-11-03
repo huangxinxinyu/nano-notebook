@@ -1391,6 +1391,11 @@ create table if not exists research_report_versions (
 	primary key (session_id,version)
 );
 
+-- completion records how the Run ended: the accepted complete_research
+-- declaration (or undeclared) and the card yield per round of reading.
+alter table research_report_versions add column if not exists completion jsonb
+	check (completion is null or jsonb_typeof(completion)='object');
+
 create table if not exists research_evidence_ledger (
 	session_id text not null references research_sessions(id) on delete cascade,
 	url text not null check (char_length(url) between 1 and 4096),

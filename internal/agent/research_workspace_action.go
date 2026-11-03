@@ -759,6 +759,7 @@ func NewResearchWorkspaceActions(pool *pgxpool.Pool, store objectstore.Store) ([
 		newReadResearchFileAction(store, index, postgresResearchClaimBackend{pool: pool}),
 		newListResearchFilesAction(index),
 		&assembleResearchReportAction{store: store, index: index, barrier: postgresResearchSourceImportBarrier{pool: pool}, claims: postgresResearchClaimBackend{pool: pool}, sources: postgresResearchClaimBackend{pool: pool}, agents: postgresResearchClaimBackend{pool: pool}},
+		newCompleteResearchAction(store, pool),
 	}, nil
 }
 

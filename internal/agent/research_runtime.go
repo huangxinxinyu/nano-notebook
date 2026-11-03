@@ -84,6 +84,11 @@ func (*ResearchRuntime) PrepareDecisionResponse(_ context.Context, execution Exe
 		return decision, nil
 	}
 	if (!sourceFirst && hasAssembledResearchReport(prefix)) || (sourceFirst && hasAssembledResearchReportAfterImports(prefix)) {
+		if isResearchCompletionExecution(execution) && researchCompletionCallable(execution, prefix) {
+			if _, ok := acceptedResearchCompletion(prefix); !ok {
+				return models.ModelDecision{}, errors.New("Research Final needs an accepted complete_research declaration made after the last assemble_research_report: call complete_research with every plan question's status and the cards behind each answer, fix any problems it returns, then return Final")
+			}
+		}
 		return decision, nil
 	}
 	return models.ModelDecision{}, errors.New("Research completion signal has no assembled report; return a complete report or assemble the workspace first")
@@ -180,6 +185,7 @@ func (r *ResearchRuntime) TokenBudgetWrapUpTools(execution Execution) map[string
 	return map[string]bool{
 		"assemble_research_report": true, "list_agents": true, "list_research_files": true,
 		"read_research_file": true, "wait_agent": true, "write_research_file": true, "edit_research_file": true,
+		completeResearchActionName: true,
 	}
 }
 
@@ -761,7 +767,15 @@ func (r *ResearchRuntime) PublishFinal(ctx context.Context, attempt Attempt, dra
 		return err
 	}
 	stats, _ := json.Marshal(map[string]int{"discovered": discovered, "read": read, "failed": failed, "downgraded_unread_links": len(removedLinks)})
-	if _, err := tx.Exec(ctx, `insert into research_report_versions(session_id,version,producer_run_id,content_markdown,evidence_stats) values($1,$2,$3,$4,$5::jsonb)`, sessionID, reportVersion, attempt.RunID, reportText, string(stats)); err != nil {
+	tree, err := loadResearchClaimTree(ctx, tx, attempt.RunID)
+	if err != nil {
+		return err
+	}
+	completion, err := json.Marshal(buildResearchCompletionRecord(tree, attempt.RunID))
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `insert into research_report_versions(session_id,version,producer_run_id,content_markdown,evidence_stats,completion) values($1,$2,$3,$4,$5::jsonb,$6::jsonb)`, sessionID, reportVersion, attempt.RunID, reportText, string(stats), string(completion)); err != nil {
 		return err
 	}
 	messageID := "msg_" + uuid.NewString()

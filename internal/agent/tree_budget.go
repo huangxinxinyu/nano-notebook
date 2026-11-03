@@ -96,9 +96,13 @@ func (r *PostgresRuntime) RecordModelUsage(ctx context.Context, attempt Attempt,
 // ModelBudgetExhausted reads the token limit from the tree root's Definition,
 // so every Run in a Research tree, subagents included, shares one budget.
 func (r *PostgresRuntime) ModelBudgetExhausted(ctx context.Context, attempt Attempt) (bool, error) {
+	return modelBudgetExhaustedForRun(ctx, r.pool, attempt.RunID)
+}
+
+func modelBudgetExhaustedForRun(ctx context.Context, db DBTX, runID string) (bool, error) {
 	var limit, consumed int64
 	var countsSpent bool
-	err := r.pool.QueryRow(ctx, `
+	err := db.QueryRow(ctx, `
 		select coalesce((definition.limits->>'input_tokens')::bigint,0),tree.input_tokens_consumed,
 			tree.model_calls_consumed>=tree.model_call_limit or tree.actions_consumed>=tree.action_limit
 		from agent_runs run
@@ -107,7 +111,7 @@ func (r *PostgresRuntime) ModelBudgetExhausted(ctx context.Context, attempt Atte
 		join agent_definition_versions definition on definition.definition_identity=root.definition_identity
 			and definition.definition_version=root.definition_version
 		where run.id=$1
-	`, attempt.RunID).Scan(&limit, &consumed, &countsSpent)
+	`, runID).Scan(&limit, &consumed, &countsSpent)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}

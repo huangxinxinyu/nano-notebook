@@ -51,6 +51,7 @@ func TestNanoToolCapabilitiesSchedulesOnlySideEffectFreeToolsInParallel(t *testi
 		"web_search":               agentcatalog.ToolOrderedSync,
 		"write_research_file":      agentcatalog.ToolOrderedSync,
 		"edit_research_file":       agentcatalog.ToolOrderedSync,
+		"complete_research":        agentcatalog.ToolOrderedSync,
 	}
 	if len(capabilities) != len(want) {
 		t.Fatalf("capabilities=%+v", capabilities)
@@ -212,6 +213,7 @@ func productionToolCapabilities() map[string]agentcatalog.ToolCapability {
 		"web_search":               {Scheduling: agentcatalog.ToolOrderedSync},
 		"write_research_file":      {Scheduling: agentcatalog.ToolOrderedSync},
 		"edit_research_file":       {Scheduling: agentcatalog.ToolOrderedSync},
+		"complete_research":        {Scheduling: agentcatalog.ToolOrderedSync},
 		"run_python":               {Scheduling: agentcatalog.ToolOrderedSync},
 		"record_claim":             {Scheduling: agentcatalog.ToolParallel},
 		"request_user_input":       {Scheduling: agentcatalog.ToolOrderedSync},
