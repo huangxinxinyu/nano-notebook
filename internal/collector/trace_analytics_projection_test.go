@@ -91,3 +91,25 @@ func TestBuildTraceAnalyticsProjectionLeavesUnknownValuesUnknown(t *testing.T) {
 		t.Fatalf("unknown dimensions were coerced: %#v", analytics)
 	}
 }
+
+func TestBuildTraceAnalyticsProjectionCarriesPrefixCacheDiagnostics(t *testing.T) {
+	input, cached := int64(60000), int64(41000)
+	projection := collector.TraceProjection{
+		Summary: collector.TraceSummary{TraceID: "trace-prefix", NotebookID: "notebook-a", AgentName: "agent-a", Status: agentobs.StatusOK},
+		Spans: []collector.SpanProjection{{
+			TraceID: "trace-prefix", SpanID: "model-7", Name: semconv.ModelCall, Status: agentobs.StatusOK, StartedAtUnixNano: 1700,
+			StartAttributes: []agentobs.Attribute{
+				agentobs.Int64(semconv.DecisionOrdinalKey, 7),
+				agentobs.String("nano.context.system_sha256", "system-hash"),
+				agentobs.String("nano.context.tools_sha256", "tools-hash"),
+			},
+			Model: &collector.ModelAnalysisProjection{InputTokens: &input, CachedTokens: &cached},
+		}},
+	}
+	span := collector.BuildTraceAnalyticsProjection(projection).Spans[0]
+	if span.InputTokens == nil || *span.InputTokens != 60000 || span.CachedTokens == nil || *span.CachedTokens != 41000 ||
+		span.DecisionOrdinal == nil || *span.DecisionOrdinal != 7 || span.StartedAtUnixNano != 1700 ||
+		span.SystemSHA256 != "system-hash" || span.ToolsSHA256 != "tools-hash" {
+		t.Fatalf("span=%+v", span)
+	}
+}

@@ -89,6 +89,14 @@ type TraceSpanAnalyticsProjection struct {
 	ReasoningTokens     *int64           `json:"reasoning_tokens"`
 	ErrorCode           string           `json:"error_code"`
 	Retryable           *bool            `json:"retryable"`
+	// Prefix-cache diagnostics for model spans: input tokens beside cached
+	// ones, the decision's order within its Trace, and hashes of the request's
+	// leading system prompt and tool list.
+	InputTokens       *int64 `json:"input_tokens"`
+	DecisionOrdinal   *int64 `json:"decision_ordinal"`
+	StartedAtUnixNano int64  `json:"started_at_unix_nano"`
+	SystemSHA256      string `json:"system_sha256"`
+	ToolsSHA256       string `json:"tools_sha256"`
 }
 
 type TraceAnalyticsProjection struct {
@@ -148,6 +156,10 @@ func BuildTraceAnalyticsProjection(projection TraceProjection) TraceAnalyticsPro
 			row.SpanKind = "model"
 			row.Provider, row.RequestedModel, row.SelectedModel = span.Model.Provider, span.Model.RequestedModel, span.Model.SelectedModel
 			row.CachedTokens, row.ReasoningTokens = span.Model.CachedTokens, span.Model.ReasoningTokens
+			row.InputTokens, row.StartedAtUnixNano = span.Model.InputTokens, span.StartedAtUnixNano
+			row.DecisionOrdinal = intAttributeValue(span.StartAttributes, semconv.DecisionOrdinalKey)
+			row.SystemSHA256 = analyticsStringAttribute(span.StartAttributes, "nano.context.system_sha256")
+			row.ToolsSHA256 = analyticsStringAttribute(span.StartAttributes, "nano.context.tools_sha256")
 			models = append(models, span.Model)
 			if row.Provider != "" {
 				providers[row.Provider] = struct{}{}

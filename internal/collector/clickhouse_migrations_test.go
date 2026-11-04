@@ -34,6 +34,8 @@ func TestClickHouseMigrationsDefineDurableRawRecordContract(t *testing.T) {
 		"tool_name LowCardinality(String)",
 		"retryable Nullable(Bool)",
 		"ORDER BY (notebook_id, trace_id, span_id)",
+		"ADD COLUMN IF NOT EXISTS input_tokens Nullable(Int64) AFTER retryable",
+		"ADD COLUMN IF NOT EXISTS tools_sha256 String DEFAULT '' AFTER system_sha256",
 		"create table if not exists obs_replay_payload_refs",
 		"metadata_sha256 FixedString(64)",
 		"ORDER BY (attachment_id, metadata_sha256)",

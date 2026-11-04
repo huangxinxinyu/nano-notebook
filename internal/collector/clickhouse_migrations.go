@@ -25,12 +25,12 @@ func RunClickHouseMigrations(ctx context.Context, executor clickHouseMigrationEx
 // Agent Trace facts. Raw rows repeat their Trace descriptor intentionally so a
 // retained fact never depends on a mutable parent row.
 func ClickHouseMigrationsSQL() string {
-	return clickHouseRawMigrationSQL + "\n" + clickHouseSummaryMigrationSQL + "\n" + clickHouseAnalyticsColumnsMigrationSQL + "\n" + clickHouseSpanAnalyticsMigrationSQL + "\n" + clickHouseReplayRefsMigrationSQL + "\n" + clickHouseTombstonesMigrationSQL + "\n" + clickHousePurgeStateMigrationSQL
+	return clickHouseRawMigrationSQL + "\n" + clickHouseSummaryMigrationSQL + "\n" + clickHouseAnalyticsColumnsMigrationSQL + "\n" + clickHouseSpanAnalyticsMigrationSQL + "\n" + clickHouseSpanPrefixColumnsMigrationSQL + "\n" + clickHouseReplayRefsMigrationSQL + "\n" + clickHouseTombstonesMigrationSQL + "\n" + clickHousePurgeStateMigrationSQL
 }
 
 var clickHouseMigrationStatements = []string{
 	clickHouseRawMigrationSQL, clickHouseSummaryMigrationSQL, clickHouseAnalyticsColumnsMigrationSQL, clickHouseSpanAnalyticsMigrationSQL,
-	clickHouseReplayRefsMigrationSQL,
+	clickHouseSpanPrefixColumnsMigrationSQL, clickHouseReplayRefsMigrationSQL,
 	clickHouseTombstonesMigrationSQL, clickHousePurgeStateMigrationSQL,
 }
 
@@ -169,6 +169,17 @@ PARTITION BY toYYYYMM(started_at)
 ORDER BY (notebook_id, trace_id, span_id)
 TTL started_at + INTERVAL 90 DAY DELETE
 SETTINGS index_granularity = 8192;
+`
+
+// clickHouseSpanPrefixColumnsMigrationSQL adds the per-decision prefix-cache
+// diagnostics to model span rows; rows written before it read as NULL or empty.
+const clickHouseSpanPrefixColumnsMigrationSQL = `
+ALTER TABLE obs_span_analytics
+	ADD COLUMN IF NOT EXISTS input_tokens Nullable(Int64) AFTER retryable,
+	ADD COLUMN IF NOT EXISTS decision_ordinal Nullable(Int64) AFTER input_tokens,
+	ADD COLUMN IF NOT EXISTS span_started_unix_nano Int64 DEFAULT 0 AFTER decision_ordinal,
+	ADD COLUMN IF NOT EXISTS system_sha256 String DEFAULT '' AFTER span_started_unix_nano,
+	ADD COLUMN IF NOT EXISTS tools_sha256 String DEFAULT '' AFTER system_sha256;
 `
 
 const clickHouseReplayRefsMigrationSQL = `

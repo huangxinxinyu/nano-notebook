@@ -360,7 +360,8 @@ func (s *ClickHouseStore) writeSpanAnalyticsBatch(ctx context.Context, requests 
 		INSERT INTO obs_span_analytics (
 			trace_id, notebook_id, agent_name, started_at, span_id, span_kind, name,
 			tool_name, status, outcome, duration_nanoseconds, provider, requested_model,
-			selected_model, cached_tokens, reasoning_tokens, error_code, retryable, ingest_version
+			selected_model, cached_tokens, reasoning_tokens, error_code, retryable, ingest_version,
+			input_tokens, decision_ordinal, span_started_unix_nano, system_sha256, tools_sha256
 		) VALUES
 	`)
 	if err != nil {
@@ -380,6 +381,7 @@ func (s *ClickHouseStore) writeSpanAnalyticsBatch(ctx context.Context, requests 
 				string(span.SpanID), span.SpanKind, span.Name, span.ToolName, string(span.Status), span.Outcome,
 				span.DurationNanoseconds, span.Provider, span.RequestedModel, span.SelectedModel,
 				span.CachedTokens, span.ReasoningTokens, span.ErrorCode, span.Retryable, ingestVersion,
+				span.InputTokens, span.DecisionOrdinal, span.StartedAtUnixNano, span.SystemSHA256, span.ToolsSHA256,
 			); err != nil {
 				return err
 			}
