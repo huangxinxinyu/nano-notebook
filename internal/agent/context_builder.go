@@ -40,7 +40,7 @@ func (r *PostgresRuntime) BuildDecisionRequest(
 		}
 		activeCompaction = &compaction
 	}
-	request := buildProjectedRequest(execution, r.contextSystemPrompt(execution), units, definitions)
+	units, request := buildAgedProjectedRequest(execution, r.contextSystemPrompt(execution), units, definitions)
 	request.InvocationPolicy = execution.ModelInvocation
 	request, err = r.FinalizeDecisionRequest(ctx, execution, prefix, request)
 	if err != nil {

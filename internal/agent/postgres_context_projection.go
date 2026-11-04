@@ -231,6 +231,17 @@ func (r *PostgresRuntime) projectChatLane(ctx context.Context, execution Executi
 	return ProjectChatLane(ctx, lane, projectResult)
 }
 
+// buildAgedProjectedRequest ages the units' older Tool Results under the
+// Run's pinned policy, builds the request from the aged units, and returns
+// those units so telemetry describes what the model receives.
+func buildAgedProjectedRequest(execution Execution, systemPrompt string, units []ContextUnit, definitions []models.ActionDefinition) ([]ContextUnit, models.ModelRequest) {
+	aged, stats := agedRequestUnits(execution, units)
+	request := buildProjectedRequest(execution, systemPrompt, aged, definitions)
+	request.ContextTelemetry.AgedResultCount = stats.AgedResults
+	request.ContextTelemetry.AgedResultBytes = stats.AgedBytes
+	return aged, request
+}
+
 func buildProjectedRequest(execution Execution, systemPrompt string, units []ContextUnit, definitions []models.ActionDefinition) models.ModelRequest {
 	messages := make([]models.ModelMessage, 0, 1+len(units))
 	messages = append(messages, models.ModelMessage{Role: models.RoleSystem, Content: systemPrompt})

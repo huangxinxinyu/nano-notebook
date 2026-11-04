@@ -33,6 +33,11 @@ func researchReaderKeptPages(execution Execution) int {
 		reference.Identity != "research.executor" || reference.Version < researchReaderContextVersion {
 		return 0
 	}
+	// From v45 readers rely on Tool Result aging: rewriting an earlier page on
+	// every new page broke the provider's prefix cache once per page.
+	if isFrozenPrefixResearchDefinition(reference) {
+		return 0
+	}
 	if reference.Version >= researchReaderTwoPageVersion {
 		return 2
 	}

@@ -73,7 +73,7 @@ func (r *PostgresRuntime) prepareDecisionRequest(
 		}
 	}
 	systemPrompt := r.contextSystemPrompt(execution)
-	request := buildProjectedRequest(execution, systemPrompt, projected, definitions)
+	projected, request := buildAgedProjectedRequest(execution, systemPrompt, projected, definitions)
 	request.InvocationPolicy = execution.ModelInvocation
 	request, err = r.FinalizeDecisionRequest(ctx, execution, prefix, request)
 	if err != nil {
@@ -159,7 +159,7 @@ func (r *PostgresRuntime) prepareDecisionRequest(
 	if err != nil {
 		return models.ModelRequest{}, err
 	}
-	afterRequest := buildProjectedRequest(execution, systemPrompt, candidateUnits, definitions)
+	_, afterRequest := buildAgedProjectedRequest(execution, systemPrompt, candidateUnits, definitions)
 	afterRequest.InvocationPolicy = execution.ModelInvocation
 	afterRequest, err = r.FinalizeDecisionRequest(ctx, execution, prefix, afterRequest)
 	if err != nil {
@@ -184,7 +184,7 @@ func (r *PostgresRuntime) prepareDecisionRequest(
 	if err != nil {
 		return models.ModelRequest{}, err
 	}
-	acceptedRequest := buildProjectedRequest(execution, systemPrompt, acceptedUnits, definitions)
+	acceptedUnits, acceptedRequest := buildAgedProjectedRequest(execution, systemPrompt, acceptedUnits, definitions)
 	acceptedRequest.InvocationPolicy = execution.ModelInvocation
 	acceptedRequest, err = r.FinalizeDecisionRequest(ctx, execution, prefix, acceptedRequest)
 	if err != nil {
@@ -415,6 +415,8 @@ func attachContextTelemetry(request *models.ModelRequest, execution Execution, u
 		TodoCompletedCount:         statusTelemetry.TodoCompletedCount,
 		TodoCancelledCount:         statusTelemetry.TodoCancelledCount,
 		MaxToolInputRepeatCount:    statusTelemetry.MaxToolInputRepeatCount,
+		AgedResultCount:            statusTelemetry.AgedResultCount,
+		AgedResultBytes:            statusTelemetry.AgedResultBytes,
 	}
 	if compaction != nil {
 		request.ContextTelemetry.CompactionID = compaction.ID

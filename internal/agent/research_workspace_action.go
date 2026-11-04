@@ -335,7 +335,7 @@ func (a *readResearchFileAction) Available(Execution) (bool, string) {
 func (*readResearchFileAction) Definition() models.ActionDefinition {
 	return models.ActionDefinition{
 		Name:        "read_research_file",
-		Description: "Read the latest checkpoint-accepted version of one logical Markdown or data file from this Research Run's MinIO workspace. claims.md always lists every recorded claim card.",
+		Description: "Read the latest checkpoint-accepted version of one logical Markdown or data file from this Research Run's MinIO workspace. claims.md always lists every recorded claim card; leads.md lists every unread Evidence Ledger lead, recommended first.",
 		InputSchema: json.RawMessage(`{"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string","minLength":1,"maxLength":96}}}`),
 	}
 }
@@ -353,13 +353,11 @@ func (a *readResearchFileAction) Execute(ctx context.Context, request ActionRequ
 	if a == nil || a.store == nil || a.index == nil {
 		return ActionResult{Status: ActionDomainError, ErrorCode: "research_workspace_unavailable"}, nil
 	}
-	if input.Path == researchClaimsPath && a.claims != nil {
-		content, err := a.claims.ClaimsMarkdown(ctx, request.Attempt.RunID)
-		if err != nil {
-			return ActionResult{}, err
-		}
+	if content, ok, err := a.readVirtualResearchFile(ctx, request.Attempt.RunID, input.Path); err != nil {
+		return ActionResult{}, err
+	} else if ok {
 		digest := sha256.Sum256([]byte(content))
-		output, err := json.Marshal(researchWorkspaceReadOutput{Path: researchClaimsPath, Content: content, SHA256: hex.EncodeToString(digest[:]), Bytes: int64(len(content))})
+		output, err := json.Marshal(researchWorkspaceReadOutput{Path: input.Path, Content: content, SHA256: hex.EncodeToString(digest[:]), Bytes: int64(len(content))})
 		if err != nil {
 			return ActionResult{}, err
 		}
@@ -387,9 +385,40 @@ func (a *readResearchFileAction) Execute(ctx context.Context, request ActionRequ
 	return ActionResult{Status: ActionSucceeded, Output: output}, nil
 }
 
+// readVirtualResearchFile serves the Run-derived files that no workspace
+// object backs: claims.md and leads.md.
+func (a *readResearchFileAction) readVirtualResearchFile(ctx context.Context, runID, path string) (string, bool, error) {
+	switch path {
+	case researchClaimsPath:
+		if a.claims == nil {
+			return "", false, nil
+		}
+		content, err := a.claims.ClaimsMarkdown(ctx, runID)
+		return content, err == nil, err
+	case researchLeadsPath:
+		leads, ok := a.claims.(researchLeadsReader)
+		if !ok {
+			return "", false, nil
+		}
+		content, err := leads.LeadsMarkdown(ctx, runID)
+		return content, err == nil, err
+	default:
+		return "", false, nil
+	}
+}
+
+// researchLeadsReader serves the virtual leads.md workspace file.
+type researchLeadsReader interface {
+	LeadsMarkdown(ctx context.Context, runID string) (string, error)
+}
+
+func isVirtualResearchFile(path string) bool {
+	return path == researchClaimsPath || path == researchLeadsPath
+}
+
 func decodeReadResearchFileInput(raw json.RawMessage) (readResearchFileInput, error) {
 	var input readResearchFileInput
-	if decodeExactJSON(raw, &input) != nil || (input.Path != researchClaimsPath && validateResearchWorkspacePath(input.Path, true) != nil) {
+	if decodeExactJSON(raw, &input) != nil || (!isVirtualResearchFile(input.Path) && validateResearchWorkspacePath(input.Path, true) != nil) {
 		return readResearchFileInput{}, errors.New("invalid read_research_file input")
 	}
 	return input, nil

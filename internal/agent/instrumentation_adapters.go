@@ -53,6 +53,8 @@ func InvokeDecisionModel(ctx context.Context, tracer *agentobs.Tracer, model Dec
 		agentobs.String(semconv.InputHashKey, modelRequestHash(request)),
 		agentobs.Bool(semconv.ActionDefinitionsKey, len(request.ActionDefinitions) > 0),
 		agentobs.Int64(semconv.ActionDefinitionCountKey, int64(len(request.ActionDefinitions))),
+		agentobs.String(TraceKeySystemPromptSHA256, modelRequestSystemHash(request)),
+		agentobs.String(TraceKeyActionDefinitionsSHA256, modelRequestToolsHash(request)),
 	}
 	startAttributes = append(startAttributes, modelContextTraceAttributes(request.ContextTelemetry)...)
 	if options.Role != "" {
@@ -128,6 +130,8 @@ func modelContextTraceAttributes(metadata models.ModelContextTelemetry) []agento
 		agentobs.Int64(TraceKeyContextInputTokens, int64(metadata.InputTokens)),
 		agentobs.String(TraceKeyContextInputTokenSource, metadata.InputTokenSource),
 		agentobs.Int64(TraceKeyExactSuffixTokens, int64(metadata.ExactSuffixTokens)),
+		agentobs.Int64(TraceKeyAgedResultCount, int64(metadata.AgedResultCount)),
+		agentobs.Int64(TraceKeyAgedResultBytes, int64(metadata.AgedResultBytes)),
 		agentobs.Int64(TraceKeyOverflowRecoveryAttempt, int64(metadata.OverflowRecoveryAttempt)),
 		agentobs.Bool(TraceKeyAgentStatusInjected, metadata.AgentStatusInjected),
 		agentobs.Int64(TraceKeyAgentStatusBytes, int64(metadata.AgentStatusBytes)),
@@ -319,6 +323,29 @@ func modelTerminal(metadata models.ModelCallMetadata, callErr error) agentobs.Sp
 		attributes = append(attributes, agentobs.String(semconv.ErrorKindKey, kind))
 	}
 	return agentobs.SpanEnd{Name: semconv.ModelCall, Status: status, Attributes: attributes}
+}
+
+// modelRequestSystemHash and modelRequestToolsHash identify the two parts of
+// a request that lead the provider's prompt. A provider prefix cache is
+// reused only up to the first changed byte, so a change in either between two
+// decisions of one Run invalidates the cache for the whole request.
+func modelRequestSystemHash(request models.ModelRequest) string {
+	hash := sha256.New()
+	for _, message := range request.Messages {
+		if message.Role != models.RoleSystem {
+			break
+		}
+		_, _ = fmt.Fprintf(hash, "%s\x00", message.Content)
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func modelRequestToolsHash(request models.ModelRequest) string {
+	hash := sha256.New()
+	for _, definition := range request.ActionDefinitions {
+		_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%s\x00", definition.Name, definition.Description, definition.InputSchema)
+	}
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 func modelRequestHash(request models.ModelRequest) string {

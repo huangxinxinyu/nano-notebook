@@ -433,3 +433,25 @@ func int64Attribute(record agentobs.Record, key string) int64 {
 	}
 	return 0
 }
+
+func TestModelRequestLeadingHashesSeparateSystemToolsAndTrajectory(t *testing.T) {
+	base := models.ModelRequest{
+		Messages:          []models.ModelMessage{{Role: models.RoleSystem, Content: "rules"}, {Role: models.RoleUser, Content: "q"}},
+		ActionDefinitions: []models.ActionDefinition{{Name: "read_url", Description: "read", InputSchema: json.RawMessage(`{}`)}},
+	}
+	grown := base
+	grown.Messages = append(append([]models.ModelMessage(nil), base.Messages...), models.ModelMessage{Role: models.RoleUser, Content: "status"})
+	if modelRequestSystemHash(base) != modelRequestSystemHash(grown) || modelRequestToolsHash(base) != modelRequestToolsHash(grown) {
+		t.Fatal("a trajectory change moved a leading hash")
+	}
+	changed := base
+	changed.Messages = []models.ModelMessage{{Role: models.RoleSystem, Content: "rules + budget notice"}, base.Messages[1]}
+	if modelRequestSystemHash(base) == modelRequestSystemHash(changed) {
+		t.Fatal("a system change kept its hash")
+	}
+	paused := base
+	paused.ActionDefinitions = nil
+	if modelRequestToolsHash(base) == modelRequestToolsHash(paused) {
+		t.Fatal("a tool-list change kept its hash")
+	}
+}

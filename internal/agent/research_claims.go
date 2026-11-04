@@ -979,6 +979,24 @@ func (b postgresResearchClaimBackend) ClaimsMarkdown(ctx context.Context, runID 
 	return renderResearchClaimsMarkdown(collectResearchClaims(tree)), nil
 }
 
+// LeadsMarkdown serves the virtual leads.md workspace file: every unread
+// Evidence Ledger lead of the Run's Research Session.
+func (b postgresResearchClaimBackend) LeadsMarkdown(ctx context.Context, runID string) (string, error) {
+	var sessionID string
+	err := b.pool.QueryRow(ctx, `select id from research_sessions where execution_run_id=nano_research_root_run($1)`, runID).Scan(&sessionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return renderResearchLeadsMarkdown(nil), nil
+	}
+	if err != nil {
+		return "", err
+	}
+	entries, err := loadResearchLedgerEntries(ctx, b.pool, sessionID)
+	if err != nil {
+		return "", err
+	}
+	return renderResearchLeadsMarkdown(entries), nil
+}
+
 // ResearchClaims returns every card recorded in the Run's Research tree.
 func (b postgresResearchClaimBackend) ResearchClaims(ctx context.Context, runID string) ([]researchClaim, error) {
 	tree, err := b.ClaimTree(ctx, runID)

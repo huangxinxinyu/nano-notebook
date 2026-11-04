@@ -58,6 +58,15 @@ func (a *researchDeduplicatingAction) Execute(ctx context.Context, request Actio
 	if executorIdentity == nil || *executorIdentity != "research_root" {
 		return a.action.Execute(ctx, request)
 	}
+	if isFrozenPrefixResearchDefinition(request.Definition) {
+		paused, err := researchPausedForAction(ctx, a.pool, request.Attempt.RunID, request.ActionID, a.action.Definition().Name)
+		if err != nil {
+			return ActionResult{}, err
+		}
+		if paused {
+			return ActionResult{Status: ActionDomainError, Error: researchToolPausedError(a.action.Definition().Name)}, nil
+		}
+	}
 	rows, err := a.pool.Query(ctx, `select payload from agent_run_checkpoints where run_id=$1 and kind='action_proposal' order by sequence_no`, request.Attempt.RunID)
 	if err != nil {
 		return ActionResult{}, err

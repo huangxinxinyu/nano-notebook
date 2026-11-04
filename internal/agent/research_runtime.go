@@ -268,7 +268,24 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 	if workflow != "" {
 		system += "\n\nMandatory Research workflow Skill:\n" + workflow
 	}
-	if summaries, err := researchOnDemandSkillSummaries(skillAllowlist, definitions, r.skills); err != nil {
+	// From research.executor@45 the system prompt is fixed for the Run and
+	// the tool list is not narrowed by repeat pauses: per-decision state goes
+	// to one runtime notice after the trajectory, so the provider's prefix
+	// cache survives it. Earlier Definitions keep their system-prompt notices.
+	frozen := isFrozenPrefixResearchExecution(execution)
+	var notices []string
+	notice := func(text string) {
+		if frozen {
+			notices = append(notices, text)
+		} else {
+			system += "\n\n" + text
+		}
+	}
+	summaryDefinitions := definitions
+	if frozen {
+		summaryDefinitions = []models.ActionDefinition{{Name: "read_skill"}}
+	}
+	if summaries, err := researchOnDemandSkillSummaries(skillAllowlist, summaryDefinitions, r.skills); err != nil {
 		return models.ModelRequest{}, err
 	} else if summaries != "" {
 		system += "\n\n" + summaries
@@ -280,9 +297,11 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 		if exhausted, err := r.ModelBudgetExhausted(ctx, execution.Attempt); err != nil {
 			return models.ModelRequest{}, err
 		} else if exhausted {
-			system += "\n\n" + researchTokenBudgetPrompt
+			notice(researchTokenBudgetPrompt)
 		}
 	}
+	// The runtime starts the scouts before the Run's first decision, so the
+	// list is fixed for the Run and belongs in the system prompt.
 	if scouts, err := r.researchScoutsPrompt(ctx, execution); err != nil {
 		return models.ModelRequest{}, err
 	} else if scouts != "" {
@@ -294,7 +313,7 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 			return models.ModelRequest{}, err
 		}
 		if projection != "" {
-			system += "\n\n" + projection
+			notice(projection)
 		}
 	}
 	duplicateSteps := consecutiveResearchDuplicateSteps(prefix)
@@ -306,15 +325,25 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 		recovery := planResearchDuplicateRecovery(duplicateSteps, unreadURLs, definitions)
 		definitions = recovery.definitions
 		if recovery.directive != "" {
-			system += "\n\n" + recovery.directive
+			directive := recovery.directive
+			if frozen {
+				directive = strings.Replace(directive, " Exact recent calls were removed from this request to reduce copying bias.", "", 1)
+			}
+			notice(directive)
 		}
-		var paused []string
-		if definitions, paused = pauseRepeatedResearchTools(prefix, duplicateSteps, definitions); len(paused) > 0 {
-			system += "\n\n" + fmt.Sprintf("Repeat circuit breaker: %s is paused for this decision because your last %d decisions only repeated completed inputs. Use the results you already have: read an unread lead, record claim cards, or draft and assemble the report.", strings.Join(paused, ", "), duplicateSteps)
+		if frozen {
+			if paused := researchPausedToolNames(prefix); len(paused) > 0 {
+				notice(researchPausedToolsNotice(paused, duplicateSteps))
+			}
+		} else {
+			var paused []string
+			if definitions, paused = pauseRepeatedResearchTools(prefix, duplicateSteps, definitions); len(paused) > 0 {
+				notice(fmt.Sprintf("Repeat circuit breaker: %s is paused for this decision because your last %d decisions only repeated completed inputs. Use the results you already have: read an unread lead, record claim cards, or draft and assemble the report.", strings.Join(paused, ", "), duplicateSteps))
+			}
 		}
 	}
 	if len(definitions) == 0 {
-		system += "\n\n" + researchFinalOnlyPrompt()
+		notice(researchFinalOnlyPrompt())
 	}
 	messages := []models.ModelMessage{
 		{Role: models.RoleSystem, Content: system},
@@ -324,10 +353,11 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 	// being interleaved in it; see researchSteeringRecitation.
 	trajectoryPrefix := withoutSteering(prefix)
 	var memory string
+	var agingStats toolResultAgingStats
 	if isThresholdResearchExecution(execution) {
-		memory, err = r.loadResearchOperationalMemory(ctx, sessionID, len(definitions) > 0)
+		memory, err = r.loadResearchOperationalMemory(ctx, execution, sessionID, len(definitions) > 0)
 	} else {
-		memory, err = r.loadResearchMemory(ctx, sessionID, len(definitions) > 0)
+		memory, err = r.loadResearchMemory(ctx, execution, sessionID, len(definitions) > 0)
 	}
 	if err != nil {
 		return models.ModelRequest{}, err
@@ -369,11 +399,16 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 		if err != nil {
 			return models.ModelRequest{}, err
 		}
+		trajectory, agingStats = agedRequestUnits(execution, trajectory)
 		flattened := FlattenContextUnits(trajectory)
 		if kept := researchReaderKeptPages(execution); kept > 0 {
 			flattened = elideEarlierReaderPages(flattened, kept)
 		}
 		messages = assembleThresholdResearchMessages(messages[0], messages[1], flattened, memory)
+		if frozen && memory != "" {
+			// The ledger is runtime state, not the model's own words.
+			messages[len(messages)-1].Role = models.RoleUser
+		}
 	} else if includeExactResearchSuffix(definitions, duplicateSteps) {
 		projected, err := ProjectChatLane(ctx, ChatLane{Turns: []ChatLaneTurn{{
 			MessageID: execution.InputMessageID, Content: originalRequest,
@@ -389,13 +424,19 @@ func (r *ResearchRuntime) buildDecisionRequest(ctx context.Context, execution Ex
 		exact := selectRecentResearchUnits(projected[1:], keepRecent)
 		messages = append(messages, FlattenContextUnits(exact)...)
 	}
+	if len(notices) > 0 {
+		messages = append(messages, models.ModelMessage{Role: models.RoleUser, Content: renderResearchRuntimeNotices(notices)})
+	}
 	if recitation := researchSteeringRecitation(prefix.Steering); recitation != "" {
 		messages = append(messages, models.ModelMessage{Role: models.RoleUser, Content: recitation})
 	}
-	return models.ModelRequest{
+	request := models.ModelRequest{
 		Model: execution.Model, Messages: messages, ActionDefinitions: cloneActionDefinitions(definitions),
 		InvocationPolicy: execution.ModelInvocation,
-	}, nil
+	}
+	request.ContextTelemetry.AgedResultCount = agingStats.AgedResults
+	request.ContextTelemetry.AgedResultBytes = agingStats.AgedBytes
+	return request, nil
 }
 
 // assembleThresholdResearchMessages puts the Evidence Ledger after the
@@ -557,7 +598,8 @@ func consecutiveResearchDuplicateSteps(prefix CheckpointPrefix) int {
 		}
 		duplicateStep := true
 		for _, action := range proposal.Actions {
-			if action.Result == nil || action.Result.Status != ActionDomainError || !isResearchDuplicateResult(*action.Result) {
+			if action.Result == nil || action.Result.Status != ActionDomainError ||
+				(!isResearchDuplicateResult(*action.Result) && !isResearchToolPausedResult(*action.Result)) {
 				duplicateStep = false
 				break
 			}
@@ -1256,15 +1298,15 @@ func combineResearchRollup(previous string, parts []string) string {
 	return compactMarkdownByParagraph(content, researchRollupMarkdownLimit)
 }
 
-func (r *ResearchRuntime) loadResearchMemory(ctx context.Context, sessionID string, includeDiscovered bool) (string, error) {
-	return r.loadResearchMemoryProjection(ctx, sessionID, includeDiscovered, true)
+func (r *ResearchRuntime) loadResearchMemory(ctx context.Context, execution Execution, sessionID string, includeDiscovered bool) (string, error) {
+	return r.loadResearchMemoryProjection(ctx, execution, sessionID, includeDiscovered, true)
 }
 
-func (r *ResearchRuntime) loadResearchOperationalMemory(ctx context.Context, sessionID string, includeDiscovered bool) (string, error) {
-	return r.loadResearchMemoryProjection(ctx, sessionID, includeDiscovered, false)
+func (r *ResearchRuntime) loadResearchOperationalMemory(ctx context.Context, execution Execution, sessionID string, includeDiscovered bool) (string, error) {
+	return r.loadResearchMemoryProjection(ctx, execution, sessionID, includeDiscovered, false)
 }
 
-func (r *ResearchRuntime) loadResearchMemoryProjection(ctx context.Context, sessionID string, includeDiscovered, includeLegacyArtifacts bool) (string, error) {
+func (r *ResearchRuntime) loadResearchMemoryProjection(ctx context.Context, execution Execution, sessionID string, includeDiscovered, includeLegacyArtifacts bool) (string, error) {
 	var builder strings.Builder
 	if includeLegacyArtifacts {
 		var rollup string
@@ -1301,46 +1343,34 @@ func (r *ResearchRuntime) loadResearchMemoryProjection(ctx context.Context, sess
 			fmt.Fprintf(&builder, "Step Capsule %d:\n%s\n\n", item.decision, item.content)
 		}
 	}
-	evidenceRows, err := r.pool.Query(ctx, `select url,coalesce(final_url,''),title,status from research_evidence_ledger where session_id=$1 order by first_seen_at,url`, sessionID)
+	entries, err := loadResearchLedgerEntries(ctx, r.pool, sessionID)
 	if err != nil {
 		return "", err
 	}
-	var discovered, read, failed int
-	readURLs := make([]string, 0)
-	builder.WriteString("Evidence Ledger:\n")
-	for evidenceRows.Next() {
-		var url, finalURL, title, status string
-		if err := evidenceRows.Scan(&url, &finalURL, &title, &status); err != nil {
-			return "", err
-		}
-		if finalURL == "" {
-			finalURL = url
-		}
-		switch status {
-		case "read":
-			read++
-			if len(readURLs) < 80 {
-				readURLs = append(readURLs, finalURL)
-			}
-		case "failed":
-			failed++
-		default:
-			discovered++
-		}
-		if includeResearchLedgerURL(status, includeDiscovered) {
-			fmt.Fprintf(&builder, "- [%s](%s) — %s\n", title, finalURL, status)
-		}
-	}
-	if err := evidenceRows.Err(); err != nil {
-		evidenceRows.Close()
-		return "", err
-	}
-	evidenceRows.Close()
 	recentQueries, err := r.loadRecentResearchQueries(ctx, sessionID)
 	if err != nil {
 		return "", err
 	}
-	directive := buildResearchRoutingDirective(discovered, read, failed, readURLs, recentQueries)
+	counts := countResearchLedger(entries)
+	if isCompactLedgerResearchExecution(execution) {
+		directive := buildResearchRoutingDirective(counts.Discovered, counts.Read, counts.Failed, nil, recentQueries)
+		return directive + "\n" + compactMarkdownByParagraph(builder.String(), researchMemoryMarkdownLimit) + renderResearchLedgerBlock(entries, includeDiscovered, researchMemoryUnreadLeadLimit), nil
+	}
+	readURLs := make([]string, 0)
+	builder.WriteString("Evidence Ledger:\n")
+	for _, entry := range entries {
+		finalURL := entry.FinalURL
+		if finalURL == "" {
+			finalURL = entry.URL
+		}
+		if entry.Status == "read" && len(readURLs) < researchLedgerReadURLDirective {
+			readURLs = append(readURLs, finalURL)
+		}
+		if includeResearchLedgerURL(entry.Status, includeDiscovered) {
+			fmt.Fprintf(&builder, "- [%s](%s) — %s\n", entry.Title, finalURL, entry.Status)
+		}
+	}
+	directive := buildResearchRoutingDirective(counts.Discovered, counts.Read, counts.Failed, readURLs, recentQueries)
 	return directive + "\n" + compactMarkdownByParagraph(builder.String(), researchMemoryMarkdownLimit), nil
 }
 

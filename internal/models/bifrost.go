@@ -81,6 +81,8 @@ type ModelContextTelemetry struct {
 	TodoCompletedCount         int
 	TodoCancelledCount         int
 	MaxToolInputRepeatCount    int
+	AgedResultCount            int
+	AgedResultBytes            int
 }
 
 type ModelInvocationPolicy struct {

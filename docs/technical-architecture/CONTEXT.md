@@ -156,6 +156,14 @@ _Avoid_: Mutable step status, process snapshot, partial-token continuation, Dura
 The deterministic, Provider-neutral context rebuilt for each Model Call from the pinned Agent Definition and Prompt plus the current Chat's single linear causal history across Agent Runs. It projects each User Message and every accepted Run Checkpoint in order, representing a completed Action round as its Assistant proposal followed by every matching Action Result; an Agent Context Compaction may summarize an older prefix while retaining a token-bounded exact suffix.
 _Avoid_: Agent memory service, Provider thread, session tree, active-branch projection, raw transcript, hidden reasoning
 
+**Tool Result Aging**:
+The deterministic Agent Context Projection layer between an inline Action Result and an Agent Context Compaction. Once an Agent Step is older than the retained recent Steps, its large Results are projected as a short shell naming the durable Result Checkpoint reference, while the Tool call and its input stay exact; the boundary advances in whole batches of Steps so the Provider prefix cache breaks once per batch. A Research Run may read an aged Result back through `read_tool_result`; no model call, summary, or Checkpoint rewrite is involved. Pinned by Definition version (`research.executor@44`, `chat.leader@8`); from `research.executor@45` readers keep 4 recent Steps and age in batches of 4 instead of rewriting earlier pages.
+_Avoid_: Compaction, summary, truncation of the Checkpoint, history deletion
+
+**Stable Request Prefix**:
+The rule that the leading parts of a model request, the tool list and the system prompt, contain only text fixed for the whole Agent Run, because a Provider prefix cache is reused only up to the first byte that differs from an earlier request. Per-decision state, such as budget, Source import, duplicate-recovery, pause, and final-only notices, the Evidence Ledger, and Agent Status, is injected after the trajectory as user messages; a tool paused by repeated calls stays listed and is refused when it executes. Earlier trajectory messages change only in whole batches (Tool Result Aging) or at a Compaction. Research follows it from `research.executor@45`.
+_Avoid_: Mid-run system-prompt edits, removing a tool for one decision, rewriting an earlier Tool Result on every decision
+
 **Agent Context Compaction**:
 An append-only, rolling summary boundary that replaces an older cross-Run Chat context prefix only inside later Agent Context Projections while the original Messages and Run Checkpoints remain durable authority. Work appended after one Compaction remains exact until the growing request crosses its pinned trigger again; a successor then summarizes the newly old prefix and preserves a new recent token-bounded suffix. A Compaction never separates an Agent Step.
 _Avoid_: History deletion, Checkpoint rewrite, message-count truncation, memory snapshot

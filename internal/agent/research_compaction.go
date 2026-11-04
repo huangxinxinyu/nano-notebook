@@ -882,6 +882,7 @@ func attachResearchContextTelemetry(request *models.ModelRequest, execution Exec
 		TodoRevision: status.TodoRevision, TodoPendingCount: status.TodoPendingCount, TodoInProgressCount: status.TodoInProgressCount,
 		TodoCompletedCount: status.TodoCompletedCount, TodoCancelledCount: status.TodoCancelledCount,
 		MaxToolInputRepeatCount: status.MaxToolInputRepeatCount,
+		AgedResultCount:         status.AgedResultCount, AgedResultBytes: status.AgedResultBytes,
 	}
 }
 
